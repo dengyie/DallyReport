@@ -39,6 +39,19 @@ const DEFAULT_IMAGE_PROMPT_FILE = path.join(
   "图片生成提示词",
   "GitHub 日报海报提示词.md",
 );
+const DEFAULT_AI_IMAGE_PROMPT_FILE = path.join(
+  HOME,
+  "Library",
+  "Mobile Documents",
+  "iCloud~md~obsidian",
+  "Documents",
+  "obsidian-note",
+  "Note",
+  "AI",
+  "AI 提示词",
+  "图片生成提示词",
+  "AI 日报海报提示词.md",
+);
 const DEFAULT_IMAGE_REF_IMAGE = path.join(
   HOME,
   "Library",
@@ -138,6 +151,11 @@ export function assertGrokCreds() {
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 export function loadConfig({ date = null } = {}) {
+  const imageEnabled = (() => {
+    const raw = val("IMAGE_ENABLED");
+    if (raw == null) return true;
+    return raw === "1" || raw.toLowerCase() === "true";
+  })();
   const config = {
     grokSearchDir: val("GROK_SEARCH_DIR") || DEFAULT_GROK_SEARCH_DIR,
     obsidianDir: val("OBSIDIAN_DIR") || DEFAULT_OBSIDIAN_DIR,
@@ -186,6 +204,8 @@ export function loadConfig({ date = null } = {}) {
     // not threaded through here (kept out of the returned config like grok creds).
     imagePromptFile: val("IMAGE_PROMPT_FILE") || DEFAULT_IMAGE_PROMPT_FILE,
     imageRefImage: val("IMAGE_REF_IMAGE") || DEFAULT_IMAGE_REF_IMAGE,
+    aiImagePromptFile: val("AI_IMAGE_PROMPT_FILE") || DEFAULT_AI_IMAGE_PROMPT_FILE,
+    aiImageRefImage: val("AI_IMAGE_REF_IMAGE") || val("IMAGE_REF_IMAGE") || DEFAULT_IMAGE_REF_IMAGE,
     imageModel: val("IMAGE_MODEL") || DEFAULT_IMAGE_MODEL,
     imageSize: val("IMAGE_SIZE") || DEFAULT_IMAGE_SIZE,
     imageTimeoutMs: positiveInt("IMAGE_TIMEOUT_MS", DEFAULT_IMAGE_TIMEOUT_MS),
@@ -193,9 +213,11 @@ export function loadConfig({ date = null } = {}) {
     imageRetries: int("IMAGE_RETRIES", DEFAULT_IMAGE_RETRIES),
     // When true, generate the poster after the GitHub section and embed it in
     // GitHub.md. Set IMAGE_ENABLED=false to skip entirely (e.g. offline runs).
-    imageEnabled: (() => {
-      const raw = val("IMAGE_ENABLED");
-      if (raw == null) return true; // on by default
+    imageEnabled,
+    // AI poster defaults to the global image switch, but can be disabled alone.
+    aiImageEnabled: (() => {
+      const raw = val("AI_IMAGE_ENABLED");
+      if (raw == null) return imageEnabled;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
   };
@@ -209,7 +231,11 @@ export function validateRuntimePaths(config) {
     ["OBSIDIAN_DIR", config?.obsidianDir],
     ["IMAGE_PROMPT_FILE", config?.imagePromptFile],
     ["IMAGE_REF_IMAGE", config?.imageRefImage],
+    ["AI_IMAGE_PROMPT_FILE", config?.aiImagePromptFile],
   ];
+  if (val("AI_IMAGE_REF_IMAGE")) {
+    checks.push(["AI_IMAGE_REF_IMAGE", config?.aiImageRefImage]);
+  }
   for (const [name, target] of checks) {
     if (!target) continue;
     try {

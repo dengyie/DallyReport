@@ -305,5 +305,7 @@ export async function aiNewsSection(config) {
     synthFailed: synthAttemptedAndFailed,
     sourceCount: sources.length,
     linuxdoCount,
+    // Reuse the sanitized, linux.do-first source set for the AI poster.
+    sources,
   };
 }

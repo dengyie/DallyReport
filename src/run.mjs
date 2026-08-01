@@ -2,15 +2,18 @@
 // Entry: orchestrate the AI + GitHub sections concurrently, write each to the
 // Obsidian vault, and print a summary. One section failing never blocks the other.
 //
-// After the GitHub section lands, an extra step generates a GitHub 日榜简报 poster
-// image (vault prompt + reference image -> CPA /images/edits) and embeds it into
-// GitHub.md. The poster step is opt-out (IMAGE_ENABLED) and never blocks the
-// text sections.
+// After each text section lands, optional poster steps generate GitHub.png and
+// AI.png from vault prompts + reference images and embed them into their Markdown.
+// Poster generation is independently gated and never blocks the text sections.
 
 import { loadConfig, validateRuntimePaths } from "./config.mjs";
 import { aiNewsSection } from "./sections/ai-news.mjs";
 import { githubTrendingSection } from "./sections/github-trending.mjs";
-import { generateGithubPoster } from "./image-gen.mjs";
+import {
+  generateGithubPoster,
+  generateAiPoster,
+  hasAiPosterHeadlines,
+} from "./image-gen.mjs";
 import { writeSection, rescueMarkdown } from "./obsidian.mjs";
 
 function todayLocal() {
@@ -118,6 +121,38 @@ async function run() {
     }
   } else if (config.imageEnabled && !names.includes("github")) {
     // running a non-github section with image enabled — nothing to do
+  }
+
+  // AI poster follows the same isolation rule as GitHub poster: AI.md is first
+  // written without the image, and only rewritten with the embed after PNG
+  // generation succeeds. A failed poster never removes or corrupts AI.md.
+  if (config.imageEnabled && config.aiImageEnabled && names.includes("ai")) {
+    const aiIndex = names.indexOf("ai");
+    const ar = results[aiIndex];
+    const av = ar.status === "fulfilled" ? ar.value : null;
+    if (av && av.ok && hasAiPosterHeadlines(av.sources)) {
+      try {
+        const poster = await generateAiPoster(config, av.sources, {});
+        if (poster.ok && poster.file) {
+          const embedded = embedPosterInMarkdown(av.markdown, "AI.png");
+          const written2 = await writeSection(config, av.name, embedded);
+          if (written2.error) {
+            poster.embedError = written2.error;
+          }
+          posterLines.push(`${poster.ok ? "✅" : "⚠️"} AIPoster: ${poster.summary} → ${poster.file}${poster.embedError ? "（嵌入失败，PNG 已落地）" : ""}`);
+        } else {
+          posterLines.push(`⚠️ AIPoster: ${poster.summary}${poster.error ? `（${poster.error.code}）` : ""}`);
+        }
+      } catch (e) {
+        posterLines.push(`❌ AIPoster: ${e?.message || e}`);
+      }
+    } else if (av && !av.ok) {
+      posterLines.push("⏭️ AIPoster: 跳过（AI 板块失败，未生成海报）");
+    } else if (av) {
+      posterLines.push("⏭️ AIPoster: 跳过（无有效新闻标题）");
+    } else if (ar.status === "rejected") {
+      posterLines.push("⏭️ AIPoster: 跳过（AI 板块执行失败，未生成海报）");
+    }
   }
 
   const summary = names.map((n, i) => {

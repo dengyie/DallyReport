@@ -9,6 +9,10 @@ const ENV_KEYS = [
   "OBSIDIAN_DIR",
   "IMAGE_PROMPT_FILE",
   "IMAGE_REF_IMAGE",
+  "AI_IMAGE_PROMPT_FILE",
+  "AI_IMAGE_REF_IMAGE",
+  "AI_IMAGE_ENABLED",
+  "IMAGE_ENABLED",
   "IMAGE_SIPS_TIMEOUT_MS",
   "GROK_DAYS",
 ];
@@ -53,6 +57,10 @@ test("loadConfig: derives portable defaults from the current home directory", as
       ),
     );
     assert.equal(config.imageSipsTimeoutMs, 15000);
+    assert.match(config.aiImagePromptFile, /图片生成提示词[\\/]AI 日报海报提示词\.md$/);
+    assert.equal(config.aiImageRefImage, config.imageRefImage);
+    assert.equal(config.imageEnabled, true);
+    assert.equal(config.aiImageEnabled, config.imageEnabled);
   });
 });
 
@@ -63,6 +71,9 @@ test("loadConfig: explicit paths and sips timeout override defaults", async () =
       OBSIDIAN_DIR: "/tmp/custom-vault",
       IMAGE_PROMPT_FILE: "/tmp/prompt.md",
       IMAGE_REF_IMAGE: "/tmp/ref.png",
+      AI_IMAGE_PROMPT_FILE: "/tmp/ai-prompt.md",
+      AI_IMAGE_REF_IMAGE: "/tmp/ai-ref.png",
+      AI_IMAGE_ENABLED: "false",
       IMAGE_SIPS_TIMEOUT_MS: "23000",
     },
     async () => {
@@ -71,9 +82,32 @@ test("loadConfig: explicit paths and sips timeout override defaults", async () =
       assert.equal(config.obsidianDir, "/tmp/custom-vault");
       assert.equal(config.imagePromptFile, "/tmp/prompt.md");
       assert.equal(config.imageRefImage, "/tmp/ref.png");
+      assert.equal(config.aiImagePromptFile, "/tmp/ai-prompt.md");
+      assert.equal(config.aiImageRefImage, "/tmp/ai-ref.png");
+      assert.equal(config.aiImageEnabled, false);
       assert.equal(config.imageSipsTimeoutMs, 23000);
     },
   );
+});
+
+test("loadConfig: image switches compose global and AI poster gates", async () => {
+  await withEnv({ IMAGE_ENABLED: "false" }, async () => {
+    const config = loadConfig();
+    assert.equal(config.imageEnabled, false);
+    assert.equal(config.aiImageEnabled, false, "AI defaults to the global switch");
+  });
+
+  await withEnv({ IMAGE_ENABLED: "false", AI_IMAGE_ENABLED: "true" }, async () => {
+    const config = loadConfig();
+    assert.equal(config.imageEnabled, false);
+    assert.equal(config.aiImageEnabled, true, "explicit AI setting is preserved for the runtime gate");
+  });
+
+  await withEnv({ IMAGE_ENABLED: "true", AI_IMAGE_ENABLED: "false" }, async () => {
+    const config = loadConfig();
+    assert.equal(config.imageEnabled, true);
+    assert.equal(config.aiImageEnabled, false);
+  });
 });
 
 test("loadConfig: rejects invalid positive sips timeout", async () => {
@@ -88,11 +122,13 @@ test("validateRuntimePaths: reports missing paths without throwing", () => {
     obsidianDir: "/definitely/missing/vault",
     imagePromptFile: "/definitely/missing/prompt.md",
     imageRefImage: "/definitely/missing/ref.png",
+    aiImagePromptFile: "/definitely/missing/ai-prompt.md",
   };
   assert.deepEqual(validateRuntimePaths(config), [
     "GROK_SEARCH_DIR 不存在：/definitely/missing/grok",
     "OBSIDIAN_DIR 不存在：/definitely/missing/vault",
     "IMAGE_PROMPT_FILE 不存在：/definitely/missing/prompt.md",
     "IMAGE_REF_IMAGE 不存在：/definitely/missing/ref.png",
+    "AI_IMAGE_PROMPT_FILE 不存在：/definitely/missing/ai-prompt.md",
   ]);
 });
