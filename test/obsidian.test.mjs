@@ -26,6 +26,34 @@ test("writeSection: atomically overwrites an existing report", async () => {
   assert.deepEqual(await tempFiles(path.dirname(second.file)), []);
 });
 
+test("writeSection: Windows replacement preserves overwrite semantics", async () => {
+  const root = await tempDir();
+  const config = { obsidianDir: root, date: "2026-07-31" };
+  const initial = await writeSection(config, "AI", "complete old report");
+  let calls = 0;
+  const fsImpl = {
+    ...fs,
+    rename: async (from, to) => {
+      calls++;
+      if (calls === 1) {
+        const error = new Error("target exists");
+        error.code = "EEXIST";
+        throw error;
+      }
+      return fs.rename(from, to);
+    },
+  };
+
+  const result = await writeSection(config, "AI", "new report", {
+    fsImpl,
+    platform: "win32",
+  });
+
+  assert.equal(result.error, null);
+  assert.equal(await fs.readFile(initial.file, "utf8"), "new report");
+  assert.deepEqual(await tempFiles(path.dirname(initial.file)), []);
+});
+
 test("writeSection: rename failure preserves the old file and cleans temp", async () => {
   const root = await tempDir();
   const config = { obsidianDir: root, date: "2026-07-31" };

@@ -21,13 +21,14 @@
 import path from "node:path";
 import os from "node:os";
 import { readFileSync, rmSync } from "node:fs";
-import { writeFile, mkdir } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import {
   assertImageCreds,
   imageApiUrl,
   imageApiKey,
 } from "./config.mjs";
+import { atomicWriteFile } from "./obsidian.mjs";
 
 // The vault reference poster is a 1.7MB PNG. CPA /images/edits trips a CF 524
 // at ~126s; a smaller upload + faster upstream decode improves the success rate.
@@ -37,10 +38,24 @@ import {
 const REF_MAX_DIM = 768;
 const REF_TARGET_BYTES = 200_000;
 
-// PNG signature check, so a url branch returning an HTML error page is caught.
+// PNG signature + IHDR check, so an HTML page, empty base64, or truncated PNG
+// cannot be mistaken for a generated poster.
 function isPng(buf) {
   return (
-    buf && buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47
+    Buffer.isBuffer(buf) &&
+    buf.length >= 33 &&
+    buf[0] === 0x89 &&
+    buf[1] === 0x50 &&
+    buf[2] === 0x4e &&
+    buf[3] === 0x47 &&
+    buf[4] === 0x0d &&
+    buf[5] === 0x0a &&
+    buf[6] === 0x1a &&
+    buf[7] === 0x0a &&
+    buf.readUInt32BE(8) === 13 &&
+    buf.toString("ascii", 12, 16) === "IHDR" &&
+    buf.readUInt32BE(16) > 0 &&
+    buf.readUInt32BE(20) > 0
   );
 }
 
@@ -204,11 +219,25 @@ export function buildContextualPrompt(basePrompt, { date, repos }) {
 
 // Decode the model response into a PNG Buffer. Handles b64_json (preferred,
 // what gpt-image-2 returns) and url (download + signature check).
-async function decodeImageBuffer(json, { fetchImpl, timeoutMs }) {
+export async function decodeImageBuffer(json, { fetchImpl = globalThis.fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const d0 = json?.data?.[0];
   if (!d0) throw imgErr("IMG_EMPTY", "生图响应 data 为空");
   if (d0.b64_json) {
-    return Buffer.from(d0.b64_json, "base64");
+    const encoded = String(d0.b64_json).trim();
+    const validBase64 =
+      encoded.length > 0 &&
+      encoded.length % 4 === 0 &&
+      /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded);
+    if (!validBase64) {
+      throw imgErr("IMG_NO_IMAGE_BYTES", "b64_json 不是合法的 base64 图片数据");
+    }
+    const buf = Buffer.from(encoded, "base64");
+    if (!isPng(buf)) {
+      throw imgErr("IMG_NO_IMAGE_BYTES", `b64_json 返回非 PNG（${buf.length} 字节，签名或 IHDR 不符）`, {
+        len: buf.length,
+      });
+    }
+    return buf;
   }
   if (d0.url) {
     let r;
@@ -345,13 +374,16 @@ export async function generateGithubPoster(config, repos = [], deps = {}) {
   const timeoutMs = config.imageTimeoutMs || DEFAULT_TIMEOUT_MS;
   const retries = config.imageRetries != null ? config.imageRetries : DEFAULT_RETRIES;
   const usedFallback = false;
+  const assertCreds = deps.assertImageCreds || assertImageCreds;
+  const getApiUrl = deps.imageApiUrl || imageApiUrl;
+  const getApiKey = deps.imageApiKey || imageApiKey;
 
-  const credErr = assertImageCreds();
+  const credErr = assertCreds();
   if (credErr) {
     return { ok: false, name: "GitHubPoster", summary: "failed (缺生图凭证)", error: credErr, usedFallback };
   }
-  const apiUrl = imageApiUrl();
-  const apiKey = imageApiKey();
+  const apiUrl = getApiUrl();
+  const apiKey = getApiKey();
 
   // 1) 读提示词
   let promptMd;
@@ -477,8 +509,13 @@ export async function generateGithubPoster(config, repos = [], deps = {}) {
   const outDir = path.join(config.obsidianDir, config.date);
   const outFile = path.join(outDir, "GitHub.png");
   try {
-    await mkdir(outDir, { recursive: true });
-    await writeFile(outFile, buf);
+    const fsImpl = deps.fs;
+    if (fsImpl?.mkdir) {
+      await fsImpl.mkdir(outDir, { recursive: true });
+    } else {
+      await mkdir(outDir, { recursive: true });
+    }
+    await atomicWriteFile(outFile, buf, fsImpl, { platform: deps.platform });
   } catch (e) {
     const err = imgErr("IMG_WRITE_FAILED", `写海报失败：${outFile}：${e.message}`);
     return { ok: false, name: "GitHubPoster", summary: `failed (写盘 ${err.code})`, error: err, usedFallback: didFallback };

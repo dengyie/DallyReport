@@ -44,20 +44,31 @@ function escapeSourceField(value) {
     .replace(/>/g, "&gt;");
 }
 
+function escapeSourceAttribute(value) {
+  return String(value ?? "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
 export function renderSources(sources) {
   return sources
     .map((s, i) => {
       const url = escapeSourceField(s.url || "(无 url)");
       const title = escapeSourceField(sanitizeSnippet(s.title || "", { maxChars: 200 }));
       const snippet = escapeSourceField(sanitizeSnippet(s.snippet || ""));
-      const provider = escapeSourceField(s.provider ? String(s.provider).trim() : "");
+      const providerRaw = s.provider ? String(s.provider).trim() : "";
+      const provider = escapeSourceField(providerRaw);
+      const providerAttr = escapeSourceAttribute(providerRaw);
       const fields = [
         `url: ${url}`,
         provider ? `provider: ${provider}` : null,
         title ? `title: ${title}` : null,
         snippet ? `snippet: ${snippet}` : null,
       ].filter(Boolean);
-      return `<untrusted-source index="${i + 1}"${provider ? ` provider="${provider}"` : ""}>\n${fields.join("\n")}\n</untrusted-source>`;
+      return `<untrusted-source index="${i + 1}"${provider ? ` provider="${providerAttr}"` : ""}>\n${fields.join("\n")}\n</untrusted-source>`;
     })
     .join("\n\n");
 }

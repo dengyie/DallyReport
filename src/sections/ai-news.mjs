@@ -90,8 +90,28 @@ export async function aiNewsSection(config) {
   const degraded = result?.diagnostics?.degraded === true;
   const warnings = [...(result?.diagnostics?.warnings || [])];
   const linuxdoError = linuxdoSources?.linuxdoError || null;
-  const linuxdoWarning = linuxdoError
-    ? `linux.do 抓取失败：${linuxdoError.failures?.map((f) => f.message).filter(Boolean).join("；") || "未知错误"}`
+  const linuxdoDiagnostics = linuxdoSources?.linuxdoDiagnostics || null;
+  const linuxdoWarningParts = [];
+  if (linuxdoError) {
+    linuxdoWarningParts.push(
+      `linux.do 抓取失败：${linuxdoError.failures?.map((f) => f.message).filter(Boolean).join("；") || "未知错误"}`,
+    );
+  }
+  if (linuxdoDiagnostics?.listingFailures?.length && !linuxdoError) {
+    linuxdoWarningParts.push(`linux.do 列表部分失败（${linuxdoDiagnostics.listingFailures.length} 个）`);
+  }
+  if (linuxdoDiagnostics?.deepFetchFailures?.length) {
+    linuxdoWarningParts.push(
+      `linux.do 主题详情抓取失败（${linuxdoDiagnostics.deepFetchFailures.length} 个，已保留标题卡片）`,
+    );
+  }
+  if (linuxdoDiagnostics?.cacheWriteFailures?.length) {
+    linuxdoWarningParts.push(
+      `linux.do 缓存写入失败（${linuxdoDiagnostics.cacheWriteFailures.length} 个，实时内容仍已使用）`,
+    );
+  }
+  const linuxdoWarning = linuxdoWarningParts.length
+    ? linuxdoWarningParts.join("；")
     : null;
   const linuxdoCache = linuxdoSources?.linuxdoCache || null;
   const linuxdoCacheWarning = linuxdoCache?.fromCache

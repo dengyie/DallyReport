@@ -169,6 +169,8 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
   // 1) Listing pages — best-effort, any one success is enough.
   const listTexts = [];
   const listingFailures = [];
+  const deepFetchFailures = [];
+  const cacheWriteFailures = [];
   const cacheFiles = [];
   let usedCache = false;
   await Promise.all(
@@ -184,6 +186,13 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
           cacheFile,
         });
         if (res?.text) listTexts.push(res.text);
+        if (res?.cacheWriteError) {
+          cacheWriteFailures.push({
+            url,
+            cacheFile: res.cacheFile || cacheFile,
+            ...res.cacheWriteError,
+          });
+        }
         if (res?.fromCache) {
           usedCache = true;
           if (res.cacheFile || cacheFile) cacheFiles.push(res.cacheFile || cacheFile);
@@ -203,6 +212,7 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
       });
     }
     attachCacheMetadata(empty, usedCache, cacheFiles);
+    attachDiagnostics(empty, { listingFailures, deepFetchFailures, cacheWriteFailures });
     return empty;
   }
 
@@ -220,6 +230,7 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
   if (!selected.length) {
     const empty = [];
     attachCacheMetadata(empty, usedCache, cacheFiles);
+    attachDiagnostics(empty, { listingFailures, deepFetchFailures, cacheWriteFailures });
     return empty;
   }
 
@@ -241,6 +252,13 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
             provider: "auto",
             cacheFile,
           });
+          if (res?.cacheWriteError) {
+            cacheWriteFailures.push({
+              url: t.url,
+              cacheFile: res.cacheFile || cacheFile,
+              ...res.cacheWriteError,
+            });
+          }
           if (res?.fromCache) {
             usedCache = true;
             if (res.cacheFile || cacheFile) cacheFiles.push(res.cacheFile || cacheFile);
@@ -248,7 +266,11 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
           if (res?.text) {
             deepMap.set(t.url, snippetFromTopicText(res.text, t.title));
           }
-        } catch {
+        } catch (error) {
+          deepFetchFailures.push({
+            url: t.url,
+            message: error?.message || String(error),
+          });
           /* topic deep-fetch failure → keep title-only card */
         }
       }),
@@ -271,7 +293,23 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
     sources.push(card);
   }
   attachCacheMetadata(sources, usedCache, cacheFiles);
+  attachDiagnostics(sources, { listingFailures, deepFetchFailures, cacheWriteFailures });
   return sources;
+}
+
+function attachDiagnostics(
+  sources,
+  { listingFailures = [], deepFetchFailures = [], cacheWriteFailures = [] } = {},
+) {
+  const diagnostics = {};
+  if (listingFailures.length) diagnostics.listingFailures = [...listingFailures];
+  if (deepFetchFailures.length) diagnostics.deepFetchFailures = [...deepFetchFailures];
+  if (cacheWriteFailures.length) diagnostics.cacheWriteFailures = [...cacheWriteFailures];
+  if (!Object.keys(diagnostics).length) return;
+  Object.defineProperty(sources, "linuxdoDiagnostics", {
+    value: diagnostics,
+    enumerable: false,
+  });
 }
 
 function attachCacheMetadata(sources, usedCache, cacheFiles) {

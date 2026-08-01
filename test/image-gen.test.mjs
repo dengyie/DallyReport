@@ -1,11 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import { EventEmitter } from "node:events";
-import { generateGithubPoster, extractPrompt, buildContextualPrompt, sipsDownscale } from "../src/image-gen.mjs";
+import {
+  generateGithubPoster,
+  extractPrompt,
+  buildContextualPrompt,
+  sipsDownscale,
+  decodeImageBuffer,
+} from "../src/image-gen.mjs";
 
 // Load .env if present so cred-gated paths behave like the synthesize tests.
 if (existsSync(path.resolve(process.cwd(), ".env"))) {
@@ -80,6 +87,30 @@ function stubFetch(queue) {
 
 // A real-ish b64 image (the 1x1 PNG) so the decode path produces bytes.
 const B64_IMG = PNG_1x1.toString("base64");
+
+test("decodeImageBuffer: accepts a valid PNG b64_json payload", async () => {
+  const decoded = await decodeImageBuffer({ data: [{ b64_json: B64_IMG }] });
+  assert.deepEqual(decoded, PNG_1x1);
+});
+
+test("decodeImageBuffer: rejects malformed base64 and non-PNG bytes", async () => {
+  await assert.rejects(
+    () => decodeImageBuffer({ data: [{ b64_json: "not-base64!!!" }] }),
+    (error) => error.code === "IMG_NO_IMAGE_BYTES",
+  );
+  await assert.rejects(
+    () => decodeImageBuffer({ data: [{ b64_json: Buffer.from("plain text").toString("base64") }] }),
+    (error) => error.code === "IMG_NO_IMAGE_BYTES",
+  );
+});
+
+test("decodeImageBuffer: rejects truncated or incomplete PNG payloads", async () => {
+  const truncated = PNG_1x1.subarray(0, 8).toString("base64");
+  await assert.rejects(
+    () => decodeImageBuffer({ data: [{ b64_json: truncated }] }),
+    (error) => error.code === "IMG_NO_IMAGE_BYTES",
+  );
+});
 
 test("sipsDownscale: timeout terminates child and cleans temporary output", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "dally-sips-timeout-"));
@@ -376,6 +407,79 @@ maybeCreds("image-gen: write failure -> IMG_WRITE_FAILED", async () => {
   });
   assert.equal(res.ok, false);
   assert.equal(res.error.code, "IMG_WRITE_FAILED");
+});
+
+test("image-gen: injected fs preserves existing poster when atomic rename fails", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "dally-img-fs-"));
+  const c = cfg({ obsidianDir: root });
+  const outDir = path.join(root, c.date);
+  const outFile = path.join(outDir, "GitHub.png");
+  const oldPoster = Buffer.from("complete old poster");
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(outFile, oldPoster);
+  const fsImpl = {
+    ...fs,
+    rename: async (from, to) => {
+      if (to === outFile) throw new Error("simulated poster rename failure");
+      return fs.rename(from, to);
+    },
+  };
+  const fetchStub = stubFetch([
+    { status: 200, ct: "application/json", body: { data: [{ b64_json: B64_IMG }] } },
+  ]);
+
+  const res = await generateGithubPoster(c, [{ repo: "a/b", starsToday: 5, starsTotal: 10 }], {
+    fetch: fetchStub,
+    fs: fsImpl,
+    sips: false,
+    assertImageCreds: () => null,
+    imageApiUrl: () => "https://img.example/v1",
+    imageApiKey: () => "test-key",
+  });
+
+  assert.equal(res.ok, false);
+  assert.equal(res.error.code, "IMG_WRITE_FAILED");
+  assert.deepEqual(readFileSync(outFile), oldPoster);
+  assert.deepEqual((await fs.readdir(outDir)).filter((name) => /\.(tmp|bak)$/.test(name)), []);
+});
+
+test("image-gen: injected fs supports Windows target replacement", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "dally-img-win-"));
+  const c = cfg({ obsidianDir: root });
+  const outDir = path.join(root, c.date);
+  const outFile = path.join(outDir, "GitHub.png");
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(outFile, Buffer.from("old poster"));
+  let firstTargetRename = true;
+  const fsImpl = {
+    ...fs,
+    rename: async (from, to) => {
+      if (to === outFile && firstTargetRename) {
+        firstTargetRename = false;
+        const error = new Error("target exists");
+        error.code = "EEXIST";
+        throw error;
+      }
+      return fs.rename(from, to);
+    },
+  };
+  const fetchStub = stubFetch([
+    { status: 200, ct: "application/json", body: { data: [{ b64_json: B64_IMG }] } },
+  ]);
+
+  const res = await generateGithubPoster(c, [{ repo: "a/b", starsToday: 5, starsTotal: 10 }], {
+    fetch: fetchStub,
+    fs: fsImpl,
+    platform: "win32",
+    sips: false,
+    assertImageCreds: () => null,
+    imageApiUrl: () => "https://img.example/v1",
+    imageApiKey: () => "test-key",
+  });
+
+  assert.equal(res.ok, true);
+  assert.deepEqual(readFileSync(outFile), PNG_1x1);
+  assert.deepEqual((await fs.readdir(outDir)).filter((name) => /\.(tmp|bak)$/.test(name)), []);
 });
 
 test("image-gen: missing creds -> MISSING_IMAGE_CREDS", async (t) => {

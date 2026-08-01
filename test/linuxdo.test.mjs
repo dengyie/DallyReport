@@ -207,6 +207,81 @@ test("fetchLinuxDoAiSources: listing failure returns [] (non-fatal)", async () =
   assert.equal(out.linuxdoError?.failures?.[0]?.message, "network down");
 });
 
+test("fetchLinuxDoAiSources: exposes partial listing failures without dropping successful sources", async () => {
+  const runFetch = async (url) => {
+    if (url.includes("/c/news/34")) return { text: LISTING_FIXTURE, provider: "stub" };
+    throw new Error("tag unavailable");
+  };
+  const out = await fetchLinuxDoAiSources(
+    {
+      date: "2026-07-31",
+      cacheDir: "/tmp/dally-linuxdo-partial-test",
+      linuxdoEnabled: true,
+      linuxdoTopicLimit: 1,
+      linuxdoDeepFetch: false,
+      linuxdoListUrls: ["https://linux.do/c/news/34", "https://linux.do/tag/444-tag/444"],
+    },
+    { runFetch },
+  );
+  assert.ok(out.length > 0);
+  assert.equal(out.linuxdoDiagnostics?.listingFailures?.length, 1);
+  assert.equal(out.linuxdoDiagnostics.listingFailures[0].message, "tag unavailable");
+  assert.equal(Object.prototype.propertyIsEnumerable.call(out, "linuxdoDiagnostics"), false);
+});
+
+test("fetchLinuxDoAiSources: exposes deep-fetch and cache-write failures", async () => {
+  const runFetch = async (url, _cfg, opts = {}) => {
+    if (url.includes("/c/news/34")) return { text: LISTING_FIXTURE, provider: "stub" };
+    return {
+      text: "",
+      provider: "stub",
+      cacheFile: opts.cacheFile,
+      cacheWriteError: { code: "EACCES", message: "cache locked" },
+    };
+  };
+  const out = await fetchLinuxDoAiSources(
+    {
+      date: "2026-07-31",
+      cacheDir: "/tmp/dally-linuxdo-diagnostics-test",
+      linuxdoEnabled: true,
+      linuxdoTopicLimit: 1,
+      linuxdoDeepFetch: true,
+      linuxdoDeepFetchLimit: 1,
+      linuxdoListUrls: ["https://linux.do/c/news/34"],
+    },
+    { runFetch },
+  );
+  assert.equal(out.length, 1);
+  assert.equal(out.linuxdoDiagnostics?.deepFetchFailures?.length ?? 0, 0);
+  assert.equal(out.linuxdoDiagnostics?.cacheWriteFailures?.length, 1);
+  assert.equal(out.linuxdoDiagnostics.cacheWriteFailures[0].code, "EACCES");
+});
+
+test("fetchLinuxDoAiSources: keeps title card and records deep-fetch exceptions", async () => {
+  const runFetch = async (url) => {
+    if (url.includes("/c/news/34")) return { text: LISTING_FIXTURE, provider: "stub" };
+    throw new Error("topic unavailable");
+  };
+  const out = await fetchLinuxDoAiSources(
+    {
+      date: "2026-07-31",
+      cacheDir: "/tmp/dally-linuxdo-deep-failure-test",
+      linuxdoEnabled: true,
+      linuxdoTopicLimit: 1,
+      linuxdoDeepFetch: true,
+      linuxdoDeepFetchLimit: 1,
+      linuxdoListUrls: ["https://linux.do/c/news/34"],
+    },
+    { runFetch },
+  );
+  assert.equal(out.length, 1);
+  assert.match(out[0].title, /DeepSeek|Gemini|腾讯混元|token/i);
+  assert.match(out[0].snippet, /linux\.do 前沿讨论/);
+  assert.equal(out.linuxdoDiagnostics?.deepFetchFailures?.length, 1);
+  assert.equal(out.linuxdoDiagnostics.deepFetchFailures[0].message, "topic unavailable");
+  assert.equal(Object.prototype.propertyIsEnumerable.call(out, "linuxdoDiagnostics"), false);
+});
+
 test("fetchLinuxDoAiSources: propagates non-enumerable cache metadata", async () => {
   const runFetch = async (url, _config, opts = {}) => {
     if (url.includes("/c/news/34")) {

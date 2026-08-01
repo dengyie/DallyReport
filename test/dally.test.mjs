@@ -90,6 +90,19 @@ test("renderSources: wraps source data in an untrusted boundary", () => {
   assert.match(rendered, /<\/untrusted-source>/);
 });
 
+test("renderSources: quotes in provider cannot escape the source boundary", () => {
+  const rendered = renderSources([
+    {
+      url: "https://example.com",
+      title: "A",
+      snippet: "B",
+      provider: 'linux.do" evil="yes&more',
+    },
+  ]);
+  assert.match(rendered, /provider="linux\.do&quot; evil=&quot;yes&amp;more"/);
+  assert.doesNotMatch(rendered, /provider="linux\.do" evil=/);
+});
+
 // --- synthesizeFromSources ---
 
 // Creds must be present for the network path; set throwaway creds for these tests
