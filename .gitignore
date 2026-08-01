@@ -1,0 +1,18 @@
+# deps
+node_modules/
+
+# secrets / local config
+.env
+.env.local
+
+# runtime caches (raw grok-search outputs + fetched pages)
+reports-cache/*
+!reports-cache/.gitkeep
+
+# the daily report itself lives in the external Obsidian vault, never here
+archive/
+
+# os / editor noise
+.DS_Store
+._*
+**/._*

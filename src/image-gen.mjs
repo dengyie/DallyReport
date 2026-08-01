@@ -1,0 +1,498 @@
+// GitHub 日报海报生图模块。
+//
+// 用途：GitHub trending 板块跑完后，用 Obsidian vault 里用户维护的「GitHub 日报海报
+// 提示词」+ 参考图，调 CPA 网关生一张 16:9 海报 PNG，落到日报目录并供 GitHub.md 嵌入。
+//
+// 链路（2026-07-31 探针确认）：
+//   - 网关 `https://cpa.mangoqwq.com/v1`，/v1/models 暴露 gpt-image-2 等。
+//   - /images/generations（纯文本→图）稳定 200，~40s。
+//   - /images/edits（参考图 multipart 上传 → 图）能成功，但网关/CF 在 ~126s 处高频 524，
+//     且**524 可能带着一个合法的 JSON 图片 body 返回**（CF 标 origin 超时，但图已生成）。
+//     用户要求「也上传参考图片」，所以 edits 是首选，带重试 + generations 兜底；响应处理
+//     会**先尝试从 body 解码图片、无视 status**，拿不到图才报 HTTP 错。
+//   - gpt-image-1 在 /images/* 被网关拒（400 "not supported"）；用 gpt-image-2（用户指定）。
+//
+// 设计原则与项目其余模块一致：
+//   - 凭证经 config.mjs 的 assertImageCreds()/imageApi*() 读取，不散读 process.env。
+//   - fetch 可注入（测试用 stub），默认 globalThis.fetch。
+//   - 超时用 AbortSignal.timeout，错误带 .code 供上层标注/回退。
+//   - 永不阻断其它板块：失败只返回 { ok:false, error }，不抛。
+
+import path from "node:path";
+import os from "node:os";
+import { readFileSync, rmSync } from "node:fs";
+import { writeFile, mkdir } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import {
+  assertImageCreds,
+  imageApiUrl,
+  imageApiKey,
+} from "./config.mjs";
+
+// The vault reference poster is a 1.7MB PNG. CPA /images/edits trips a CF 524
+// at ~126s; a smaller upload + faster upstream decode improves the success rate.
+// We downscale to <=768px and re-encode as JPEG via the macOS `sips` tool before
+// upload. sips is ubiquitous on darwin and avoids a sharp图像 dep. If sips is
+// missing/unavailable we fall back to sending the raw PNG.
+const REF_MAX_DIM = 768;
+const REF_TARGET_BYTES = 200_000;
+
+// PNG signature check, so a url branch returning an HTML error page is caught.
+function isPng(buf) {
+  return (
+    buf && buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47
+  );
+}
+
+// Downscale + re-encode a reference image to a small JPEG via macOS `sips`.
+// Returns { buf, mime } or null if sips isn't usable (caller falls back to raw).
+// tmpOut must be a caller-supplied temp path (kept cwd-independent / testable).
+export function sipsDownscale(
+  srcPath,
+  tmpOut,
+  { spawnImpl = spawn, timeoutMs = 15000, graceMs = 3000, onTimeout } = {},
+) {
+  return new Promise((resolve) => {
+    const args = [
+      "-s", "format", "jpeg",
+      "-s", "formatOptions", "85",
+      "-Z", String(REF_MAX_DIM),
+      srcPath,
+      "--out", tmpOut,
+    ];
+    let settled = false;
+    let timer;
+    let killTimer;
+    const cleanup = () => {
+      try {
+        rmSync(tmpOut, { force: true });
+      } catch {
+        /* best effort cleanup */
+      }
+    };
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(killTimer);
+      if (!ok) {
+        cleanup();
+        resolve(null);
+        return;
+      }
+      try {
+        const buf = readFileSync(tmpOut);
+        cleanup();
+        resolve(buf && buf.length > 0 ? { buf, mime: "image/jpeg" } : null);
+      } catch {
+        cleanup();
+        resolve(null);
+      }
+    };
+    let child;
+    try {
+      child = spawnImpl("sips", args, { stdio: ["ignore", "ignore", "ignore"] });
+    } catch {
+      finish(false);
+      return;
+    }
+    child.on("error", () => finish(false));
+    child.on("exit", (code) => finish(code === 0));
+    timer = setTimeout(() => {
+      if (settled) return;
+      onTimeout?.();
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        /* ignore */
+      }
+      killTimer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* ignore */
+        }
+      }, graceMs);
+      killTimer.unref?.();
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
+      resolve(null);
+    }, timeoutMs);
+    timer.unref?.();
+  });
+}
+
+const DEFAULT_TIMEOUT_MS = 180000;
+const DEFAULT_RETRIES = 2;
+
+// --- 错误码 ---
+// IMG_HTTP_ERROR{status}      非 2xx（含网关 524；body 可能非 JSON）
+// IMG_TIMEOUT{aborted}        AbortSignal 触发 / fetch 抛 TimeoutError
+// IMG_FETCH_FAILED            fetch 抛其它非超时错误
+// IMG_BAD_JSON                响应不是 JSON / 解析失败
+// IMG_EMPTY                   200 但 data 空 / 既无 b64_json 也无 url
+// IMG_NO_IMAGE_BYTES          url 分支拿到非图字节（签名不符）
+// IMG_WRITE_FAILED            解码成功但落盘失败
+// IMG_BAD_PROMPT              提示词文件读不出正文
+// IMG_BAD_REF                 参考图文件读不出 / 非图
+// MISSING_IMAGE_CREDS         缺凭证
+// NO_PROMPT                   没拿到可发送的 prompt
+function imgErr(code, message, extra = {}) {
+  const e = new Error(message);
+  e.code = code;
+  Object.assign(e, extra);
+  return e;
+}
+
+// Pull the prompt body out of the user-authored Markdown note. The note has a
+// 「完整版提示词」fenced block (````…````) and a 「精简版提示词」block; the full
+// one is richer, so prefer it, then fall back to the simplified one.
+export function extractPrompt(markdown) {
+  if (!markdown) return null;
+  // fenced blocks using 4+ backticks (the note uses ````), tolerant of 3+.
+  const fenceRe = /(`{3,})\s*\n([\s\S]*?)\n\1/g;
+  let first = null;
+  let m;
+  while ((m = fenceRe.exec(markdown)) !== null) {
+    const body = m[2].trim();
+    if (!body) continue;
+    if (first == null) first = body;
+  }
+  if (first) return first;
+  // No fenced block: return the raw text minus front-matter, as a last resort.
+  const stripped = markdown.replace(/^---[\s\S]*?---\s*/, "").trim();
+  return stripped || null;
+}
+
+// Collapse a captured project description to one sentence. The user asked the
+// poster to show a one-line description per repo; the trending description can
+// be multi-clause, so we cut at the first sentence terminator (. ! ? 。！？).
+// A description with no terminator (common on trending) is kept whole.
+function oneSentence(s) {
+  if (!s) return "";
+  const t = String(s).trim();
+  if (!t) return "";
+  // Match up to and including the first terminator; if none, keep it all.
+  const m = t.match(/^[^.!?。！？]*[.!?。！？]/);
+  return m ? m[0].trim() : t;
+}
+
+// {date} and the top-N repo list are injected so the model renders the real day.
+// Kept compact: the model mainly needs the ranking + per-repo owner/name/stars,
+// plus a one-sentence project description per repo (user request). The project
+// names stay as the original owner/repo; the one-line descriptions MUST be in
+// Chinese (user request), so we pass the raw English description as the source
+// text and instruct the model to render its Chinese translation on the poster.
+export function buildContextualPrompt(basePrompt, { date, repos }) {
+  let p = basePrompt.replace(/\{date\}/g, date);
+  if (repos && repos.length) {
+    const top = repos.slice(0, 10);
+    const list = top
+      .map((r, i) => {
+        const desc = oneSentence(r.description);
+        const head = `${i + 1}. ${r.repo} — 今日 Star +${r.starsToday}，总 Star ${r.starsTotal != null ? r.starsTotal.toLocaleString() : "—"}`;
+        return desc ? `${head}（原始简介：${desc}）` : head;
+      })
+      .join("\n");
+    p += `\n\n本次榜单（按今日新增 Star 排序，请在海报中渲染前 ${top.length} 名的真实 owner/repo 与数据）：\n${list}`;
+    p += `\n\n要求：① 项目名用上面给出的原始 owner/repo（英文，保持原样，不要翻译）；② 每个项目的「一句话简介」必须把上面给出的「原始简介」翻译成**中文**并控制在一句内渲染到海报上（不要直接显示英文原文）；③ 没有简介的项目就只显示名称与数据，不要编造简介。`;
+    p += `\n\n标题中的日期用 ${date}。统计时间用 ${date}（北京时间）。`;
+  }
+  return p;
+}
+
+// Decode the model response into a PNG Buffer. Handles b64_json (preferred,
+// what gpt-image-2 returns) and url (download + signature check).
+async function decodeImageBuffer(json, { fetchImpl, timeoutMs }) {
+  const d0 = json?.data?.[0];
+  if (!d0) throw imgErr("IMG_EMPTY", "生图响应 data 为空");
+  if (d0.b64_json) {
+    return Buffer.from(d0.b64_json, "base64");
+  }
+  if (d0.url) {
+    let r;
+    try {
+      r = await fetchImpl(d0.url, { signal: AbortSignal.timeout(timeoutMs) });
+    } catch (e) {
+      if (e?.name === "TimeoutError" || e?.name === "AbortError") {
+        throw imgErr("IMG_TIMEOUT", `下载图片 url 超时：${e.message}`, { aborted: true });
+      }
+      throw imgErr("IMG_FETCH_FAILED", `下载图片 url 失败：${e.message}`);
+    }
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      throw imgErr("IMG_HTTP_ERROR", `下载图片 url HTTP ${r.status}`, { status: r.status, bodyHead: t.slice(0, 200) });
+    }
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (!isPng(buf)) {
+      throw imgErr("IMG_NO_IMAGE_BYTES", `url 返回非 PNG（${buf.length} 字节，签名不符）`, { len: buf.length });
+    }
+    return buf;
+  }
+  throw imgErr("IMG_EMPTY", "生图响应既无 b64_json 也无 url");
+}
+
+// Shared response handler. The CPA/CF gateway has a quirk: a slow-but-successful
+// upstream can come back as status 524 *with a valid JSON image body* (the image
+// was produced, but Cloudflare flagged the origin as timed out). So we try to
+// decode an image from the body REGARDLESS of status, and only fall back to an
+// HTTP-error / bad-json error when there's no usable image in the response.
+async function handleImageResponse(r, { fetchImpl, timeoutMs, endpoint }) {
+  const ct = r.headers?.get?.("content-type") || "";
+
+  // Salvage path: JSON body with an image, even on a 5xx/524.
+  if (ct.includes("application/json")) {
+    const json = await r.json().catch(() => null);
+    if (json) {
+      try {
+        return await decodeImageBuffer(json, { fetchImpl, timeoutMs });
+      } catch (decodeErr) {
+        // Body was JSON but had no image. If the status is also bad, report the
+        // HTTP error (richer); otherwise surface the decode error.
+        if (!r.ok) {
+          const bodyHead = json?.error?.message
+            ? json.error.message
+            : JSON.stringify(json).slice(0, 300);
+          throw imgErr("IMG_HTTP_ERROR", `${endpoint} HTTP ${r.status}：${bodyHead}`, {
+            status: r.status,
+            bodyHead,
+          });
+        }
+        throw decodeErr;
+      }
+    }
+    // JSON parse failed.
+    if (!r.ok) {
+      const txt = (await r.text().catch(() => "")).slice(0, 300);
+      throw imgErr("IMG_HTTP_ERROR", `${endpoint} HTTP ${r.status}：${txt}`, {
+        status: r.status,
+        bodyHead: txt,
+      });
+    }
+    throw imgErr("IMG_BAD_JSON", `${endpoint} 响应 JSON 解析失败`);
+  }
+
+  // Non-JSON body (typically Cloudflare's HTML 524/5xx error page).
+  const txt = (await r.text().catch(() => "")).slice(0, 300);
+  if (!r.ok) {
+    throw imgErr("IMG_HTTP_ERROR", `${endpoint} HTTP ${r.status}：${txt}`, {
+      status: r.status,
+      bodyHead: txt,
+    });
+  }
+  throw imgErr("IMG_BAD_JSON", `${endpoint} 响应非 JSON（ct=${ct}）：${txt}`, { bodyHead: txt });
+}
+
+// One attempt against /images/edits with the reference image (multipart upload).
+async function tryEdits({ apiUrl, apiKey, model, size, prompt, refBuf, refMime, fetchImpl, timeoutMs }) {
+  const form = new FormData();
+  form.append("model", model);
+  form.append("prompt", prompt);
+  form.append("size", size);
+  form.append("n", "1");
+  form.append("image", new Blob([refBuf], { type: refMime }), refMime === "image/jpeg" ? "ref.jpg" : "ref.png");
+  let r;
+  try {
+    r = await fetchImpl(`${apiUrl}/images/edits`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (e) {
+    if (e?.name === "TimeoutError" || e?.name === "AbortError") {
+      throw imgErr("IMG_TIMEOUT", `生图超时：${e.message}`, { aborted: true });
+    }
+    throw imgErr("IMG_FETCH_FAILED", `生图请求失败：${e.message}`);
+  }
+  return handleImageResponse(r, { fetchImpl, timeoutMs, endpoint: "/images/edits" });
+}
+
+// Fallback: /images/generations (text only, no reference image). Reliable on CPA.
+async function tryGenerations({ apiUrl, apiKey, model, size, prompt, fetchImpl, timeoutMs }) {
+  let r;
+  try {
+    r = await fetchImpl(`${apiUrl}/images/generations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model, prompt, size, n: 1 }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (e) {
+    if (e?.name === "TimeoutError" || e?.name === "AbortError") {
+      throw imgErr("IMG_TIMEOUT", `生图超时：${e.message}`, { aborted: true });
+    }
+    throw imgErr("IMG_FETCH_FAILED", `生图请求失败：${e.message}`);
+  }
+  return handleImageResponse(r, { fetchImpl, timeoutMs, endpoint: "/images/generations" });
+}
+
+// retryable codes: gateway 524 (IMG_HTTP_ERROR status=524), timeouts, fetch failures.
+function isRetryable(err) {
+  if (!err) return false;
+  if (err.code === "IMG_TIMEOUT") return true;
+  if (err.code === "IMG_FETCH_FAILED") return true;
+  if (err.code === "IMG_HTTP_ERROR" && (err.status === 524 || err.status >= 500)) return true;
+  return false;
+}
+
+// 主入口。返回 { ok, name, summary, file, error, usedFallback }。
+// config: loadConfig() 的输出（含 image* 字段）；repos: github-trending 解析出的行；
+// deps: { fetch } 可选注入。
+export async function generateGithubPoster(config, repos = [], deps = {}) {
+  const fetchImpl = deps.fetch || globalThis.fetch;
+  const timeoutMs = config.imageTimeoutMs || DEFAULT_TIMEOUT_MS;
+  const retries = config.imageRetries != null ? config.imageRetries : DEFAULT_RETRIES;
+  const usedFallback = false;
+
+  const credErr = assertImageCreds();
+  if (credErr) {
+    return { ok: false, name: "GitHubPoster", summary: "failed (缺生图凭证)", error: credErr, usedFallback };
+  }
+  const apiUrl = imageApiUrl();
+  const apiKey = imageApiKey();
+
+  // 1) 读提示词
+  let promptMd;
+  try {
+    promptMd = readFileSync(config.imagePromptFile, "utf8");
+  } catch (e) {
+    const err = imgErr("IMG_BAD_PROMPT", `读提示词文件失败：${config.imagePromptFile}：${e.message}`);
+    return { ok: false, name: "GitHubPoster", summary: "failed (提示词文件)", error: err, usedFallback };
+  }
+  const basePrompt = extractPrompt(promptMd);
+  if (!basePrompt) {
+    const err = imgErr("NO_PROMPT", `提示词文件未提取到正文：${config.imagePromptFile}`);
+    return { ok: false, name: "GitHubPoster", summary: "failed (无提示词)", error: err, usedFallback };
+  }
+  const prompt = buildContextualPrompt(basePrompt, { date: config.date, repos });
+
+  // 2) 读参考图（用户要求上传参考图）。原 PNG 偏大（1.7MB）易触发 524，
+  //    先尝试用 sips 缩到 <=768px + JPEG 再上传；sips 不可用则退回原 PNG。
+  let refBuf = null;
+  let refMime = "image/png";
+  let refError = null;
+  let refDownscaleTimedOut = false;
+  try {
+    const raw = readFileSync(config.imageRefImage);
+    if (!isPng(raw)) {
+      // Not a PNG; accept as-is and send with a generic mime (sips can still try).
+      refBuf = raw;
+      refMime = "image/png";
+    } else {
+      refBuf = raw;
+      refMime = "image/png";
+      // Downscale for a faster, smaller upload. Best-effort: on failure keep raw PNG.
+      if (raw.length > REF_TARGET_BYTES && deps.sips !== false) {
+        const tmpOut = path.join(
+          config.cacheDir || os.tmpdir(),
+          `${config.date}-ref-downscaled.jpg`,
+        );
+        try {
+          await mkdir(path.dirname(tmpOut), { recursive: true });
+        } catch {
+          /* cacheDir may not exist yet; sips --out will fail gracefully */
+        }
+        const downscaled = await sipsDownscale(config.imageRefImage, tmpOut, {
+          timeoutMs: config.imageSipsTimeoutMs,
+          onTimeout: () => {
+            refDownscaleTimedOut = true;
+          },
+        });
+        if (downscaled) {
+          refBuf = downscaled.buf;
+          refMime = downscaled.mime;
+        }
+      }
+    }
+  } catch (e) {
+    refError = imgErr("IMG_BAD_REF", `读参考图失败：${config.imageRefImage}：${e.message}`);
+  }
+
+  // 3) 生图：edits（带参考图）首选，重试 N 次；失败退 generations（无参考图）。
+  let buf = null;
+  let lastErr = null;
+  let didFallback = false;
+
+  if (refBuf) {
+    const attempts = retries + 1;
+    for (let i = 0; i < attempts && !buf; i++) {
+      try {
+        buf = await tryEdits({
+          apiUrl,
+          apiKey,
+          model: config.imageModel,
+          size: config.imageSize,
+          prompt,
+          refBuf,
+          refMime,
+          fetchImpl,
+          timeoutMs,
+        });
+      } catch (e) {
+        lastErr = e;
+        if (i < attempts - 1 && isRetryable(e)) {
+          // brief backoff before next attempt; keep it small (edits already ~40-126s)
+          await new Promise((r) => setTimeout(r, 2000));
+          continue;
+        }
+        break;
+      }
+    }
+  } else {
+    lastErr = refError;
+  }
+
+  if (!buf) {
+    // generations fallback — reliable on CPA, no reference image.
+    try {
+      buf = await tryGenerations({
+        apiUrl,
+        apiKey,
+        model: config.imageModel,
+        size: config.imageSize,
+        prompt,
+        fetchImpl,
+        timeoutMs,
+      });
+      didFallback = true;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+
+  if (!buf) {
+    const err = lastErr || imgErr("IMG_EMPTY", "生图未返回图片");
+    return {
+      ok: false,
+      name: "GitHubPoster",
+      summary: `failed (${err.code})`,
+      error: err,
+      usedFallback: didFallback,
+    };
+  }
+
+  // 4) 落盘到日报目录：OBSIDIAN_DIR/YYYY-MM-DD/GitHub.png
+  const outDir = path.join(config.obsidianDir, config.date);
+  const outFile = path.join(outDir, "GitHub.png");
+  try {
+    await mkdir(outDir, { recursive: true });
+    await writeFile(outFile, buf);
+  } catch (e) {
+    const err = imgErr("IMG_WRITE_FAILED", `写海报失败：${outFile}：${e.message}`);
+    return { ok: false, name: "GitHubPoster", summary: `failed (写盘 ${err.code})`, error: err, usedFallback: didFallback };
+  }
+
+  const how = didFallback ? "generations 兜底（无参考图）" : "edits（含参考图）";
+  const downscaleNote = refDownscaleTimedOut ? "，sips 超时已回退原图" : "";
+  return {
+    ok: true,
+    name: "GitHubPoster",
+    summary: `success (${buf.length} bytes, ${how}${downscaleNote})`,
+    file: outFile,
+    error: null,
+    usedFallback: didFallback,
+    refImageMissing: !refBuf && !!refError,
+  };
+}

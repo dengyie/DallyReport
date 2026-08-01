@@ -1,0 +1,20 @@
+{
+  "name": "dally-report",
+  "version": "0.1.0",
+  "description": "每日 AI / GitHub 日报生成器，复用 grok-search，输出到 Obsidian vault",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "run": "node src/run.mjs",
+    "ai": "node src/run.mjs --section ai",
+    "github": "node src/run.mjs --section github",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}
