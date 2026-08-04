@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { loadConfig, validateRuntimePaths } from "../src/config.mjs";
+import { loadConfig, validateRuntimePaths, beijingDateFor } from "../src/config.mjs";
 
 const ENV_KEYS = [
   "GROK_SEARCH_DIR",
@@ -114,6 +114,17 @@ test("loadConfig: rejects invalid positive sips timeout", async () => {
   await withEnv({ IMAGE_SIPS_TIMEOUT_MS: "0" }, async () => {
     assert.throws(() => loadConfig(), /IMAGE_SIPS_TIMEOUT_MS/);
   });
+});
+
+test("beijingDateFor: maps UTC instants to the Beijing (UTC+8) calendar date", () => {
+  // 16:00 UTC is 00:00 next day in Beijing — crosses the date line.
+  assert.equal(beijingDateFor(Date.parse("2026-08-04T16:00:00Z")), "2026-08-05");
+  // 15:59 UTC is 23:59 same day in Beijing — does not cross.
+  assert.equal(beijingDateFor(Date.parse("2026-08-04T15:59:00Z")), "2026-08-04");
+  // Midnight UTC is 08:00 same day in Beijing — same calendar date.
+  assert.equal(beijingDateFor(Date.parse("2026-08-04T00:00:00Z")), "2026-08-04");
+  // The wrap boundary itself: 16:00:00.000Z → 00:00:00 next day, not 23:59.
+  assert.equal(beijingDateFor(Date.parse("2026-01-31T16:00:00Z")), "2026-02-01");
 });
 
 test("validateRuntimePaths: reports missing paths without throwing", () => {

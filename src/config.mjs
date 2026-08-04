@@ -102,6 +102,24 @@ export function buildQuery(template, today) {
   return template.replace(/\{date\}/g, today);
 }
 
+// The report and posters self-describe their timestamp as 北京时间, so the date
+// must be the Beijing (UTC+8) calendar date regardless of the host machine's
+// timezone. A CI/UTC box calling new Date() would otherwise label yesterday's
+// or tomorrow's news as "today", and the poster {date} ("统计时间：{date}（北京时间）")
+// would disagree with the date stamped in the output dir / front-matter / H1.
+// Deterministic: takes Date.now()-free instant in ms, derives the YYYY-MM-DD that
+// is current at UTC+8 at that instant. Exported for unit tests.
+export function beijingDateFor(epochMs) {
+  // +08:00 offset in ms; offset the instant then read the UTC components, which
+  // mirrors what a wall clock in Asia/Shanghai would show.
+  const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
+  const shifted = new Date(epochMs + BEIJING_OFFSET_MS);
+  const y = shifted.getUTCFullYear();
+  const m = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(shifted.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 // Image-gen creds: prefer dedicated IMAGE_* vars; fall back to the grok-search
 // gateway (CPA exposes gpt-image-2 on the same /v1 base). Returns an Error with
 // .code MISSING_IMAGE_CREDS or null. creds live in process.env, not loadConfig,

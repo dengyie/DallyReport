@@ -6,7 +6,7 @@
 // AI.png from vault prompts + reference images and embed them into their Markdown.
 // Poster generation is independently gated and never blocks the text sections.
 
-import { loadConfig, validateRuntimePaths } from "./config.mjs";
+import { loadConfig, validateRuntimePaths, beijingDateFor } from "./config.mjs";
 import { aiNewsSection } from "./sections/ai-news.mjs";
 import { githubTrendingSection } from "./sections/github-trending.mjs";
 import {
@@ -16,12 +16,12 @@ import {
 } from "./image-gen.mjs";
 import { writeSection, rescueMarkdown } from "./obsidian.mjs";
 
-function todayLocal() {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+// The report and posters label their timestamp as 北京时间, so config.date must be
+// the Beijing (UTC+8) calendar date — not the host machine's local date, which on
+// a UTC/CI box would be off by up to a day and disagree with the {date} rendered on
+// the posters.
+function todayBeijing() {
+  return beijingDateFor(Date.now());
 }
 
 function parseArgs(argv) {
@@ -42,7 +42,7 @@ async function run() {
     process.exit(0);
   }
 
-  const config = loadConfig({ date: todayLocal() });
+  const config = loadConfig({ date: todayBeijing() });
   const pathWarnings = validateRuntimePaths(config);
   if (pathWarnings.length) {
     console.warn(`⚠️ 运行路径提醒：\n${pathWarnings.map((warning) => `  - ${warning}`).join("\n")}`);
@@ -118,9 +118,12 @@ async function run() {
       }
     } else if (gv && (!gv.ok || !gv.repos || gv.repos.length === 0)) {
       posterLines.push("⏭️ GitHubPoster: 跳过（GitHub 板块无仓库数据）");
+    } else if (gr.status === "rejected") {
+      posterLines.push("⏭️ GitHubPoster: 跳过（GitHub 板块执行失败，未生成海报）");
     }
   } else if (config.imageEnabled && !names.includes("github")) {
-    // running a non-github section with image enabled — nothing to do
+    // running a non-github section with image enabled — the AI poster block
+    // (guarded by names.includes("ai")) handles its own section; nothing to do here.
   }
 
   // AI poster follows the same isolation rule as GitHub poster: AI.md is first
