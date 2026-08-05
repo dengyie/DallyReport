@@ -123,7 +123,7 @@ export async function runSearch(query, config, { days, extra } = {}) {
   return parsed;
 }
 
-export async function runFetch(url, config, { maxChars, provider = "auto", cacheFile } = {}) {
+export async function runFetch(url, config, { maxChars, provider = "auto", cacheFile, cachePredicate } = {}) {
   // Disk cache for fetched pages so reruns don't re-hit the network and the parse
   // step can be iterated on offline. Cache key is an explicit cacheFile path.
   if (cacheFile) {
@@ -168,8 +168,17 @@ export async function runFetch(url, config, { maxChars, provider = "auto", cache
       /* ignore */
     }
   }
+  // Content-signature gate: a 200 + a non-empty but *wrong* body (a Cloudflare /
+  // gateway HTML error page, an interstitial) must NOT be written as a fresh cache
+  // that a later rerun would replay as "successful". When the live body fails
+  // `cachePredicate(text) -> truthy`, we skip the write and flag `cacheSkipped`.
+  // We deliberately do NOT serve a prior good cache here: a good cache already
+  // short-circuited the top of this function as a cache hit, so falling back now
+  // would be unreachable in practice; the live (invalid) body is returned so the
+  // caller sees the fresh parse miss and can render its own empty/error state.
+  const looksValid = cachePredicate ? !!cachePredicate(body) : true;
   let cacheWriteError = null;
-  if (cacheFile && body) {
+  if (cacheFile && body && looksValid) {
     try {
       await fs.mkdir(path.dirname(cacheFile), { recursive: true });
       await fs.writeFile(cacheFile, body, "utf8");
@@ -186,6 +195,7 @@ export async function runFetch(url, config, { maxChars, provider = "auto", cache
     fromCache: false,
     cacheFile: cacheFile || undefined,
     cacheWriteError,
+    cacheSkipped: !looksValid || null,
     truncated: parsed.content?.truncated || false,
     diagnostics: parsed.diagnostics,
   };

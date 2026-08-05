@@ -98,6 +98,15 @@ test("mergeSourcesPreferLinuxDo: linux.do first, de-dupe by url, cap total", () 
   assert.equal(merged.filter((s) => s.url.includes("/topic/1")).length, 1);
 });
 
+test("mergeSourcesPreferLinuxDo: maxTotal 0 is honored (empty merge allowed)", () => {
+  // AI_SOURCE_MAX_TOTAL=0 is a deliberate "no merge" setting and must NOT be
+  // silently coerced up to 1 — both groups get represented as an empty array.
+  const ld = [{ url: "https://linux.do/t/topic/1", title: "A", provider: "linux.do" }];
+  const gen = [{ url: "https://k.sina.com.cn/x", title: "Sina", provider: "tavily" }];
+  assert.deepEqual(mergeSourcesPreferLinuxDo(ld, gen, { maxTotal: 0 }), []);
+  assert.deepEqual(mergeSourcesPreferLinuxDo(ld, gen, { maxTotal: -1 }), []);
+});
+
 test("snippetFromTopicText: skips guidelines chrome, keeps real OP body", () => {
   const raw = `
 [Skip to main content](https://linux.do/t/topic/1)

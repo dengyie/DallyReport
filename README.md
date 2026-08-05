@@ -96,13 +96,13 @@ npm test           # = node --test，跑 test/ 下的单测
 - **隔离与抢救**：任一板块失败不阻断另一板块落盘（Grok 挂了 GitHub 照出，反之亦然）。单板块超时（子进程 / 综合调用 / 生图各自有超时）会落进失败分支而非无限挂起。Obsidian Markdown 先写入同目录临时文件，再用 `rename` 原子替换目标；写入或替换失败会清理临时文件并保留旧文件。若正文已生成但写入 Obsidian vault 失败（iCloud 同步中、vault 移动、磁盘满），会把正文抢救到 `reports-cache/<date>-<section>-fallback.md`，不丢失已计算结果。
 - **缓存目录**：`reports-cache/` 相对项目根目录解析（与运行时 cwd 无关），从任意目录跑都能命中同一份缓存。
 
-## GitHub 同步
-
-本仓后续同步到 `git@github.com:dengyie/DallyReport.git`（与兄弟仓命名一致）。如需关联远程：
+## 获取 & 同步
 
 ```bash
-git remote add origin git@github.com:dengyie/DallyReport.git
+git clone https://github.com/dengyie/DallyReport.git
 ```
+
+远端已默认关联 HTTPS（`https://github.com/dengyie/DallyReport.git`，与兄弟仓一致）。这台机器克隆后即可 `git pull`；如需改用 SSH，`git remote set-url origin git@github.com:dengyie/DallyReport.git`。
 
 `.env`、`reports-cache/` 均在 `.gitignore` 中，不会进库。日报正文落在外部 Obsidian vault，不进本仓 git（如需归档副本留作 next phase）。
 

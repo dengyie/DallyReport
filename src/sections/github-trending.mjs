@@ -119,17 +119,24 @@ export async function githubTrendingSection(config) {
   let provider;
   let fromCache = false;
   let cacheWriteError = null;
+  let cacheSkipped = false;
   try {
     // `direct` preserves the "N stars today" rows that readability extractors strip.
+    // cachePredicate gates the cache write: only cache a body that actually parses
+    // into trending rows. This stops a transient HTML error page (CF interstitial,
+    // gateway 200+HTML) from being written as the day's cache and then silently
+    // replayed as "successful" on every rerun that day.
     const r = await runFetch(TRENDING_URL, config, {
       provider: "direct",
       maxChars: config.fetchMaxChars,
       cacheFile,
+      cachePredicate: (t) => parseTrending(t).length > 0,
     });
     text = r.text;
     provider = r.provider;
     fromCache = r.fromCache === true;
     cacheWriteError = r.cacheWriteError || null;
+    cacheSkipped = r.cacheSkipped === true;
   } catch (e) {
     // last-resort: reuse a prior cache even if live fetch dies
     try {
@@ -168,10 +175,13 @@ export async function githubTrendingSection(config) {
         r.starsTotal != null ? r.starsTotal.toLocaleString() : "—",
       ]),
     );
-    note = fetchError
-      ? `> ⚠️ 实时抓取失败，使用缓存数据：${fetchError.message}\n`
-      : "";
-    note += `> 数据来自 github.com/trending（since=daily），抓取于 ${new Date().toISOString()} via ${provider}${fromCache ? "（缓存）" : ""}。`;
+    if (fetchError) {
+      note = `> ⚠️ 实时抓取失败，使用缓存数据：${fetchError.message}\n`;
+    } else if (cacheSkipped) {
+      note = "> ⚠️ 实时抓取响应格式异常（疑似错误页），未写入缓存，本次以实时结果渲染。\n";
+    }
+    const cacheTag = fromCache ? "（缓存）" : "";
+    note += `> 数据来自 github.com/trending（since=daily），抓取于 ${new Date().toISOString()} via ${provider}${cacheTag}。`;
     if (cacheWriteError) {
       note += `\n> ⚠️ 实时数据已获取，但缓存写入失败：${cacheWriteError.message || cacheWriteError.code || "未知错误"}`;
     }

@@ -202,20 +202,33 @@ function oneSentence(s) {
 // text and instruct the model to render its Chinese translation on the poster.
 export function buildContextualPrompt(basePrompt, { date, repos }) {
   let p = basePrompt.replace(/\{date\}/g, date);
-  if (repos && repos.length) {
-    const top = repos.slice(0, 10);
-    const list = top
-      .map((r, i) => {
-        const desc = oneSentence(r.description);
-        const head = `${i + 1}. ${r.repo} — 今日 Star +${r.starsToday}，总 Star ${r.starsTotal != null ? r.starsTotal.toLocaleString() : "—"}`;
-        return desc ? `${head}（原始简介：${desc}）` : head;
-      })
-      .join("\n");
-    p += `\n\n本次榜单（按今日新增 Star 排序，请在海报中渲染前 ${top.length} 名的真实 owner/repo 与数据）：\n${list}`;
-    p += `\n\n要求：① 项目名用上面给出的原始 owner/repo（英文，保持原样，不要翻译）；② 每个项目的「一句话简介」必须把上面给出的「原始简介」翻译成**中文**并控制在一句内渲染到海报上（不要直接显示英文原文）；③ 没有简介的项目就只显示名称与数据，不要编造简介。`;
-    p += `\n\n标题中的日期用 ${date}。统计时间用 ${date}（北京时间）。`;
-  }
+  // No repos -> date substitution only, symmetric with buildAiContextualPrompt's
+  // no-headlines early return. Callers gate (run.mjs requires repos.length > 0 and
+  // generateGithubPoster returns IMG_NO_ROWS before the image API), but a direct
+  // caller must not get a zero-row prompt that lets the model fabricate a trending
+  // list from training memory. Returning here keeps the prompt "template only, no
+  // data" rather than "render 0 items" (which the model would eagerly fill in).
+  if (!repos || !repos.length) return p;
+  const top = repos.slice(0, 10);
+  const list = top
+    .map((r, i) => {
+      const desc = oneSentence(r.description);
+      const head = `${i + 1}. ${r.repo} — 今日 Star +${r.starsToday}，总 Star ${r.starsTotal != null ? r.starsTotal.toLocaleString() : "—"}`;
+      return desc ? `${head}（原始简介：${desc}）` : head;
+    })
+    .join("\n");
+  p += `\n\n本次榜单（按今日新增 Star 排序，请在海报中渲染前 ${top.length} 名的真实 owner/repo 与数据）：\n${list}`;
+  p += `\n\n要求：① 项目名用上面给出的原始 owner/repo（英文，保持原样，不要翻译）；② 每个项目的「一句话简介」必须把上面给出的「原始简介」翻译成**中文**并控制在一句内渲染到海报上（不要直接显示英文原文）；③ 没有简介的项目就只显示名称与数据，不要编造简介。`;
+  p += `\n\n标题中的日期用 ${date}。统计时间用 ${date}（北京时间）。`;
   return p;
+}
+
+// Mirrors hasAiPosterHeadlines: a GitHub poster with zero real rows has nothing to
+// render. Refuse before the image API rather than sending a template-only prompt
+// that the model would fill with fabricated repos. Direct callers (tests, future
+// run-path variants) get the same anti-fabrication contract as the AI poster.
+export function hasGithubPosterRows(repos) {
+  return Array.isArray(repos) && repos.length > 0;
 }
 
 const AI_POSTER_MAX_HEADLINES = 8;
@@ -442,32 +455,32 @@ async function generatePosterCore(config, spec, deps = {}) {
   let refDownscaleTimedOut = false;
   try {
     const raw = readFileSync(spec.refImage);
-    if (!isPng(raw)) {
-      refBuf = raw;
-      refMime = "image/png";
-    } else {
-      refBuf = raw;
-      refMime = "image/png";
-      if (raw.length > REF_TARGET_BYTES && deps.sips !== false) {
-        const tmpOut = path.join(
-          config.cacheDir || os.tmpdir(),
-          `${config.date}-${spec.name}-ref-downscaled.jpg`,
-        );
-        try {
-          await mkdir(path.dirname(tmpOut), { recursive: true });
-        } catch {
-          /* cacheDir may not exist yet; sips --out will fail gracefully */
-        }
-        const downscaled = await sipsDownscale(spec.refImage, tmpOut, {
-          timeoutMs: config.imageSipsTimeoutMs,
-          onTimeout: () => {
-            refDownscaleTimedOut = true;
-          },
-        });
-        if (downscaled) {
-          refBuf = downscaled.buf;
-          refMime = downscaled.mime;
-        }
+    const refIsPng = isPng(raw);
+    // Sniff the real format instead of claiming image/png for every input: a JPEG
+    // reference image uploaded as image/png + filename ref.png can be rejected by
+    // a strict gateway. We only downscale large PNGs (the common vault ref shape);
+    // a small or non-PNG ref is uploaded as-is with its true mime.
+    refBuf = raw;
+    refMime = refIsPng ? "image/png" : "image/jpeg";
+    if (refIsPng && raw.length > REF_TARGET_BYTES && deps.sips !== false) {
+      const tmpOut = path.join(
+        config.cacheDir || os.tmpdir(),
+        `${config.date}-${spec.name}-ref-downscaled.jpg`,
+      );
+      try {
+        await mkdir(path.dirname(tmpOut), { recursive: true });
+      } catch {
+        /* cacheDir may not exist yet; sips --out will fail gracefully */
+      }
+      const downscaled = await sipsDownscale(spec.refImage, tmpOut, {
+        timeoutMs: config.imageSipsTimeoutMs,
+        onTimeout: () => {
+          refDownscaleTimedOut = true;
+        },
+      });
+      if (downscaled) {
+        refBuf = downscaled.buf;
+        refMime = downscaled.mime;
       }
     }
   } catch (e) {
@@ -563,6 +576,20 @@ async function generatePosterCore(config, spec, deps = {}) {
 
 // Public GitHub entry point; keep this signature stable for callers and tests.
 export async function generateGithubPoster(config, repos = [], deps = {}) {
+  // Anti-fabrication contract, symmetric with generateAiPoster's IMG_NO_HEADLINES:
+  // no parsed rows means there is nothing real to render onto the GitHub 日榜简报.
+  // Refuse before the image API rather than send a template-only prompt the model
+  // would eagerly fill with fabricated repos from training memory.
+  if (!hasGithubPosterRows(repos)) {
+    const error = imgErr("IMG_NO_ROWS", "GitHub 海报没有可渲染的仓库条目");
+    return {
+      ok: false,
+      name: "GitHubPoster",
+      summary: "skipped (无仓库条目)",
+      error,
+      usedFallback: false,
+    };
+  }
   return generatePosterCore(
     config,
     {

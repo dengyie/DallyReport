@@ -347,7 +347,9 @@ export function mergeSourcesPreferLinuxDo(linuxdoSources, generalSources, { maxT
   };
   for (const s of linuxdoSources || []) push(s);
   for (const s of generalSources || []) push(s);
-  return out.slice(0, Math.max(1, maxTotal));
+  // Max 0 is honored (an empty merge is a valid "no sources this run"); do not
+  // secretly coerce a deliberately-disabled AI_SOURCE_MAX_TOTAL=0 up to 1.
+  return out.slice(0, Math.max(0, maxTotal));
 }
 
 function normalizeUrl(u) {

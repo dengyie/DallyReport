@@ -13,6 +13,7 @@ import {
   buildContextualPrompt,
   buildAiContextualPrompt,
   hasAiPosterHeadlines,
+  hasGithubPosterRows,
   sipsDownscale,
   decodeImageBuffer,
 } from "../src/image-gen.mjs";
@@ -220,6 +221,35 @@ test("buildContextualPrompt: description without a terminator is kept whole (raw
 test("buildContextualPrompt: no repos -> just date substitution", () => {
   const out = buildContextualPrompt("base {date} end", { date: "2026-07-31", repos: [] });
   assert.equal(out, "base 2026-07-31 end");
+});
+
+test("buildContextualPrompt: null repos -> just date substitution (no fabricatable list)", () => {
+  // A direct caller passing null/undefined must not get a "render 0 items" prompt
+  // the model would eagerly fill with fabricated repos; it gets the bare template.
+  assert.equal(buildContextualPrompt("base {date} end", { date: "2026-07-31", repos: null }), "base 2026-07-31 end");
+  assert.equal(buildContextualPrompt("base {date} end", { date: "2026-07-31" }), "base 2026-07-31 end");
+});
+
+test("hasGithubPosterRows: false for empty/null/non-array", () => {
+  assert.equal(hasGithubPosterRows([]), false);
+  assert.equal(hasGithubPosterRows(null), false);
+  assert.equal(hasGithubPosterRows(undefined), false);
+  assert.equal(hasGithubPosterRows("x"), false);
+  assert.equal(hasGithubPosterRows([{ repo: "a/b" }]), true);
+});
+
+test("image-gen: GitHub poster with no rows skips before image API (IMG_NO_ROWS)", async () => {
+  // Symmetric with the AI poster's IMG_NO_HEADLINES skip. A zero-row GitHub poster
+  // has nothing real to render; we must NOT call the image API at all (which would
+  // fabricate a trending list from the model's training memory).
+  const c = cfg();
+  const fetchStub = stubFetch([{ status: 200, ct: "application/json", body: { data: [{ b64_json: B64_IMG }] } }]);
+  const res = await generateGithubPoster(c, [], { fetch: fetchStub, sips: false });
+  assert.equal(res.ok, false);
+  assert.equal(res.name, "GitHubPoster");
+  assert.equal(res.error.code, "IMG_NO_ROWS");
+  assert.match(res.summary, /skipped/);
+  assert.equal(fetchStub.calls.length, 0, "must not call the image API with no rows");
 });
 
 test("buildAiContextualPrompt: keeps linux.do first and marks headlines as data", () => {
@@ -437,7 +467,9 @@ maybeCreds("image-gen: url branch fetches + PNG signature check", async () => {
 
 maybeCreds("image-gen: missing prompt file -> IMG_BAD_PROMPT", async () => {
   const c = cfg({ imagePromptFile: "/no/such/prompt.md" });
-  const res = await generateGithubPoster(c, [], { fetch: () => {}, sips: false });
+  // Non-empty repos: must pass the IMG_NO_ROWS guard so we actually reach the
+  // prompt-file-existence check this test is exercising.
+  const res = await generateGithubPoster(c, [{ repo: "a/b", starsToday: 5, starsTotal: 10 }], { fetch: () => {}, sips: false });
   assert.equal(res.ok, false);
   assert.equal(res.error.code, "IMG_BAD_PROMPT");
 });
