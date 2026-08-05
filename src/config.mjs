@@ -77,6 +77,19 @@ function val(name) {
   return process.env[name]?.trim() || null;
 }
 
+// Parse a comma-separated env list (e.g. community list URLs) into a non-empty
+// string[], or null to mean "use the module default". A single trailing comma is
+// tolerated so users can't silently break their list by ending it with one.
+function csv(name) {
+  const raw = val(name);
+  if (!raw) return null;
+  const items = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return items.length ? items : null;
+}
+
 function int(name, fallback) {
   const raw = process.env[name];
   if (raw == null || raw === "") return fallback;
@@ -207,8 +220,36 @@ export function loadConfig({ date = null } = {}) {
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
     linuxdoDeepFetchLimit: int("LINUXDO_DEEP_FETCH_LIMIT", 5),
-    // Cap on total sources fed to synthesis after merge (linux.do first).
-    sourceMaxTotal: int("AI_SOURCE_MAX_TOTAL", 16),
+    // Cap on total sources fed to synthesis after merge (community first).
+    sourceMaxTotal: int("AI_SOURCE_MAX_TOTAL", 18),
+    // --- nodeseek.com community AI sources (nodeseek.mjs) ---
+    nodeseekEnabled: (() => {
+      const raw = val("NODESEEK_ENABLED");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    nodeseekListUrls: csv("NODESEEK_LIST_URLS"),
+    nodeseekTopicLimit: int("NODESEEK_TOPIC_LIMIT", 6),
+    nodeseekDeepFetch: (() => {
+      const raw = val("NODESEEK_DEEP_FETCH");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    nodeseekDeepFetchLimit: int("NODESEEK_DEEP_FETCH_LIMIT", 3),
+    // --- v2ex.com OpenAI-node community AI sources (v2ex.mjs) ---
+    v2exEnabled: (() => {
+      const raw = val("V2EX_ENABLED");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    v2exListUrls: csv("V2EX_LIST_URLS"),
+    v2exTopicLimit: int("V2EX_TOPIC_LIMIT", 6),
+    v2exDeepFetch: (() => {
+      const raw = val("V2EX_DEEP_FETCH");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    v2exDeepFetchLimit: int("V2EX_DEEP_FETCH_LIMIT", 3),
     // GROK_MODEL governs BOTH the grok-search /responses search call (forwarded to
     // the child via childEnv) AND the llm-synthesize synthesis call. If you ever want
     // them independent, split into GROK_SEARCH_MODEL / SYNTH_MODEL here.

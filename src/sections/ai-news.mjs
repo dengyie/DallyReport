@@ -3,6 +3,8 @@ import { frontMatter } from "../markdown.mjs";
 import { assertGrokCreds } from "../config.mjs";
 import { synthesizeFromSources } from "../llm-synthesize.mjs";
 import { fetchLinuxDoAiSources, mergeSourcesPreferLinuxDo } from "../linuxdo.mjs";
+import { fetchNodeSeekAiSources } from "../nodeseek.mjs";
+import { fetchV2exAiSources } from "../v2ex.mjs";
 
 export function computeAiNewsStatus({
   searchOk,
@@ -11,6 +13,8 @@ export function computeAiNewsStatus({
   zeroCitation,
   sourceCount,
   linuxdoCount = 0,
+  nodeseekCount = 0,
+  v2exCount = 0,
   hasUsableDegradedDump,
   credErr = null,
   searchError = null,
@@ -55,9 +59,12 @@ export async function aiNewsSection(config) {
   let searchError = null;
   const credErr = assertGrokCreds();
 
-  // Kick off the general search and the linux.do scrape in parallel. linux.do is
-  // independent of Grok creds (it only needs fetch providers), so it still runs
-  // even if assertGrokCreds fails — worst case we synthesize from forum alone.
+  // Kick off the general search and the community scrapes in parallel. The forums
+  // (linux.do, nodeseek, v2ex) are independent of Grok creds (they only need fetch
+  // providers), so they still run even if assertGrokCreds fails — worst case we
+  // synthesize from the forums alone. De-pollution: these are data-diversity inputs
+  // only; they are merged ahead of general sources for synthesis and never written
+  // into the shipped note (no names, no counts, no [N] markers).
   const searchPromise = (async () => {
     if (credErr) return null;
     try {
@@ -67,16 +74,24 @@ export async function aiNewsSection(config) {
       return null;
     }
   })();
-  const linuxdoPromise = fetchLinuxDoAiSources(config).catch((error) => {
+  const fallbackCommunity = (key) => (error) => {
     const fallback = [];
-    Object.defineProperty(fallback, "linuxdoError", {
+    Object.defineProperty(fallback, key, {
       value: { kind: "collector", failures: [{ message: error?.message || String(error) }] },
       enumerable: false,
     });
     return fallback;
-  });
+  };
+  const linuxdoPromise = fetchLinuxDoAiSources(config).catch(fallbackCommunity("linuxdoError"));
+  const nodeseekPromise = fetchNodeSeekAiSources(config).catch(fallbackCommunity("nodeseekError"));
+  const v2exPromise = fetchV2exAiSources(config).catch(fallbackCommunity("v2exError"));
 
-  const [searchResult, linuxdoSources] = await Promise.all([searchPromise, linuxdoPromise]);
+  const [searchResult, linuxdoSources, nodeseekSources, v2exSources] = await Promise.all([
+    searchPromise,
+    linuxdoPromise,
+    nodeseekPromise,
+    v2exPromise,
+  ]);
   result = searchResult;
 
   const grokCitations =
@@ -89,11 +104,16 @@ export async function aiNewsSection(config) {
   const generalSources = result?.sources?.extra?.length
     ? result.sources.extra
     : result?.sources?.merged || [];
-  // linux.do first so synthesis cites them as [1]..[N]; de-dupe by URL.
+  // Community first (linux.do → nodeseek → v2ex) ahead of general extras) so
+  // synthesis sees the same-day forum signal; de-dupe by URL.
   const sources = mergeSourcesPreferLinuxDo(linuxdoSources, generalSources, {
-    maxTotal: config.sourceMaxTotal ?? 16,
+    maxTotal: config.sourceMaxTotal ?? 18,
+    extraCommunitySources: [...(nodeseekSources || []), ...(v2exSources || [])],
   });
   const linuxdoCount = (linuxdoSources || []).length;
+  const nodeseekCount = (nodeseekSources || []).length;
+  const v2exCount = (v2exSources || []).length;
+  const communityCount = linuxdoCount + nodeseekCount + v2exCount;
   const rawAnswerText = result?.answer?.text || "";
 
   // Plan B: when the gateway has zero citations (no /responses web_search backend),
@@ -113,21 +133,22 @@ export async function aiNewsSection(config) {
   const hasUsableDegradedDump = degraded && rawAnswerText.trim().length >= 120;
   // When to synthesize:
   //   (a) zero-citation (model would hallucinate) and we have real sources;
-  //   (b) search failed/creds missing but linux.do produced usable sources;
+  //   (b) search failed/creds missing but any community forum (linux.do /
+  //       nodeseek / v2ex) produced usable sources;
   //   (c) grok-search went degraded (dirty Tavily/Firecrawl dump as answer) AND
-  //       we got linux.do sources — the degraded dump is injection-noisy and buries
-  //       the forum signal, so re-synthesizing from our cleaned sources beats
-  //       reusing it. (When degraded with NO linux.do sources, reuse the dump to
-  //       avoid a second paid round on top of an already-grounded body.)
+  //       we have community sources — the degraded dump is injection-noisy and
+  //       buries the forum signal, so re-synthesizing from our cleaned sources
+  //       beats reusing it. (When degraded with NO community sources, reuse the
+  //       dump to avoid a second paid round on top of an already-grounded body.)
   const haveSources = sources.length > 0;
   const searchOkForSynth = !credErr && !searchError && result;
-  const degradedReuseable = hasUsableDegradedDump && linuxdoCount === 0;
+  const degradedReuseable = hasUsableDegradedDump && communityCount === 0;
   const shouldSynth =
     haveSources &&
     !degradedReuseable &&
     ((searchOkForSynth && zeroCitation) ||
-      (!searchOkForSynth && linuxdoCount > 0) ||
-      (hasUsableDegradedDump && linuxdoCount > 0));
+      (!searchOkForSynth && communityCount > 0) ||
+      (hasUsableDegradedDump && communityCount > 0));
   if (shouldSynth) {
     try {
       bodyText = await synthesizeFromSources({
@@ -181,6 +202,8 @@ export async function aiNewsSection(config) {
     zeroCitation,
     sourceCount: sources.length,
     linuxdoCount,
+    nodeseekCount,
+    v2exCount,
     hasUsableDegradedDump,
     credErr,
     searchError,
@@ -198,6 +221,8 @@ export async function aiNewsSection(config) {
     synthFailed: synthAttemptedAndFailed,
     sourceCount: sources.length,
     linuxdoCount,
+    nodeseekCount,
+    v2exCount,
     // Reuse the sanitized source set for the AI poster headlines.
     sources,
   };

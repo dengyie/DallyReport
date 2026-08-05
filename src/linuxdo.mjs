@@ -324,12 +324,18 @@ function attachCacheMetadata(sources, usedCache, cacheFiles) {
 }
 
 /**
- * Merge linux.do sources ahead of general extras, de-duping by URL.
- * linux.do entries always come first so synthesis sees them as [1]..[N].
- * General-source snippets are passed through sanitizeSnippet() here too, since
- * aggregator extracts can carry injected text and would otherwise be shipped raw.
+ * Merge linux.do + other community sources ahead of general extras, de-duping by
+ * URL. linux.do entries always come first, then the other community forums
+ * (nodeseek, v2ex), then general extras — so synthesis sees the forum signal
+ * before aggregator links. General-source snippets are passed through
+ * sanitizeSnippet() here too, since aggregator extracts can carry injected text
+ * and would otherwise be shipped raw.
  */
-export function mergeSourcesPreferLinuxDo(linuxdoSources, generalSources, { maxTotal = 16 } = {}) {
+export function mergeSourcesPreferLinuxDo(
+  linuxdoSources,
+  generalSources,
+  { maxTotal = 18, extraCommunitySources = [] } = {},
+) {
   const out = [];
   const seen = new Set();
   const push = (s) => {
@@ -346,6 +352,7 @@ export function mergeSourcesPreferLinuxDo(linuxdoSources, generalSources, { maxT
     out.push(cleaned);
   };
   for (const s of linuxdoSources || []) push(s);
+  for (const s of extraCommunitySources || []) push(s);
   for (const s of generalSources || []) push(s);
   // Max 0 is honored (an empty merge is a valid "no sources this run"); do not
   // secretly coerce a deliberately-disabled AI_SOURCE_MAX_TOTAL=0 up to 1.
