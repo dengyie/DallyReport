@@ -61,7 +61,7 @@ const DEFAULT_IMAGE_REF_IMAGE = path.join(
   "obsidian-note",
   "OneNode",
   "assersts",
-  "Pasted image 20260730051155.png",
+  "Pasted image 20260804185819.png",
 );
 // gpt-image-2 is the user-mandated model. CPA rejects gpt-image-1 on /images/*.
 // Probed 2026-07-31: /images/generations is reliable; /images/edits (ref upload)

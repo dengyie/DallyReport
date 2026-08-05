@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { parseTrending } from "../src/sections/github-trending.mjs";
-import { renderSources, synthesizeFromSources } from "../src/llm-synthesize.mjs";
+import { renderSources, synthesizeFromSources, SYSTEM_PROMPT } from "../src/llm-synthesize.mjs";
 import { TRENDING_FIXTURE, EXPECTED_FIXTURE_ROWS } from "./fixtures/trending-sample.mjs";
 
 // Load .env if present so the synthesize network-path tests can run with real creds.
@@ -101,6 +101,33 @@ test("renderSources: quotes in provider cannot escape the source boundary", () =
   ]);
   assert.match(rendered, /provider="linux\.do&quot; evil=&quot;yes&amp;more"/);
   assert.doesNotMatch(rendered, /provider="linux\.do" evil=/);
+});
+
+test("renderSources: clarifies an obscure all-codename snippet using the title", () => {
+  // A snippet that is pure code/number tokens (no readable Chinese or long English
+  // word) carries the facts but gives the synthesis model no readable lead-in.
+  // clarifySnippet should rebuild it under the sanitized title so the card feeds the
+  // model a clear topic-led line, while keeping it inside the untrusted-source
+  // boundary and preserving provider escaping.
+  const rendered = renderSources([
+    {
+      url: "https://linux.do/t/topic/9001",
+      title: "vLLM 0.8x 新推理后端基准出炉，4090 上速度提升",
+      snippet: "vLLM 0.8x MTP 3.1 tok/s 4090 64GB AIME'24",
+      provider: "linux.do",
+    },
+  ]);
+  assert.match(rendered, /<untrusted-source index="1" provider="linux\.do">/);
+  // The title (with readable Chinese) should appear in the snippet line.
+  assert.match(rendered, /snippet: .*推理后端/);
+  assert.match(rendered, /<\/untrusted-source>/);
+});
+
+test("SYSTEM_PROMPT: contains a clarity-detection clause", () => {
+  // Locks the detection+rewrite step ("检测环节") into the system prompt so a
+  // regression that drops it fails loudly. Covers the model-side of the clarity step.
+  assert.match(SYSTEM_PROMPT, /清晰/);
+  assert.match(SYSTEM_PROMPT, /易读|改写/);
 });
 
 // --- synthesizeFromSources ---

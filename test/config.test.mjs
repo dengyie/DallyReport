@@ -59,6 +59,7 @@ test("loadConfig: derives portable defaults from the current home directory", as
     assert.equal(config.imageSipsTimeoutMs, 15000);
     assert.match(config.aiImagePromptFile, /图片生成提示词[\\/]AI 日报海报提示词\.md$/);
     assert.equal(config.aiImageRefImage, config.imageRefImage);
+    assert.match(config.imageRefImage, /Pasted image 20260804185819\.png$/);
     assert.equal(config.imageEnabled, true);
     assert.equal(config.aiImageEnabled, config.imageEnabled);
   });

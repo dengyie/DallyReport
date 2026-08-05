@@ -105,6 +105,73 @@ export function sanitizeSnippet(snippet, { maxChars = 1000 } = {}) {
   return joined.slice(0, maxChars);
 }
 
+// ---- Clarity heuristic (deterministic, non-LLM) ----
+// A scraped snippet that is entirely English model codenames, benchmark tokens,
+// percentages and symbols (e.g. "vLLM 4090 0.8x MTP 3.1 tok/s AIME'24 bench")
+// carries the facts but gives the synthesis model no readable Chinese to build on.
+// We detect that shape cheaply and, when a usable title exists, rebuild the card's
+// snippet as "<title>。<clean>" so the model gets a clear topic-led lead-in. This
+// is detection-on-the-source side of the clarity step: zero extra LLM calls, and it
+// fails safe — if anything is uncertain it returns the clean snippet unchanged.
+//
+// Readability signal: count CJK ideographs and latin words vs. tokens that are
+// pure symbols / percentages / bare numbers. A snippet is "obscure" when it is
+// non-empty, has very little readable Chinese, and is dominated by
+// numbers/symbols/single English tokens.
+const CJK_RE = /[一-鿿]/gu;
+const LATIN_WORD_RE = /[A-Za-z][A-Za-z0-9'./'-]*/g;
+// Tokens that are NOT readable prose: pure punctuation, percentages, bare numbers
+// (with optional units/slashes), or a lone latin codename with no surrounding
+// Chinese. We split broadly on whitespace+commas and then classify each token.
+function tokenizeForReadability(s) {
+  return s.split(/[\s,，;；:：|·]+/).map((t) => t.trim()).filter(Boolean);
+}
+function isReadableToken(tok) {
+  if (!tok) return false;
+  if (CJK_RE.test(tok)) return true; // contains any Han ideograph
+  // A latin word with a real space-separated neighbor reads as prose only when it
+  // is a common, longer English word — but we treat single short alphanumeric
+  // codenames (<=4 chars) as non-readable signal; longer latin words count.
+  if (/^[A-Za-z]{5,}$/.test(tok)) return true;
+  return false;
+}
+
+// "Obscure" when the readable share of the (non-empty) snippet is low: no CJK
+// ideographs and no long English words, yet there ARE short codename/number/
+// symbol tokens present.
+function isObscureSnippet(clean) {
+  if (!clean) return false;
+  const cjk = (clean.match(CJK_RE) || []).length;
+  if (cjk > 0) return false; // any readable Han prose → not obscure
+  const tokens = tokenizeForReadability(clean);
+  if (tokens.length === 0) return false;
+  const readableTokens = tokens.filter(isReadableToken).length;
+  // "vLLM 4090 0.8x tok/s AIME'24" → 0 readable tokens, several code/number tokens
+  // → obscure. A normal English sentence ("the model is now generally available")
+  // has readableTokens > 0 → not obscure.
+  return readableTokens === 0;
+}
+
+/**
+ * clarifySnippet: source-side clarity detector. Sanitizes, then — only if the
+ * clean snippet is "obscure" (all codenames/numbers/symbols, no readable Chinese
+ * sentence) and a usable sanitized title exists — rebuilds it as
+ * `<title>。<clean>` capped at maxChars. Never fabricates a body from a title
+ * alone (empty snippet stays ""), and never revives injected text (sanitize runs
+ * first). Returns the clean snippet unchanged when not obscure or no title.
+ */
+export function clarifySnippet(snippet, title, { maxChars = 1000 } = {}) {
+  const clean = sanitizeSnippet(snippet);
+  if (!clean) return ""; // empty snippet → never fabricate a body from the title
+  if (!isObscureSnippet(clean)) return clean; // readable → passthrough
+  const clearTitle = title ? sanitizeSnippet(title, { maxChars: 200 }) : "";
+  if (!clearTitle) return clean; // obscure but no usable title → don't fabricate
+  // Title leads with the topic, clean snippet supplies the terse facts, then
+  // re-sanitize the whole thing (in case the splice reintroduced an injected
+  // fragment) and cap.
+  return sanitizeSnippet(`${clearTitle}。${clean}`, { maxChars });
+}
+
 /**
  * True if a source card is entirely injection / nonsense and should be dropped
  * (rather than shipped as-is to the model). We sanitize first, then decide.
