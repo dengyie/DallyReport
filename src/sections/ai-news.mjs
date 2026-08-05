@@ -53,6 +53,29 @@ export function computeAiNewsStatus({
   return { ok, summary, zeroContentHallucination };
 }
 
+// Pure decision: should the section re-synthesize the body from our cleaned sources
+// instead of shipping the raw answer? Community forums (linux.do / nodeseek / v2ex)
+// are data-diversity inputs, so their presence can enable a synthesis round even
+// when the Grok search itself is unavailable. Exported for unit tests.
+export function shouldSynthesize({
+  haveSources,
+  searchOkForSynth,
+  zeroCitation,
+  communityCount,
+  hasUsableDegradedDump,
+}) {
+  // A degraded grok-search dump is itself source-grounded; when there are NO
+  // community sources re-synthesizing on top of it is redundant paid spend.
+  const degradedReuseable = hasUsableDegradedDump && communityCount === 0;
+  return (
+    haveSources &&
+    !degradedReuseable &&
+    ((searchOkForSynth && zeroCitation) ||
+      (!searchOkForSynth && communityCount > 0) ||
+      (hasUsableDegradedDump && communityCount > 0))
+  );
+}
+
 export async function aiNewsSection(config) {
   const ai = (config.aiQueryTemplate || "").replace(/\{date\}/g, config.date);
   let result;
@@ -142,13 +165,13 @@ export async function aiNewsSection(config) {
   //       dump to avoid a second paid round on top of an already-grounded body.)
   const haveSources = sources.length > 0;
   const searchOkForSynth = !credErr && !searchError && result;
-  const degradedReuseable = hasUsableDegradedDump && communityCount === 0;
-  const shouldSynth =
-    haveSources &&
-    !degradedReuseable &&
-    ((searchOkForSynth && zeroCitation) ||
-      (!searchOkForSynth && communityCount > 0) ||
-      (hasUsableDegradedDump && communityCount > 0));
+  const shouldSynth = shouldSynthesize({
+    haveSources,
+    searchOkForSynth,
+    zeroCitation,
+    communityCount,
+    hasUsableDegradedDump,
+  });
   if (shouldSynth) {
     try {
       bodyText = await synthesizeFromSources({

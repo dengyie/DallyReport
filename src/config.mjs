@@ -193,9 +193,7 @@ export function loadConfig({ date = null } = {}) {
     days: int("GROK_DAYS", 2),
     extra: int("GROK_EXTRA", 10),
     fetchMaxChars: int("GROK_FETCH_MAX_CHARS", 80000),
-    aiQueryTemplate:
-      val("AI_QUERY") ||
-      "今天{date}最新的AI资讯和大模型动态（优先关注 linux.do 论坛前沿快讯与人工智能相关讨论）",
+    aiQueryTemplate: val("AI_QUERY") || "今天{date}最新的AI资讯和大模型动态",
     date,
     // --- linux.do forum AI source prioritization ---
     // When enabled (default), ai-news also scrapes linux.do 前沿快讯 + 人工智能 tag
@@ -205,14 +203,7 @@ export function loadConfig({ date = null } = {}) {
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    linuxdoListUrls: (() => {
-      const raw = val("LINUXDO_LIST_URLS");
-      if (!raw) return null; // module default
-      return raw
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-    })(),
+    linuxdoListUrls: csv("LINUXDO_LIST_URLS"),
     linuxdoTopicLimit: int("LINUXDO_TOPIC_LIMIT", 8),
     linuxdoDeepFetch: (() => {
       const raw = val("LINUXDO_DEEP_FETCH");

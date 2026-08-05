@@ -110,6 +110,29 @@ DeepSeek V4 Flash 正式版 API 已经上线，推理速度比 V3 提升约 3 �
   assert.doesNotMatch(snip, /avatar/);
 });
 
+test("snippetFromNodeSeekTopicText: rejects a fused chrome line as OP body", () => {
+  // Chrome tokens fused on ONE line (space-separated) exceed the length filter, so
+  // a whole-line token match is not enough — the line must be dropped as chrome.
+  const raw = `所有版块 快捷功能区 你好啊陌生人 登录 注册
+
+# [DeepSeek V4 Flash 正式版发布](https://www.nodeseek.com/post-859511-1)
+
+DeepSeek V4 Flash 推理成本大幅下降，API 定价每百万 token 3 元。`;
+  const snip = snippetFromNodeSeekTopicText(raw, "DeepSeek V4 Flash 正式版发布");
+  assert.doesNotMatch(snip, /所有版块|快捷功能区|你好啊|陌生人|登录|注册/);
+  assert.match(snip, /DeepSeek V4 Flash/);
+});
+
+test("snippetFromNodeSeekTopicText: keeps a title token that opens a real prose line", () => {
+  // "注册成功后可继续" starts with a chrome token but no separating whitespace, so
+  // it must be treated as prose, not chrome (the delayed-whitespace guard).
+  const raw = `# [title](https://www.nodeseek.com/post-1-1)
+
+注册成功后可继续体验 DeepSeek V4 Flash。`;
+  const snip = snippetFromNodeSeekTopicText(raw, "title");
+  assert.match(snip, /注册成功后可继续体验 DeepSeek/);
+});
+
 test("snippetFromNodeSeekTopicText: empty -> empty string", () => {
   assert.equal(snippetFromNodeSeekTopicText("", "x"), "");
 });

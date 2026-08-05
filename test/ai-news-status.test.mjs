@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeAiNewsStatus } from "../src/sections/ai-news.mjs";
+import { computeAiNewsStatus, shouldSynthesize } from "../src/sections/ai-news.mjs";
 
 test("computeAiNewsStatus: zero-citation output with sources remains usable", () => {
   const status = computeAiNewsStatus({
@@ -83,4 +83,90 @@ test("computeAiNewsStatus: linuxdo presence does not leak into the summary", () 
   });
   assert.equal(status.ok, true);
   assert.doesNotMatch(status.summary, /linux\.do|linuxdo/);
+});
+
+// --- shouldSynthesize (pure decision; exported from ai-news.mjs) ---
+
+test("shouldSynthesize: zero-citation with real sources -> true", () => {
+  assert.equal(
+    shouldSynthesize({
+      haveSources: true,
+      searchOkForSynth: true,
+      zeroCitation: true,
+      communityCount: 0,
+      hasUsableDegradedDump: false,
+    }),
+    true,
+  );
+});
+
+test("shouldSynthesize: search failed but community sources exist -> true", () => {
+  // (b) creds missing / search down, yet a forum (linux.do/nodeseek/v2ex) produced
+  // usable same-day signal -> re-synthesize from the cleaned community sources.
+  assert.equal(
+    shouldSynthesize({
+      haveSources: true,
+      searchOkForSynth: false,
+      zeroCitation: false,
+      communityCount: 3,
+      hasUsableDegradedDump: false,
+    }),
+    true,
+  );
+});
+
+test("shouldSynthesize: degraded dump + community sources -> true (re-synthesize)", () => {
+  // (c) grok-search went degraded (injection-noisy raw dump as answer) and we have
+  // community signal to rebuild from -> re-synthesize beats reusing the dump.
+  assert.equal(
+    shouldSynthesize({
+      haveSources: true,
+      searchOkForSynth: true,
+      zeroCitation: false,
+      communityCount: 2,
+      hasUsableDegradedDump: true,
+    }),
+    true,
+  );
+});
+
+test("shouldSynthesize: degraded dump with NO community sources -> false (reuse dump)", () => {
+  // Reusing the already-grounded degraded dump avoids a second paid round on top of
+  // an existing body; no community signal to justify the re-synthesis.
+  assert.equal(
+    shouldSynthesize({
+      haveSources: true,
+      searchOkForSynth: true,
+      zeroCitation: false,
+      communityCount: 0,
+      hasUsableDegradedDump: true,
+    }),
+    false,
+  );
+});
+
+test("shouldSynthesize: no sources at all -> false", () => {
+  assert.equal(
+    shouldSynthesize({
+      haveSources: false,
+      searchOkForSynth: true,
+      zeroCitation: true,
+      communityCount: 0,
+      hasUsableDegradedDump: false,
+    }),
+    false,
+  );
+});
+
+test("shouldSynthesize: search ok + cited (no degraded/zero) -> false", () => {
+  assert.equal(
+    shouldSynthesize({
+      haveSources: true,
+      searchOkForSynth: true,
+      zeroCitation: false,
+      communityCount: 2,
+      hasUsableDegradedDump: false,
+    }),
+    false,
+  );
 });

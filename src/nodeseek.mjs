@@ -62,8 +62,12 @@ export function snippetFromNodeSeekTopicText(text, title, maxChars = 500) {
     .replace(/\*\*|__|`/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+  // Fused chrome lines (e.g. "所有版块 快捷功能区 你好啊陌生人 登录 注册") pass the
+  // length filter but carry no OP content. Reject any line that *starts* with a
+  // chrome token; the whole-line form additionally catches lone tokens on their own
+  // line. Both anchored so a chrome token buried mid-sentence is left intact.
   const chromeRe =
-    /^(views?|likes?|users?|####|所有版块|快捷功能区|你好啊|陌生人|登录|注册|推荐阅读|管理记录|幸运抽奖|邀请好友|合作商家|友站链接|📈|🎉|(新评论|新帖子))$/i;
+    /^(views?|likes?|users?|####|所有版块|快捷功能区|你好啊|陌生人|登录|注册|推荐阅读|管理记录|幸运抽奖|邀请好友|合作商家|友站链接|📈|🎉|(新评论|新帖子))(\s+.*)?$/i;
   const paras = body
     .split(/\n+/)
     .map((p) => p.replace(/\s+/g, " ").trim())

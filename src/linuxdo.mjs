@@ -19,6 +19,7 @@
 import path from "node:path";
 import { runFetch } from "./grok-cli.mjs";
 import { sanitizeSnippet, isInjectionOnlySource } from "./snippet-hygiene.mjs";
+import { AI_TITLE_RE } from "./community.mjs";
 
 // Listing pages that concentrate AI / frontier news. Discourse category ids observed
 // live on 2026-07-31: 前沿快讯 = /c/news/34, 人工智能 tag = /tag/444-tag/444.
@@ -27,10 +28,9 @@ export const DEFAULT_LIST_URLS = [
   "https://linux.do/tag/444-tag/444",
 ];
 
-// Title must match at least one of these to count as AI-related (case-insensitive).
-// Kept broad enough for Chinese + English model names and tooling chatter on L 站.
-const AI_TITLE_RE =
-  /ai|人工智能|大模型|大 模型|gpt|claude|openai|anthropic|deepseek|gemini|llm|qwen|kimi|glm|智谱|混元|豆包|通义|月之暗面|机器人|agent|seedance|opencode|midjourney|sora|cursor|codex|ollama|vllm|huggingface|nvidia|推理|蒸馏|榜单|模型|token|mimo|longcat|pangu|openpangu|nanobanana|veo|grok|xai|perplexity|cohere|mistral|llama|falcon|yiapi|中转站|api/i;
+// Title must match at least one of the shared AI tokens to count as AI-related.
+// The shared regex (community.mjs) covers model names, tooling, and platform chatter
+// across all three forums (linux.do / nodeseek / v2ex).
 
 // Drop non-content / sticky / clearly off-topic noise even if keyword-adjacent.
 const EXCLUDE_TITLE_RE =

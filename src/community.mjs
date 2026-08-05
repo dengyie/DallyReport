@@ -19,7 +19,7 @@ import { sanitizeSnippet, isInjectionOnlySource } from "./snippet-hygiene.mjs";
 // Shared AI-keyword gate for the community collectors. Kept broad enough for
 // Chinese + English model names and tooling chatter across L 站 / NodeSeek / V2EX.
 export const AI_TITLE_RE =
-  /ai|人工智能|大模型|大 模型|gpt|chatgpt|claude|openai|anthropic|deepseek|gemini|llm|qwen|kimi|glm|智谱|混元|豆包|通义|月之暗面|机器人|agent|opencode|midjourney|sora|cursor|codex|ollama|vllm|huggingface|nvidia|推理|蒸馏|榜单|模型|token|grok|xai|perplexity|cohere|mistral|llama|falcon|生图|文生|数字人|短剧/i;
+  /ai|人工智能|大模型|大 模型|gpt|chatgpt|claude|openai|anthropic|deepseek|gemini|llm|qwen|kimi|glm|智谱|混元|豆包|通义|月之暗面|机器人|agent|opencode|midjourney|sora|cursor|codex|ollama|vllm|huggingface|nvidia|推理|蒸馏|榜单|模型|token|grok|xai|perplexity|cohere|mistral|llama|falcon|生图|文生|数字人|短剧|seedance|mimo|longcat|pangu|openpangu|nanobanana|veo|yiapi|中转站|api/i;
 
 // Promo/ads that should sink to the bottom even when keyword-adjacent.
 const PROMO_TITLE_RE =
