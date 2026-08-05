@@ -130,6 +130,15 @@ test("SYSTEM_PROMPT: contains a clarity-detection clause", () => {
   assert.match(SYSTEM_PROMPT, /易读|改写/);
 });
 
+test("SYSTEM_PROMPT: de-polluted — no [N] citation markers or linux.do priority", () => {
+  // Locks the "normal daily report" rewrite: the brief must not be told to tag each
+  // bullet with a source number ([1]、[3]), and must not prefer linux.do sources.
+  // A regression that re-adds either fails loudly.
+  assert.doesNotMatch(SYSTEM_PROMPT, /\[1\]、\[3\]/);
+  assert.doesNotMatch(SYSTEM_PROMPT, /优先采纳/);
+  assert.doesNotMatch(SYSTEM_PROMPT, /linux\.do/);
+});
+
 // --- synthesizeFromSources ---
 
 // Creds must be present for the network path; set throwaway creds for these tests

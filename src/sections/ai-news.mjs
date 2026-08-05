@@ -1,5 +1,5 @@
 import { runSearch } from "../grok-cli.mjs";
-import { frontMatter, sourceList } from "../markdown.mjs";
+import { frontMatter } from "../markdown.mjs";
 import { assertGrokCreds } from "../config.mjs";
 import { synthesizeFromSources } from "../llm-synthesize.mjs";
 import { fetchLinuxDoAiSources, mergeSourcesPreferLinuxDo } from "../linuxdo.mjs";
@@ -31,10 +31,7 @@ export function computeAiNewsStatus({
       ? `综合截断已回退原始回答（${synthError.code}）`
       : `综合失败已回退原始回答（${synthError?.code || "?"}）`;
   } else if (synthesized) {
-    summary =
-      linuxdoCount > 0
-        ? `综合成功（${synthModel}，${sourceCount} 来源，linux.do ${linuxdoCount}）`
-        : `综合成功（${synthModel}，${sourceCount} 来源）`;
+    summary = `综合成功（${synthModel}，${sourceCount} 来源）`;
   } else if (credErr) {
     summary = "missing grok creds";
   } else if (!searchOk) {
@@ -88,35 +85,6 @@ export async function aiNewsSection(config) {
     )?.count ?? 0;
   const zeroCitation = result ? grokCitations === 0 : false;
   const degraded = result?.diagnostics?.degraded === true;
-  const warnings = [...(result?.diagnostics?.warnings || [])];
-  const linuxdoError = linuxdoSources?.linuxdoError || null;
-  const linuxdoDiagnostics = linuxdoSources?.linuxdoDiagnostics || null;
-  const linuxdoWarningParts = [];
-  if (linuxdoError) {
-    linuxdoWarningParts.push(
-      `linux.do 抓取失败：${linuxdoError.failures?.map((f) => f.message).filter(Boolean).join("；") || "未知错误"}`,
-    );
-  }
-  if (linuxdoDiagnostics?.listingFailures?.length && !linuxdoError) {
-    linuxdoWarningParts.push(`linux.do 列表部分失败（${linuxdoDiagnostics.listingFailures.length} 个）`);
-  }
-  if (linuxdoDiagnostics?.deepFetchFailures?.length) {
-    linuxdoWarningParts.push(
-      `linux.do 主题详情抓取失败（${linuxdoDiagnostics.deepFetchFailures.length} 个，已保留标题卡片）`,
-    );
-  }
-  if (linuxdoDiagnostics?.cacheWriteFailures?.length) {
-    linuxdoWarningParts.push(
-      `linux.do 缓存写入失败（${linuxdoDiagnostics.cacheWriteFailures.length} 个，实时内容仍已使用）`,
-    );
-  }
-  const linuxdoWarning = linuxdoWarningParts.length
-    ? linuxdoWarningParts.join("；")
-    : null;
-  const linuxdoCache = linuxdoSources?.linuxdoCache || null;
-  const linuxdoCacheWarning = linuxdoCache?.fromCache
-    ? "linux.do 来源来自本地缓存，实时状态未验证"
-    : null;
   const daysDropped = result?.diagnostics?.options?.days_dropped ?? null;
   const generalSources = result?.sources?.extra?.length
     ? result.sources.extra
@@ -184,100 +152,25 @@ export async function aiNewsSection(config) {
     days_dropped: daysDropped,
   });
 
-  let header = "";
-  // Even when general search fails / lacks creds, a successful linux.do-backed
-  // synthesis still produces a usable section — only show hard-fail headers when
-  // we truly have nothing to deliver.
-  const deliveredFromLinuxdoOnly = synthesized && linuxdoCount > 0 && (!result || searchError || credErr);
-  if (credErr && !deliveredFromLinuxdoOnly && !synthesized) {
-    header =
-      `> ⚠️ ${credErr.message}\n` +
-      `> 本节因缺凭证留空，请在 .env 填入 GROK_API_URL / GROK_API_KEY 后重跑。\n` +
-      (linuxdoWarning ? `> ⚠️ ${linuxdoWarning}\n` : "") +
-      (linuxdoCacheWarning ? `> ⚠️ ${linuxdoCacheWarning}\n` : "") +
-      "\n";
-  } else if (searchError && !deliveredFromLinuxdoOnly && !synthesized) {
-    header =
-      `> ⚠️ Grok 搜索失败：${searchError.message}\n` +
-      `> 本节因后端不可用而留空，请检查 grok-search 与 .env 后重跑。\n` +
-      (linuxdoWarning ? `> ⚠️ ${linuxdoWarning}\n` : "") +
-      (linuxdoCacheWarning ? `> ⚠️ ${linuxdoCacheWarning}\n` : "") +
-      "\n";
-  } else {
-    const notes = [];
-    if (credErr && deliveredFromLinuxdoOnly) {
-      notes.push(`Grok 凭证缺失，但已用 linux.do 论坛 ${linuxdoCount} 条来源综合正文。`);
-    } else if (searchError && deliveredFromLinuxdoOnly) {
-      notes.push(`Grok 搜索失败（${searchError.message}），已回退为 linux.do 论坛 ${linuxdoCount} 条来源综合。`);
-    }
-    if (synthesized) {
-      const ldNote =
-        linuxdoCount > 0
-          ? `已优先纳入 linux.do 论坛 ${linuxdoCount} 条 AI 相关帖；`
-          : "";
-      const degradedNote =
-        hasUsableDegradedDump && linuxdoCount > 0
-          ? "网关进入降级模式（原始 dump 含博取/注入噪声），改为"
-          : "网关无 /responses 实时引用（零回引）。本节正文已改用";
-      notes.push(
-        `${degradedNote}当日抓取来源（含 Tavily/Firecrawl${linuxdoCount > 0 ? " + linux.do" : ""}），由 ${config.synthModel} 经 /chat/completions 综合生成，下方来源卡片为依据。${ldNote}`,
-      );
-    } else if (hasUsableDegradedDump) {
-      // grok-search handed us a source-grounded raw dump and we had no linux.do
-      // sources worth re-synthesizing on top of — reuse it rather than paying for
-      // a second round.
-      notes.push(
-        "网关无 /responses 实时引用且进入降级模式。本节正文为 grok-search 基于 Tavily/Firecrawl 来源拼装的原始摘要（未经过模型重写），下方来源卡片为依据。",
-      );
-    } else if (zeroCitation || degraded) {
-      // Zero citation with no usable dump: the model fabricated from training memory.
-      notes.push(
-        "本节由模型自行生成，Grok 回引受限 - 下方正文未经来源核实，请以来源卡片为准。",
-      );
-    }
-    if (synthError) {
-      // Truncation (SYNTH_TRUNCATED*) is a deliberate fallback, not a silent failure:
-      // we refuse to ship a possibly-incomplete synthesis and keep the raw answer.
-      const truncated = String(synthError.code || "").startsWith("SYNTH_TRUNCATED");
-      notes.push(
-        truncated
-          ? `来源综合被截断（${synthError.code}），为避免发布不完整正文已回退为原始回答：${synthError.message}`
-          : `来源综合失败（${synthError.code || "?"}: ${synthError.message}），已回退为模型原始回答。`,
-      );
-    }
-    if (daysDropped) {
-      notes.push(`已按 --days ${config.days} 过滤掉 ${daysDropped} 条更早的来源。`);
-    }
-    if (linuxdoWarning) {
-      notes.push(linuxdoWarning);
-    }
-    if (linuxdoCacheWarning) {
-      notes.push(linuxdoCacheWarning);
-    }
-    if (warnings.length) {
-      notes.push(`搜索警告：${warnings.join("；")}`);
-    }
-    if (notes.length) header = `> ℹ️ ${notes.join("\n> \n> ")}\n\n`;
-  }
+  // No diagnostic header block is written into the note — the report should read as
+  // a clean, normal daily brief. Cred / search / synthesis issues surface only in the
+  // CLI summary returned below, never inside the shipped markdown.
+  const header = "";
 
   const body = [
     fm,
     "",
-    `# AI 资讯 · ${config.date}`,
+    `# AI 热点 · ${config.date}`,
     "",
     header,
     bodyText || "（模型未返回正文内容）",
     "",
-    "## 来源",
-    "",
-    sourceList(sources),
-    "",
   ].join("\n");
 
   // ok reflects the *delivered* report quality, not just the search round:
-  // - synthesis attempted but failed -> body fell back to the hallucinated raw
-  //   answer; that is a degradation worth a ⚠️, not a clean ✅.
-  // - synthesized (incl. linux.do-only) / degraded-dump / normal-citation -> ok.
+  // - synthesis attempted but failed -> body fell back to the raw answer; that is a
+  //   degradation worth a ⚠️, not a clean ✅.
+  // - synthesized / degraded-dump / normal-citation -> ok.
   // - search failed AND no usable synthesis -> not ok.
   const searchOk = !!result && !searchError && !credErr;
   const synthAttemptedAndFailed = shouldSynth && synthError;
@@ -305,7 +198,7 @@ export async function aiNewsSection(config) {
     synthFailed: synthAttemptedAndFailed,
     sourceCount: sources.length,
     linuxdoCount,
-    // Reuse the sanitized, linux.do-first source set for the AI poster.
+    // Reuse the sanitized source set for the AI poster headlines.
     sources,
   };
 }

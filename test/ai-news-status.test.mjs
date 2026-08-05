@@ -67,3 +67,20 @@ test("computeAiNewsStatus: normal cited search is successful", () => {
   assert.equal(status.ok, true);
   assert.equal(status.summary, "success");
 });
+
+test("computeAiNewsStatus: linuxdo presence does not leak into the summary", () => {
+  // De-pollution guard: even when linux.do sources are included, the delivered
+  // summary must not advertise "linux.do N" (the user wants the linux.do signal
+  // kept out of the report surface).
+  const status = computeAiNewsStatus({
+    searchOk: true,
+    synthesized: true,
+    synthAttemptedAndFailed: false,
+    zeroCitation: true,
+    sourceCount: 5,
+    linuxdoCount: 3,
+    hasUsableDegradedDump: false,
+  });
+  assert.equal(status.ok, true);
+  assert.doesNotMatch(status.summary, /linux\.do|linuxdo/);
+});
