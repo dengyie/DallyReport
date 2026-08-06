@@ -76,8 +76,22 @@ export function shouldSynthesize({
   );
 }
 
-export async function aiNewsSection(config) {
-  const ai = (config.aiQueryTemplate || "").replace(/\{date\}/g, config.date);
+// The opts object parameterizes the query/model/name/H1 so the SAME pipeline can
+// back both the main channel (defaults) and the alt channel (resolveAltChannel in
+// run.mjs). Defaults match the pre-parameterization behavior exactly, so existing
+// callers pass just config. The alt channel writes its own file (different name)
+// and attributes its summary to the actual writer model.
+export async function aiNewsSection(
+  config,
+  {
+    name = "AI",
+    model = config.synthModel,
+    queryTemplate = config.aiQueryTemplate,
+    title,
+    synthTimeoutMs = config.synthTimeoutMs,
+  } = {},
+) {
+  const ai = (queryTemplate || "今天{date}最新的AI资讯和大模型动态").replace(/\{date\}/g, config.date);
   let result;
   let searchError = null;
   const credErr = assertGrokCreds();
@@ -178,9 +192,9 @@ export async function aiNewsSection(config) {
         query: ai,
         date: config.date,
         sources,
-        model: config.synthModel,
+        model,
         maxTokens: config.synthMaxTokens,
-        timeoutMs: config.synthTimeoutMs,
+        timeoutMs: synthTimeoutMs,
       });
       synthesized = true;
     } catch (e) {
@@ -204,7 +218,7 @@ export async function aiNewsSection(config) {
   const body = [
     fm,
     "",
-    `# AI 热点 · ${config.date}`,
+    title ?? `# AI 热点 · ${config.date}`,
     "",
     header,
     bodyText || "（模型未返回正文内容）",
@@ -231,12 +245,12 @@ export async function aiNewsSection(config) {
     credErr,
     searchError,
     synthError,
-    synthModel: config.synthModel,
+    synthModel: model,
   });
 
   return {
     ok,
-    name: "AI",
+    name,
     markdown: body,
     summary,
     zeroCitation,

@@ -247,6 +247,27 @@ export function loadConfig({ date = null } = {}) {
     synthModel: val("GROK_MODEL") || DEFAULT_SYNTH_MODEL,
     synthMaxTokens: positiveInt("GROK_SYNTH_MAX_TOKENS", DEFAULT_SYNTH_MAX_TOKENS),
     synthTimeoutMs: positiveInt("GROK_SYNTH_TIMEOUT_MS", DEFAULT_SYNTH_TIMEOUT_MS),
+    // --- second AI channel (full dual-channel, ai-news.mjs + run.mjs) ---
+    // When enabled, run.mjs registers an "ai-alt" section that reuses the whole
+    // aiNewsSection pipeline (independent search + community merge + synthesis) with
+    // a different writer model, landing in its own file <date>/AI-<slug>.md.
+    // Writer models go through /chat/completions for synthesis only — native
+    // /responses web_search is model-locked (non-Grok models 502 / return 0 tool
+    // calls, probed 2026-08-06), so the real search sources stay model-agnostic.
+    aiAltChannel: (() => {
+      const raw = val("AI_ALT_CHANNEL");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    aiAltModel: val("AI_ALT_MODEL") || "deepseek-v4-pro",
+    aiAltQueryTemplate: val("AI_ALT_QUERY"),
+    aiAltFile: val("AI_ALT_FILE"),
+    // The alt writer model (esp. deepseek-v4-pro) is NOTICEABLY slower on
+    // /chat/completions than grok-4.5 — a 200-token probe took ~77s vs ~16s
+    // (measured 2026-08-06). The main channel's 90s budget was timing out the
+    // alt synthesis and degrading the note to the raw answer, so the alt channel
+    // gets its own larger budget instead of sharing GROK_SYNTH_TIMEOUT_MS.
+    aiAltSynthTimeoutMs: positiveInt("AI_ALT_SYNTH_TIMEOUT_MS", 300000),
     // cwd-independent cache dir, so reruns always read the same on-disk cache.
     cacheDir: path.join(PROJECT_ROOT, "reports-cache"),
     // GitHub poster image generation (image-gen.mjs). The prompt file + reference
@@ -272,6 +293,36 @@ export function loadConfig({ date = null } = {}) {
     })(),
   };
   return config;
+}
+
+// Display-friendly slug for an alt-channel writer model, used for the alt file
+// name (AI-<slug>.md) and the H1 subtitle. Known models map to short labels;
+// anything else falls back to a sanitized kebab of the raw model id.
+const ALT_MODEL_SLUGS = { "deepseek-v4-pro": "DeepSeek", "grok-4.5": "Grok", "gpt-5.6-luna": "Luna" };
+export function modelSlug(model) {
+  if (ALT_MODEL_SLUGS[model]) return ALT_MODEL_SLUGS[model];
+  const slug = String(model ?? "")
+    .replace(/[^A-Za-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  return slug || "Alt";
+}
+
+// Resolve the alt-channel wiring from config. Returns null when the channel is
+// disabled (single-channel mode). queryTemplate defaults to the main AI query so
+// the alt channel searches the same topic; name/title default from the model slug.
+export function resolveAltChannel(config) {
+  if (!config.aiAltChannel) return null;
+  const model = config.aiAltModel || "deepseek-v4-pro";
+  const slug = modelSlug(model);
+  return {
+    name: config.aiAltFile || `AI-${slug}`,
+    model,
+    queryTemplate: config.aiAltQueryTemplate || config.aiQueryTemplate,
+    // Alt writers are slower than grok-4.5 on /chat/completions, so they get a
+    // dedicated, larger synthesis budget (default 5min) instead of the shared one.
+    synthTimeoutMs: config.aiAltSynthTimeoutMs,
+    title: `# AI 热点（${slug}）· ${config.date}`,
+  };
 }
 
 export function validateRuntimePaths(config) {

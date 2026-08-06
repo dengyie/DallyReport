@@ -6,7 +6,7 @@
 // AI.png from vault prompts + reference images and embed them into their Markdown.
 // Poster generation is independently gated and never blocks the text sections.
 
-import { loadConfig, validateRuntimePaths, beijingDateFor } from "./config.mjs";
+import { loadConfig, validateRuntimePaths, beijingDateFor, resolveAltChannel } from "./config.mjs";
 import { aiNewsSection } from "./sections/ai-news.mjs";
 import { githubTrendingSection } from "./sections/github-trending.mjs";
 import {
@@ -38,7 +38,7 @@ function parseArgs(argv) {
 async function run() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
-    console.log("Usage: node src/run.mjs [--section ai|github]");
+    console.log("Usage: node src/run.mjs [--section ai|ai-alt|github]");
     process.exit(0);
   }
 
@@ -52,16 +52,25 @@ async function run() {
     ai: () => aiNewsSection(config),
     github: () => githubTrendingSection(config),
   };
+  // Second AI channel: reuses the whole aiNewsSection pipeline (independent search
+  // + community merge + synthesis) with a different writer model. Registered only
+  // when enabled. It deliberately gets no poster — the AI poster prompt file is
+  // main-channel specific, and a duplicate poster per channel adds noise.
+  const altChannel = resolveAltChannel(config);
+  if (altChannel) {
+    builders["ai-alt"] = () => aiNewsSection(config, altChannel);
+  }
 
   let names;
   if (opts.section) {
     if (!builders[opts.section]) {
-      console.error(`未知 section: ${opts.section}（可选: ai, github）`);
+      console.error(`未知 section: ${opts.section}（可选: ai, ai-alt, github）`);
       process.exit(2);
     }
     names = [opts.section];
   } else {
     names = ["ai", "github"];
+    if (altChannel) names.splice(1, 0, "ai-alt");
   }
 
   const results = await Promise.allSettled(
