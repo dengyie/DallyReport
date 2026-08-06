@@ -55,12 +55,12 @@ test("resolveAltChannel: disabled channel returns null (single-channel mode)", (
   assert.equal(resolveAltChannel({ aiAltChannel: false, aiAltModel: "grok-4.5" }), null);
 });
 
-test("resolveAltChannel: defaults to DeepSeek writer + shared AI_QUERY", () => {
+test("resolveAltChannel: defaults to Luna writer + shared AI_QUERY", () => {
   const ch = resolveAltChannel({ aiAltChannel: true, date: "2026-08-06" });
-  assert.equal(ch.name, "AI-DeepSeek");
-  assert.equal(ch.model, "deepseek-v4-pro");
+  assert.equal(ch.name, "AI-Luna");
+  assert.equal(ch.model, "gpt-5.6-luna");
   assert.equal(ch.queryTemplate, undefined); // no aiQueryTemplate set -> undefined
-  assert.equal(ch.title, "# AI 热点（DeepSeek）· 2026-08-06");
+  assert.equal(ch.title, "# AI 热点（Luna）· 2026-08-06");
 });
 
 test("resolveAltChannel: carries the alt synthesis timeout budget", () => {
@@ -97,11 +97,11 @@ test("resolveAltChannel: aiAltQuery overrides, aiAltFile overrides name, model s
 
 // --- loadConfig defaults ---
 
-test("loadConfig: aiAltModel defaults to deepseek-v4-pro and channel to on", async () => {
+test("loadConfig: aiAltModel defaults to gpt-5.6-luna and channel to on", async () => {
   await withEnv({}, async () => {
     const config = loadConfig({ date: "2026-08-06" });
     assert.equal(config.aiAltChannel, true);
-    assert.equal(config.aiAltModel, "deepseek-v4-pro");
+    assert.equal(config.aiAltModel, "gpt-5.6-luna");
     assert.equal(config.aiAltQueryTemplate, null);
     assert.equal(config.aiAltFile, null);
     assert.equal(config.aiAltSynthTimeoutMs, 300000);

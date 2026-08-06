@@ -259,14 +259,14 @@ export function loadConfig({ date = null } = {}) {
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    aiAltModel: val("AI_ALT_MODEL") || "deepseek-v4-pro",
+    aiAltModel: val("AI_ALT_MODEL") || "gpt-5.6-luna",
     aiAltQueryTemplate: val("AI_ALT_QUERY"),
     aiAltFile: val("AI_ALT_FILE"),
-    // The alt writer model (esp. deepseek-v4-pro) is NOTICEABLY slower on
-    // /chat/completions than grok-4.5 — a 200-token probe took ~77s vs ~16s
-    // (measured 2026-08-06). The main channel's 90s budget was timing out the
-    // alt synthesis and degrading the note to the raw answer, so the alt channel
-    // gets its own larger budget instead of sharing GROK_SYNTH_TIMEOUT_MS.
+    // The alt writer model gets its own synthesis budget instead of sharing
+    // GROK_SYNTH_TIMEOUT_MS because writers can differ a lot in speed: gpt-5.6-luna
+    // (~11s) is fast, but deepseek-v4-pro measured ~77s on a 200-token probe and
+    // the shared 90s budget used to time out and degrade the note to the raw
+    // answer (measured 2026-08-06). Default 5min keeps the margin.
     aiAltSynthTimeoutMs: positiveInt("AI_ALT_SYNTH_TIMEOUT_MS", 300000),
     // cwd-independent cache dir, so reruns always read the same on-disk cache.
     cacheDir: path.join(PROJECT_ROOT, "reports-cache"),
@@ -312,7 +312,7 @@ export function modelSlug(model) {
 // the alt channel searches the same topic; name/title default from the model slug.
 export function resolveAltChannel(config) {
   if (!config.aiAltChannel) return null;
-  const model = config.aiAltModel || "deepseek-v4-pro";
+  const model = config.aiAltModel || "gpt-5.6-luna";
   const slug = modelSlug(model);
   return {
     name: config.aiAltFile || `AI-${slug}`,
