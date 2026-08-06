@@ -69,6 +69,17 @@ function cleanTitle(raw) {
     .trim();
 }
 
+/**
+ * Given a Beijing (UTC+8) date string YYYY-MM-DD, return [startLocal, endLocal)
+ * epoch ms for filtering Discourse `created_at` (UTC) fields.
+ * Exported for unit tests.
+ */
+export function beijingDayRange(dateStr) {
+  const startLocal = new Date(`${dateStr}T00:00:00+08:00`).getTime();
+  const endLocal = startLocal + 24 * 3600 * 1000;
+  return { startLocal, endLocal };
+}
+
 /** True if a topic title looks like AI/LLM news worth putting in the daily report. */
 export function isAiRelatedTopic(title) {
   if (!title) return false;
@@ -146,6 +157,89 @@ export function snippetFromTopicText(text, title, maxChars = 500) {
   return sanitizeSnippet(pick, { maxChars });
 }
 
+// Maximum chars per JSON API page fetch. The JSON response for 30 topics is ~86KB,
+// so we set a generous limit to avoid truncation mid-JSON.
+const JSON_API_MAX_CHARS = 400000;
+// Max pages to fetch as a safety backstop (a busy day needs ~3 pages of 30).
+const JSON_API_MAX_PAGES = 8;
+
+/**
+ * Parse the Discourse JSON API response from a fetched page. Strips the optional
+ * ```json fence that grok-search fetch.js may wrap around the JSON body. Returns
+ * the topics array, or null on failure. Exported for unit tests.
+ */
+export function extractJsonApiTopics(text) {
+  if (!text) return null;
+  try {
+    // runFetch returns the page content directly (envelope already stripped by
+    // grok-cli.mjs). Strip optional ```json fence that firecrawl/tavily may wrap.
+    let raw = String(text).trim();
+    raw = raw.replace(/^```json\s*/s, "").replace(/```\s*$/s, "");
+    return JSON.parse(raw).topic_list?.topics || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch ALL today's topics from linux.do/c/news/34 via the Discourse JSON API,
+ * paginating until hitting posts older than the Beijing target date. Returns
+ * source cards (NOT AI-filtered, no cap) with Discourse excerpts as snippets.
+ * On failure returns [] (non-fatal). Exported for unit tests.
+ */
+export async function fetchNews34ViaJsonApi(config, deps = {}) {
+  if (!config.date) return [];
+  const doFetch = deps.runFetch || runFetch;
+  const { startLocal, endLocal } = beijingDayRange(config.date);
+  const allTopics = [];
+
+  for (let page = 1; page <= JSON_API_MAX_PAGES; page++) {
+    const url = `https://linux.do/c/news/34.json?page=${page}`;
+    let topics;
+    try {
+      const cacheFile = path.join(
+        config.cacheDir,
+        `${config.date}-linuxdo-news34-page-${page}.txt`,
+      );
+      const res = await doFetch(url, config, {
+        maxChars: JSON_API_MAX_CHARS,
+        provider: "auto",
+        cacheFile,
+      });
+      if (!res?.text) break;
+      topics = extractJsonApiTopics(res.text);
+    } catch {
+      break;
+    }
+    if (!topics || !topics.length) break;
+
+    const lastTopic = topics[topics.length - 1];
+    const lastMs = new Date(lastTopic.created_at).getTime();
+
+    // Collect topics within the Beijing target day
+    for (const t of topics) {
+      const tMs = new Date(t.created_at).getTime();
+      if (tMs >= startLocal && tMs < endLocal) allTopics.push(t);
+    }
+
+    // Stop when the entire page is older than the target day (created_at desc)
+    if (lastMs < startLocal) break;
+  }
+
+  // Convert to source cards with excerpt as snippet
+  return allTopics.map((t) => ({
+    url: `https://linux.do/t/topic/${t.id}`,
+    title: sanitizeSnippet(t.title, { maxChars: 200 }),
+    snippet: t.excerpt
+      ? sanitizeSnippet(t.excerpt, { maxChars: 500 })
+      : `linux.do 前沿讨论：${t.title}`,
+    provider: "linux.do",
+    score: t.id,
+    id: t.id,
+    created_at: t.created_at,
+  }));
+}
+
 /**
  * Fetch linux.do AI sources for the daily report.
  *
@@ -163,10 +257,13 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
     : DEFAULT_LIST_URLS;
   const topicLimit = config.linuxdoTopicLimit ?? 8;
   const deepFetch = config.linuxdoDeepFetch !== false;
-  const deepLimit = Math.min(topicLimit, config.linuxdoDeepFetchLimit ?? 5);
   const maxChars = config.fetchMaxChars || 50000;
+  const jsonApiEnabled = config.linuxdoNews34JsonApi !== false;
 
-  // 1) Listing pages — best-effort, any one success is enough.
+  // 1a) Fetch news/34 via Discourse JSON API (all today's posts, no AI filter).
+  const jsonApiCards = jsonApiEnabled ? await fetchNews34ViaJsonApi(config, deps) : [];
+
+  // 1b) HTML listing pages (AI tag page, and news/34 as fallback) — best-effort.
   const listTexts = [];
   const listingFailures = [];
   const deepFetchFailures = [];
@@ -203,9 +300,49 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
     }),
   );
 
-  if (!listTexts.length) {
+  // 2) Parse HTML listings → dedupe → AI-filter → rank.
+  const allTopics = [];
+  const seen = new Set();
+  for (const text of listTexts) {
+    for (const t of parseLinuxDoTopics(text)) {
+      if (seen.has(t.url)) continue;
+      seen.add(t.url);
+      allTopics.push(t);
+    }
+  }
+  const htmlSelected = allTopics.length
+    ? selectAiTopics(allTopics, { limit: topicLimit })
+    : [];
+
+  // 3) Combine: JSON API cards (all today, no AI filter) + HTML selected (AI-filtered).
+  //    JSON API cards first, sorted by created_at desc (newest first).
+  //    HTML cards appended, deduped by URL.
+  const combined = [];
+  const combinedUrls = new Set();
+  const sortedJson = [...jsonApiCards].sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+  );
+  for (const c of sortedJson) {
+    if (combinedUrls.has(c.url)) continue;
+    combinedUrls.add(c.url);
+    combined.push(c);
+  }
+  for (const t of htmlSelected) {
+    if (combinedUrls.has(t.url)) continue;
+    combinedUrls.add(t.url);
+    combined.push({
+      url: t.url,
+      title: sanitizeSnippet(t.title, { maxChars: 200 }),
+      snippet: `linux.do 前沿讨论：${t.title}`,
+      provider: "linux.do",
+      score: rankLinuxDoTopic(t),
+      id: t.id,
+    });
+  }
+
+  if (!combined.length) {
     const empty = [];
-    if (listingFailures.length) {
+    if (!jsonApiCards.length && listingFailures.length) {
       Object.defineProperty(empty, "linuxdoError", {
         value: { kind: "listing", failures: listingFailures },
         enumerable: false,
@@ -216,45 +353,34 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
     return empty;
   }
 
-  // 2) Parse + dedupe + filter + rank.
-  const allTopics = [];
-  const seen = new Set();
-  for (const text of listTexts) {
-    for (const t of parseLinuxDoTopics(text)) {
-      if (seen.has(t.url)) continue;
-      seen.add(t.url);
-      allTopics.push(t);
-    }
-  }
-  const selected = selectAiTopics(allTopics, { limit: topicLimit });
-  if (!selected.length) {
-    const empty = [];
-    attachCacheMetadata(empty, usedCache, cacheFiles);
-    attachDiagnostics(empty, { listingFailures, deepFetchFailures, cacheWriteFailures });
-    return empty;
-  }
-
-  // 3) Deep-fetch top topics for snippets (optional; title-only still useful).
+  // 4) Deep-fetch top-N of combined for enriched snippets (optional).
+  //    When the JSON API path is active, deep-fetch up to LINUXDO_NEWS34_DEEP_FETCH_LIMIT
+  //    (default 12) of today's cards — independent of topicLimit so the all-posts
+  //    capture actually gets body context. Otherwise fall back to the legacy
+  //    min(topicLimit, LINUXDO_DEEP_FETCH_LIMIT).
+  const deepLimit = jsonApiEnabled
+    ? Math.min(combined.length, config.linuxdoNews34DeepLimit ?? 12)
+    : Math.min(combined.length, topicLimit, config.linuxdoDeepFetchLimit ?? 5);
   const sources = [];
-  const deepTargets = deepFetch ? selected.slice(0, deepLimit) : [];
+  const deepTargets = deepFetch ? combined.slice(0, deepLimit) : [];
   const deepMap = new Map();
 
   if (deepTargets.length) {
     await Promise.all(
-      deepTargets.map(async (t) => {
+      deepTargets.map(async (card) => {
         try {
           const cacheFile = path.join(
             config.cacheDir,
-            `${config.date}-linuxdo-topic-${t.id}.txt`,
+            `${config.date}-linuxdo-topic-${card.id}.txt`,
           );
-          const res = await doFetch(t.url, config, {
+          const res = await doFetch(card.url, config, {
             maxChars: Math.min(maxChars, 12000),
             provider: "auto",
             cacheFile,
           });
           if (res?.cacheWriteError) {
             cacheWriteFailures.push({
-              url: t.url,
+              url: card.url,
               cacheFile: res.cacheFile || cacheFile,
               ...res.cacheWriteError,
             });
@@ -264,33 +390,32 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
             if (res.cacheFile || cacheFile) cacheFiles.push(res.cacheFile || cacheFile);
           }
           if (res?.text) {
-            deepMap.set(t.url, snippetFromTopicText(res.text, t.title));
+            deepMap.set(card.url, snippetFromTopicText(res.text, card.title));
           }
         } catch (error) {
           deepFetchFailures.push({
-            url: t.url,
+            url: card.url,
             message: error?.message || String(error),
           });
-          /* topic deep-fetch failure → keep title-only card */
+          /* deep-fetch failure → keep excerpt/title card */
         }
       }),
     );
   }
 
-  for (const t of selected) {
-    const rawSnippet = deepMap.get(t.url) || `linux.do 前沿讨论：${t.title}`;
+  for (const card of combined) {
+    const deepSnip = deepMap.get(card.url);
+    const rawSnippet = deepSnip || card.snippet || `linux.do 前沿讨论：${card.title}`;
     const snippet = sanitizeSnippet(rawSnippet);
-    const card = {
-      url: t.url,
-      title: sanitizeSnippet(t.title, { maxChars: 200 }),
+    const outCard = {
+      url: card.url,
+      title: sanitizeSnippet(card.title, { maxChars: 200 }),
       snippet,
       provider: "linux.do",
-      score: rankLinuxDoTopic(t),
+      score: card.score || rankLinuxDoTopic(card),
     };
-    // If the *only* thing we have is injection text + a real title, keep the card
-    // (title alone is signal); only drop when title is also injected/empty.
-    if (isInjectionOnlySource(card)) continue;
-    sources.push(card);
+    if (isInjectionOnlySource(outCard)) continue;
+    sources.push(outCard);
   }
   attachCacheMetadata(sources, usedCache, cacheFiles);
   attachDiagnostics(sources, { listingFailures, deepFetchFailures, cacheWriteFailures });
@@ -334,7 +459,7 @@ function attachCacheMetadata(sources, usedCache, cacheFiles) {
 export function mergeSourcesPreferLinuxDo(
   linuxdoSources,
   generalSources,
-  { maxTotal = 18, extraCommunitySources = [] } = {},
+  { maxTotal = 18, linuxdoMaxTotal = null, extraCommunitySources = [] } = {},
 ) {
   const out = [];
   const seen = new Set();
@@ -351,11 +476,36 @@ export function mergeSourcesPreferLinuxDo(
     seen.add(key);
     out.push(cleaned);
   };
-  for (const s of linuxdoSources || []) push(s);
+
+  // When linuxdoMaxTotal is explicitly provided, linux.do gets its own budget
+  // (up to linuxdoMaxTotal) and community+general share maxTotal. When not
+  // provided, old behavior: all sources share one pool capped at maxTotal.
+  const linuxdoCap = linuxdoMaxTotal != null
+    ? Math.max(0, linuxdoMaxTotal)
+    : Math.max(0, maxTotal);
+  for (const s of (linuxdoSources || []).slice(0, linuxdoCap)) push(s);
+
+  if (linuxdoMaxTotal != null) {
+    // linux.do has its own budget; community + general share maxTotal.
+    let budget = Math.max(0, maxTotal);
+    for (const s of extraCommunitySources || []) {
+      if (budget <= 0) break;
+      const before = out.length;
+      push(s);
+      if (out.length > before) budget--;
+    }
+    for (const s of generalSources || []) {
+      if (budget <= 0) break;
+      const before = out.length;
+      push(s);
+      if (out.length > before) budget--;
+    }
+    return out;
+  }
+
+  // Old behavior: all sources share one pool, total capped at maxTotal.
   for (const s of extraCommunitySources || []) push(s);
   for (const s of generalSources || []) push(s);
-  // Max 0 is honored (an empty merge is a valid "no sources this run"); do not
-  // secretly coerce a deliberately-disabled AI_SOURCE_MAX_TOTAL=0 up to 1.
   return out.slice(0, Math.max(0, maxTotal));
 }
 

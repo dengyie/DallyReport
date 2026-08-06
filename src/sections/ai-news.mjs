@@ -145,6 +145,7 @@ export async function aiNewsSection(
   // synthesis sees the same-day forum signal; de-dupe by URL.
   const sources = mergeSourcesPreferLinuxDo(linuxdoSources, generalSources, {
     maxTotal: config.sourceMaxTotal ?? 18,
+    linuxdoMaxTotal: config.linuxdoMaxSources,
     extraCommunitySources: [...(nodeseekSources || []), ...(v2exSources || [])],
   });
   const linuxdoCount = (linuxdoSources || []).length;

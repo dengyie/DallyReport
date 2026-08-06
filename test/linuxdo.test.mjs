@@ -8,6 +8,9 @@ import {
   mergeSourcesPreferLinuxDo,
   fetchLinuxDoAiSources,
   snippetFromTopicText,
+  beijingDayRange,
+  extractJsonApiTopics,
+  fetchNews34ViaJsonApi,
 } from "../src/linuxdo.mjs";
 
 const LISTING_FIXTURE = `
@@ -198,6 +201,58 @@ test("fetchLinuxDoAiSources: parses listing via injected runFetch, deep-fetches 
   assert.ok(calls.some((c) => c.url.includes("/t/topic/")));
 });
 
+test("fetchLinuxDoAiSources: JSON-API path deep-fetches up to news34DeepLimit, NOT bound by topicLimit", async () => {
+  // 5 of today's posts via JSON API, but topicLimit=2 (would cap the legacy HTML path).
+  const todayTopics = Array.from({ length: 5 }, (_, i) => ({
+    id: 300000 + i,
+    title: `DeepSeek 前沿讨论 ${i + 1}：Agent API 更新`,
+    created_at: new Date(Date.UTC(2026, 7, 6, 9 + i, 0, 0)).toISOString(),
+    excerpt: false,
+  }));
+  const calls = [];
+  const runFetch = async (url, _cfg, opts = {}) => {
+    calls.push({ url, opts });
+    if (String(url).includes(".json?page=")) {
+      return { text: fence(todayTopics), provider: "stub" };
+    }
+    if (String(url).includes("/c/news/34") || String(url).includes("/tag/")) {
+      return { text: "# 列表页（无可解析议题）\n\n没有 markdown 链接。", provider: "stub" };
+    }
+    if (String(url).includes("/t/topic/")) {
+      const id = Number(/topic\/(\d+)/.exec(url)[1]);
+      return {
+        text: `# 议题\n\n正文内容 ${id}：DeepSeek 新一代 Agent 框架发布，工具调用延迟下降 40%。\n\n更多讨论…`,
+        provider: "stub",
+      };
+    }
+    return { text: "", provider: "stub" };
+  };
+
+  const out = await fetchLinuxDoAiSources(
+    {
+      date: "2026-08-06",
+      cacheDir: "/tmp/dally-linuxdo-deeplimit",
+      linuxdoEnabled: true,
+      linuxdoTopicLimit: 2,            // would cap legacy path to 2
+      linuxdoNews34DeepLimit: 3,      // JSON path should deep-fetch 3 regardless
+      linuxdoDeepFetch: true,
+      fetchMaxChars: 5000,
+      linuxdoListUrls: ["https://linux.do/c/news/34"],
+      linuxdoNews34JsonApi: true,
+    },
+    { runFetch },
+  );
+
+  const deepCalls = calls.filter((c) => String(c.url).includes("/t/topic/"));
+  // Decoupled: deep-fetch count = min(5, 3) = 3, even though topicLimit=2.
+  assert.equal(deepCalls.length, 3, `expected 3 deep fetches, got ${deepCalls.length}`);
+  // Those 3 came from the JSON-API cards, and got real body snippets.
+  assert.ok(
+    out.some((s) => /工具调用延迟下降 40%/.test(s.snippet)),
+    `expected deep snippet present, got: ${out.map((s) => s.snippet).join(" || ")}`,
+  );
+});
+
 test("fetchLinuxDoAiSources: listing failure returns [] (non-fatal)", async () => {
   const runFetch = async () => {
     throw new Error("network down");
@@ -326,4 +381,79 @@ test("fetchLinuxDoAiSources: propagates non-enumerable cache metadata", async ()
   assert.deepEqual(out.linuxdoCache?.fromCache, true);
   assert.ok(out.linuxdoCache.cacheFiles.length >= 1);
   assert.equal(Object.prototype.propertyIsEnumerable.call(out, "linuxdoCache"), false);
+});
+
+// Wrap a topic_list JSON in a ```json fence, as firecrawl/tavily may return it.
+function fence(topics) {
+  return `\`\`\`json\n${JSON.stringify({ topic_list: { topics } })}\n\`\`\``;
+}
+
+test("beijingDayRange: converts a Beijing date to [start, end) epoch ms", () => {
+  const { startLocal, endLocal } = beijingDayRange("2026-08-06");
+  // 2026-08-06T00:00:00+08:00 = 2026-08-05T16:00:00Z in epoch ms.
+  assert.equal(startLocal, new Date("2026-08-05T16:00:00Z").getTime());
+  assert.equal(endLocal - startLocal, 24 * 3600 * 1000);
+});
+
+test("extractJsonApiTopics: parses fenced + plain topic_list", () => {
+  const topics = [{ id: 1, title: "DeepSeek V4 Flash 发布", created_at: "2026-08-06T00:00:00Z", excerpt: "正文" }];
+  assert.equal(extractJsonApiTopics(fence(topics)).length, 1);
+  assert.equal(extractJsonApiTopics(JSON.stringify({ topic_list: { topics } })).length, 1);
+  // Non-JSON / empty → null.
+  assert.equal(extractJsonApiTopics(""), null);
+  assert.equal(extractJsonApiTopics("# Not JSON at all"), null);
+  assert.equal(extractJsonApiTopics(null), null);
+});
+
+test("fetchNews34ViaJsonApi: keeps only today (Beijing) posts, paginates, stops on old page", async () => {
+  const calls = [];
+  const runFetch = async (url, _cfg, opts = {}) => {
+    calls.push({ url, opts });
+    // page 2 = fully older than the Beijing target day → should stop after it.
+    if (String(url).includes("page=2")) {
+      return { text: fence([{ id: 200, title: "旧帖", created_at: "2026-08-05T04:00:00Z" }]), provider: "stub" };
+    }
+    // page 1 = two today posts (both within 2026-08-06 Beijing day).
+    return {
+      text: fence([
+        { id: 1, title: "DeepSeek V4 Flash 发布", created_at: "2026-08-06T00:00:00Z", excerpt: "DeepSeek 发布新版，推理成本大降。" },
+        { id: 2, title: "Glm 新模型", created_at: "2026-08-06T12:00:00Z", excerpt: "智谱 GLM 更新。" },
+        { id: 3, title: "昨天的旧帖", created_at: "2026-08-05T18:00:00Z", excerpt: "不在今天。" },
+      ]),
+      provider: "stub",
+    };
+  };
+
+  const out = await fetchNews34ViaJsonApi(
+    { date: "2026-08-06", cacheDir: "/tmp/dally-json-test" },
+    { runFetch },
+  );
+
+  // id 3 is 2026-08-05T18:00Z = 2026-08-06T02:00+08 → actually within the Beijing day.
+  // id 200 (page 2) is clearly before the day → excluded.
+  assert.ok(out.some((c) => c.id === 1));
+  assert.ok(out.some((c) => c.id === 3));
+  assert.ok(!out.some((c) => c.id === 200), "old page 2 topic must be dropped");
+  assert.ok(out.every((c) => c.provider === "linux.do"));
+  assert.match(out.find((c) => c.id === 1).snippet, /DeepSeek/);
+  // Both pages fetched (continuation happened, then stop).
+  assert.ok(calls.some((c) => c.url.includes("page=1")));
+  assert.ok(calls.some((c) => c.url.includes("page=2")));
+});
+
+test("mergeSourcesPreferLinuxDo: linuxdoMaxTotal gives linux.do its own budget", () => {
+  const ld = [1, 2, 3, 4, 5].map((i) => ({
+    url: `https://linux.do/t/topic/${i}`,
+    title: `L${i}`,
+    provider: "linux.do",
+  }));
+  const gen = [{ url: "https://k.sina.com.cn/x", title: "Sina", provider: "tavily" }];
+  // linux.do keeps its own cap (5); community+general share maxTotal (1 budget slot).
+  const merged = mergeSourcesPreferLinuxDo(ld, gen, { maxTotal: 1, linuxdoMaxTotal: 5 });
+  assert.equal(merged.length, 6); // 5 linux.do + 1 general
+  assert.equal(merged[0].provider, "linux.do");
+  assert.equal(merged[5].provider, "tavily");
+  // maxTotal 0 still drops the general/community side even with linuxdoMaxTotal.
+  const zero = mergeSourcesPreferLinuxDo(ld, gen, { maxTotal: 0, linuxdoMaxTotal: 5 });
+  assert.deepEqual(zero.map((s) => s.provider), ["linux.do", "linux.do", "linux.do", "linux.do", "linux.do"]);
 });

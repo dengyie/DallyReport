@@ -211,6 +211,24 @@ export function loadConfig({ date = null } = {}) {
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
     linuxdoDeepFetchLimit: int("LINUXDO_DEEP_FETCH_LIMIT", 5),
+    // When true, fetch news/34 via the Discourse JSON API — captures ALL today's
+    // posts (not just AI-filtered top-N) with accurate created_at/excerpt fields.
+    linuxdoNews34JsonApi: (() => {
+      const raw = val("LINUXDO_NEWS34_JSON_API");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    // Max linux.do source cards fed into synthesis (separate from sourceMaxTotal).
+    // Allows all today's news/34 posts to flow through, while community+general
+    // sources still respect AI_SOURCE_MAX_TOTAL for their combined budget.
+    // Set to 0 to cap linux.do to the same pool as other sources.
+    linuxdoMaxSources: int("LINUXDO_MAX_SOURCES", 50),
+    // How many of the news/34 JSON-API cards to deep-fetch for real body snippets.
+    // Independent of LINUXDO_TOPIC_LIMIT (which only gates the HTML-list path);
+    // only applies when LINUXDO_NEWS34_JSON_API is on. Default 12 — gives the
+    // synthesis model real body content for the top ~12 of today's posts; the rest
+    // stay title-only. Raise for richer analysis, lower for a faster run.
+    linuxdoNews34DeepLimit: int("LINUXDO_NEWS34_DEEP_FETCH_LIMIT", 12),
     // Cap on total sources fed to synthesis after merge (community first).
     sourceMaxTotal: int("AI_SOURCE_MAX_TOTAL", 18),
     // --- nodeseek.com community AI sources (nodeseek.mjs) ---
