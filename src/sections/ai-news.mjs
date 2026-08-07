@@ -1,7 +1,7 @@
 import { runSearch } from "../grok-cli.mjs";
 import { frontMatter } from "../markdown.mjs";
 import { assertGrokCreds } from "../config.mjs";
-import { synthesizeFromSources } from "../llm-synthesize.mjs";
+import { synthesizeFromSources, synthesizeWithWebSearch, renderSources } from "../llm-synthesize.mjs";
 import { fetchLinuxDoAiSources, mergeSourcesPreferLinuxDo } from "../linuxdo.mjs";
 import { fetchNodeSeekAiSources } from "../nodeseek.mjs";
 import { fetchV2exAiSources } from "../v2ex.mjs";
@@ -20,6 +20,8 @@ export function computeAiNewsStatus({
   searchError = null,
   synthError = null,
   synthModel = "grok-4.5",
+  synthFellBack = false,
+  synthFallbackFrom = null,
 } = {}) {
   const zeroContentHallucination =
     zeroCitation && sourceCount === 0 && !synthesized && !hasUsableDegradedDump;
@@ -36,6 +38,9 @@ export function computeAiNewsStatus({
       : `综合失败已回退原始回答（${synthError?.code || "?"}）`;
   } else if (synthesized) {
     summary = `综合成功（${synthModel}，${sourceCount} 来源）`;
+    if (synthFellBack && synthFallbackFrom) {
+      summary += `（${synthFallbackFrom} 失败，已回退 ${synthModel}）`;
+    }
   } else if (credErr) {
     summary = "missing grok creds";
   } else if (!searchOk) {
@@ -81,6 +86,18 @@ export function shouldSynthesize({
 // run.mjs). Defaults match the pre-parameterization behavior exactly, so existing
 // callers pass just config. The alt channel writes its own file (different name)
 // and attributes its summary to the actual writer model.
+// Execute a gemini-initiated web_search query through the shared search layer
+// (Tavily/Firecrawl, model-agnostic) and return the cleaned result block for
+// injection as a tool response. De-pollution/defense-in-depth is inherited from
+// renderSources (sanitizeSnippet + clarifySnippet).
+async function gemSearch(query, config) {
+  const result = await runSearch(query, config, { days: config.days, extra: config.extra });
+  const cards = result?.sources?.extra?.length
+    ? result.sources.extra
+    : result?.sources?.merged || [];
+  return renderSources(cards);
+}
+
 export async function aiNewsSection(
   config,
   {
@@ -167,6 +184,8 @@ export async function aiNewsSection(
   // citation AND not in degraded mode (or degraded but with no usable dump body).
   let synthesized = false;
   let synthError = null;
+  let synthFellBack = false;
+  let synthFallbackFrom = null;
   let bodyText = rawAnswerText;
   const hasUsableDegradedDump = degraded && rawAnswerText.trim().length >= 120;
   // When to synthesize:
@@ -188,19 +207,55 @@ export async function aiNewsSection(
     hasUsableDegradedDump,
   });
   if (shouldSynth) {
-    try {
-      bodyText = await synthesizeFromSources({
+    // gemini alt writer: when web_search is enabled, run the bounded tool loop
+    // (gemini emits web_search queries -> we execute them via grok-search -> feed
+    // results back -> converge). All other writers keep the one-shot synthesis.
+    const geminiLoop =
+      model === "gemini-3.6-flash" && config.aiAltGeminiWebSearch !== false;
+    const runOneShot = (m) =>
+      synthesizeFromSources({
         query: ai,
         date: config.date,
         sources,
-        model,
+        model: m,
         maxTokens: config.synthMaxTokens,
         timeoutMs: synthTimeoutMs,
       });
+    try {
+      bodyText = geminiLoop
+        ? await synthesizeWithWebSearch({
+            query: ai,
+            date: config.date,
+            sources,
+            model,
+            maxTokens: config.synthMaxTokens,
+            timeoutMs: synthTimeoutMs,
+            maxSearchRounds: config.aiAltGeminiMaxRounds,
+            searchImpl: (q) => gemSearch(q, config),
+          })
+        : await runOneShot(model);
       synthesized = true;
     } catch (e) {
-      synthError = e;
-      // bodyText already = rawAnswerText; keep going, document the fallback.
+      // Main writer failed (e.g. a slow reasoning model that 524s over the
+      // gateway's ~120s Cloudflare cap). Retry the one-shot synthesis once with
+      // the configured fallback model so the daily report still completes. The
+      // gemini web_search loop is skipped here — it has its own bounded loop.
+      const fb = config.synthFallbackModel;
+      if (!geminiLoop && fb && fb !== model) {
+        try {
+          bodyText = await runOneShot(fb);
+          synthesized = true;
+          synthFellBack = true;
+          synthFallbackFrom = model;
+          synthError = null;
+        } catch (e2) {
+          synthError = e2;
+          // bodyText already = rawAnswerText; keep going, document the fallback.
+        }
+      } else {
+        synthError = e;
+        // bodyText already = rawAnswerText; keep going, document the fallback.
+      }
     }
   }
 
@@ -246,7 +301,9 @@ export async function aiNewsSection(
     credErr,
     searchError,
     synthError,
-    synthModel: model,
+    synthModel: synthFellBack && synthFallbackFrom ? config.synthFallbackModel : model,
+    synthFellBack,
+    synthFallbackFrom,
   });
 
   return {
@@ -263,5 +320,8 @@ export async function aiNewsSection(
     v2exCount,
     // Reuse the sanitized source set for the AI poster headlines.
     sources,
+    // Raw linuxdo news/34 cards for auxiliary materials (all today's posts, no
+    // AI filter, no cap). Written to a separate file by run.mjs.
+    linuxdoRaw: linuxdoSources?.linuxdoRaw || [],
   };
 }

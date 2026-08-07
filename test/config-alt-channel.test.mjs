@@ -35,6 +35,7 @@ test("modelSlug: known alt models map to short labels", () => {
   assert.equal(modelSlug("deepseek-v4-pro"), "DeepSeek");
   assert.equal(modelSlug("grok-4.5"), "Grok");
   assert.equal(modelSlug("gpt-5.6-luna"), "Luna");
+  assert.equal(modelSlug("gemini-3.6-flash"), "Gemini");
 });
 
 test("modelSlug: unknown model falls back to a sanitized kebab slug", () => {
@@ -55,12 +56,12 @@ test("resolveAltChannel: disabled channel returns null (single-channel mode)", (
   assert.equal(resolveAltChannel({ aiAltChannel: false, aiAltModel: "grok-4.5" }), null);
 });
 
-test("resolveAltChannel: defaults to Luna writer + shared AI_QUERY", () => {
+test("resolveAltChannel: defaults to Gemini writer + shared AI_QUERY", () => {
   const ch = resolveAltChannel({ aiAltChannel: true, date: "2026-08-06" });
-  assert.equal(ch.name, "AI-Luna");
-  assert.equal(ch.model, "gpt-5.6-luna");
+  assert.equal(ch.name, "AI-Gemini");
+  assert.equal(ch.model, "gemini-3.6-flash");
   assert.equal(ch.queryTemplate, undefined); // no aiQueryTemplate set -> undefined
-  assert.equal(ch.title, "# AI 热点（Luna）· 2026-08-06");
+  assert.equal(ch.title, "# AI 热点（Gemini）· 2026-08-06");
 });
 
 test("resolveAltChannel: carries the alt synthesis timeout budget", () => {
@@ -97,11 +98,11 @@ test("resolveAltChannel: aiAltQuery overrides, aiAltFile overrides name, model s
 
 // --- loadConfig defaults ---
 
-test("loadConfig: aiAltModel defaults to gpt-5.6-luna and channel to on", async () => {
+test("loadConfig: aiAltModel defaults to gemini-3.6-flash and channel to on", async () => {
   await withEnv({}, async () => {
     const config = loadConfig({ date: "2026-08-06" });
     assert.equal(config.aiAltChannel, true);
-    assert.equal(config.aiAltModel, "gpt-5.6-luna");
+    assert.equal(config.aiAltModel, "gemini-3.6-flash");
     assert.equal(config.aiAltQueryTemplate, null);
     assert.equal(config.aiAltFile, null);
     assert.equal(config.aiAltSynthTimeoutMs, 300000);

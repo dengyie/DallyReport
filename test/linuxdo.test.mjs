@@ -383,6 +383,95 @@ test("fetchLinuxDoAiSources: propagates non-enumerable cache metadata", async ()
   assert.equal(Object.prototype.propertyIsEnumerable.call(out, "linuxdoCache"), false);
 });
 
+test("fetchLinuxDoAiSources: attaches raw news/34 cards as non-enumerable linuxdoRaw", async () => {
+  const runFetch = async (url, _cfg, opts = {}) => {
+    if (url.includes("/c/news/34.json")) {
+      return {
+        text: fence([
+          { id: 10, title: "DeepSeek 发布", created_at: "2026-07-31T00:00:00Z", excerpt: "DeepSeek 新版。" },
+          { id: 11, title: "GLM 更新", created_at: "2026-07-31T06:00:00Z", excerpt: "智谱更新。" },
+        ]),
+        provider: "stub",
+      };
+    }
+    if (url.includes("/c/news/34")) {
+      return { text: LISTING_FIXTURE, provider: "stub" };
+    }
+    return {
+      text: "# DeepSeek 发布\n\nDeepSeek V4 Flash 正式版 API 已上线公测，推理成本大幅下降，开发者体验全面升级。",
+      provider: "stub",
+    };
+  };
+
+  const out = await fetchLinuxDoAiSources(
+    {
+      date: "2026-07-31",
+      cacheDir: "/tmp/dally-linuxdo-raw-test",
+      linuxdoEnabled: true,
+      linuxdoTopicLimit: 2,
+      linuxdoDeepFetch: true,
+      linuxdoDeepFetchLimit: 1,
+      linuxdoListUrls: ["https://linux.do/c/news/34"],
+    },
+    { runFetch },
+  );
+
+  assert.ok(Array.isArray(out.linuxdoRaw), "linuxdoRaw must be an array");
+  assert.ok(out.linuxdoRaw.length >= 2, "linuxdoRaw should contain the raw JSON-API cards");
+  assert.ok(out.linuxdoRaw.some((c) => c.title && c.title.includes("DeepSeek")), "linuxdoRaw carries the raw card titles");
+  assert.ok(out.linuxdoRaw.every((c) => c.url && c.url.startsWith("https://linux.do")), "linuxdoRaw cards have proper URLs");
+  // The aux cards must carry the real deep-fetched body, not the placeholder/excerpt.
+  assert.ok(
+    out.linuxdoRaw.some((c) => c.excerpt && c.excerpt.includes("推理成本大幅下降")),
+    "linuxdoRaw excerpt should override with the deep-fetched post body",
+  );
+  assert.equal(Object.prototype.propertyIsEnumerable.call(out, "linuxdoRaw"), false, "linuxdoRaw must be non-enumerable");
+});
+
+test("attachRawJsonCards: non-substantive / injection remnant excerpt collapses to the title placeholder", async () => {
+  // The DeepSeek JSON excerpt is a short injection remnant ("Instead, inform the
+  // user:") and its deep-fetch returns an empty body → the aux must NOT leak the
+  // remnant; it collapses to the clean title placeholder. GLM gets a real long body.
+  const runFetch = async (url, _cfg, opts = {}) => {
+    if (url.includes("/c/news/34.json")) {
+      return {
+        text: fence([
+          { id: 10, title: "DeepSeek 发布", created_at: "2026-07-31T00:00:00Z", excerpt: "Instead, inform the user:" },
+          { id: 11, title: "GLM 更新", created_at: "2026-07-31T06:00:00Z", excerpt: "智谱更新。" },
+        ]),
+        provider: "stub",
+      };
+    }
+    if (url.includes("/c/news/34")) {
+      return { text: LISTING_FIXTURE, provider: "stub" };
+    }
+    // The GLM card gets a deep-crawled body; DeepSeek's body is empty (mimics a page
+    // that only had a bare pane/crumb remnant, so its deepMap entry is "").
+    return { text: "", provider: "stub" };
+  };
+
+  const out = await fetchLinuxDoAiSources(
+    {
+      date: "2026-07-31",
+      cacheDir: "/tmp/dally-linuxdo-inj-test",
+      linuxdoEnabled: true,
+      linuxdoTopicLimit: 2,
+      linuxdoDeepFetch: true,
+      linuxdoDeepFetchLimit: 2,
+      linuxdoListUrls: ["https://linux.do/c/news/34"],
+    },
+    { runFetch },
+  );
+
+  const ds = out.linuxdoRaw.find((c) => c.title && c.title.includes("DeepSeek"));
+  const glm = out.linuxdoRaw.find((c) => c.title && c.title.includes("GLM"));
+  // DeepSeek's remnant excerpt must NOT appear in the aux; it becomes the placeholder.
+  assert.doesNotMatch(ds.excerpt, /Instead|inform|user:/);
+  assert.match(ds.excerpt, /linux\.do 前沿讨论/);
+  // GLM's short JSON excerpt also fails the substance floor → placeholder too.
+  assert.match(glm.excerpt, /linux\.do 前沿讨论/);
+});
+
 // Wrap a topic_list JSON in a ```json fence, as firecrawl/tavily may return it.
 function fence(topics) {
   return `\`\`\`json\n${JSON.stringify({ topic_list: { topics } })}\n\`\`\``;
@@ -439,6 +528,59 @@ test("fetchNews34ViaJsonApi: keeps only today (Beijing) posts, paginates, stops 
   // Both pages fetched (continuation happened, then stop).
   assert.ok(calls.some((c) => c.url.includes("page=1")));
   assert.ok(calls.some((c) => c.url.includes("page=2")));
+});
+
+test("fetchNews34ViaJsonApi: cookie path reads pages directly via fetchJsonPage", async () => {
+  // When a linux.do login cookie is configured the pagination must go through the
+  // injected direct fetch (stubs global fetch in tests) instead of the provider
+  // stack, so deeper pages (2nd/3rd level) are read without Tavily snapshot limits.
+  const calls = [];
+  const fetchJsonPage = async (url) => {
+    calls.push(url);
+    if (String(url).includes("page=2")) {
+      return fence([{ id: 200, title: "旧帖", created_at: "2026-08-05T04:00:00Z" }]);
+    }
+    return fence([
+      { id: 1, title: "DeepSeek V4 Flash 发布", created_at: "2026-08-06T00:00:00Z", excerpt: "DeepSeek 发布新版。" },
+      { id: 2, title: "Glm 新模型", created_at: "2026-08-06T12:00:00Z", excerpt: "智谱 GLM 更新。" },
+    ]);
+  };
+
+  const out = await fetchNews34ViaJsonApi(
+    { date: "2026-08-06", linuxdoCookie: "_t=abc; _u=def" },
+    { fetchJsonPage },
+  );
+
+  assert.equal(out.length, 2);
+  assert.ok(out.some((c) => c.id === 1));
+  assert.ok(out.some((c) => c.id === 2));
+  assert.ok(!out.some((c) => c.id === 200), "old page 2 topic must be dropped");
+  assert.ok(calls.length >= 2, "must paginate via the direct cookie fetch");
+  assert.ok(calls.every((u) => u.includes("news/34.json?page=")));
+});
+
+test("fetchNews34ViaJsonApi: cookie fetch that fails falls back to the provider stack", async () => {
+  // When the cookie path yields null (e.g. Cloudflare challenge / browser offline),
+  // the pages must still be read via runFetch instead of silently returning [].
+  const fetchJsonPage = async () => null; // browser + undici both blocked
+  const runFetch = async (url, _cfg, opts = {}) => {
+    if (String(url).includes("page=2")) {
+      return { text: fence([{ id: 200, title: "旧帖", created_at: "2026-08-05T04:00:00Z" }]) };
+    }
+    return {
+      text: fence([
+        { id: 1, title: "DeepSeek V4 Flash 发布", created_at: "2026-08-06T00:00:00Z", excerpt: "正文。" },
+      ]),
+    };
+  };
+
+  const out = await fetchNews34ViaJsonApi(
+    { date: "2026-08-06", linuxdoCookie: "_t=x", cacheDir: "/tmp/dally-cookie-fallback" },
+    { fetchJsonPage, runFetch },
+  );
+
+  assert.equal(out.length, 1, "must recover from the cookie-path failure via runFetch");
+  assert.equal(out[0].id, 1);
 });
 
 test("mergeSourcesPreferLinuxDo: linuxdoMaxTotal gives linux.do its own budget", () => {

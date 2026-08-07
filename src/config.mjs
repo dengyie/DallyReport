@@ -20,7 +20,7 @@ const DEFAULT_OBSIDIAN_DIR = path.join(
 
 // Single source of truth for the synthesis model + tuning. Read here, not re-read
 // ad hoc from process.env in section modules, so the default lives in one place.
-const DEFAULT_SYNTH_MODEL = "grok-4.5";
+const DEFAULT_SYNTH_MODEL = "gpt-5.6-luna";
 const DEFAULT_SYNTH_MAX_TOKENS = 4000;
 const DEFAULT_SYNTH_TIMEOUT_MS = 90000;
 
@@ -223,12 +223,23 @@ export function loadConfig({ date = null } = {}) {
     // sources still respect AI_SOURCE_MAX_TOTAL for their combined budget.
     // Set to 0 to cap linux.do to the same pool as other sources.
     linuxdoMaxSources: int("LINUXDO_MAX_SOURCES", 50),
+    // Optional login cookie for linux.do (raw Cookie header value, e.g. `_t=...; _u=...`).
+    // When set, the news/34 JSON-API pagination fetches each page directly with this
+    // cookie so deeper pages (2nd/3rd level) are read reliably without Tavily's
+    // snapshot limits. Leave empty to keep using the provider stack (runFetch).
+    linuxdoCookie: val("LINUXDO_COOKIE"),
+    // CDP endpoint of the user's logged-in Chrome (e.g. Chrome launched with
+    // --remote-debugging-port=9222). Used to drive a throwaway tab that fetches the
+    // linux.do JSON with the real browser fingerprint — the only client whose TLS
+    // fingerprint clears Cloudflare's cf_clearance. Leave empty to skip the browser
+    // path (cookie then only a raw undici attempt, usually 403 → provider fallback).
+    linuxdoCdpHost: val("LINUXDO_CDP_HOST") || "127.0.0.1:9222",
     // How many of the news/34 JSON-API cards to deep-fetch for real body snippets.
     // Independent of LINUXDO_TOPIC_LIMIT (which only gates the HTML-list path);
     // only applies when LINUXDO_NEWS34_JSON_API is on. Default 12 — gives the
     // synthesis model real body content for the top ~12 of today's posts; the rest
     // stay title-only. Raise for richer analysis, lower for a faster run.
-    linuxdoNews34DeepLimit: int("LINUXDO_NEWS34_DEEP_FETCH_LIMIT", 12),
+    linuxdoNews34DeepLimit: int("LINUXDO_NEWS34_DEEP_FETCH_LIMIT", 40),
     // Cap on total sources fed to synthesis after merge (community first).
     sourceMaxTotal: int("AI_SOURCE_MAX_TOTAL", 18),
     // --- nodeseek.com community AI sources (nodeseek.mjs) ---
@@ -265,6 +276,13 @@ export function loadConfig({ date = null } = {}) {
     synthModel: val("GROK_MODEL") || DEFAULT_SYNTH_MODEL,
     synthMaxTokens: positiveInt("GROK_SYNTH_MAX_TOKENS", DEFAULT_SYNTH_MAX_TOKENS),
     synthTimeoutMs: positiveInt("GROK_SYNTH_TIMEOUT_MS", DEFAULT_SYNTH_TIMEOUT_MS),
+    // Optional backstop for the main-writer synthesis call. The main channel's
+    // configured writer (e.g. gpt-5.6-luna) can be slow/flaky on some gateways
+    // (Cloudflare ~120s cap → 524), which would otherwise degrade the report to a
+    // raw-answer fallback. When set, a failed one-shot synthesis automatically
+    // retries once with this model so the daily report still completes. Only used
+    // for the non-gemini one-shot path; the gemini web_search loop is unaffected.
+    synthFallbackModel: val("GROK_SYNTH_FALLBACK_MODEL") || "grok-4.5",
     // --- second AI channel (full dual-channel, ai-news.mjs + run.mjs) ---
     // When enabled, run.mjs registers an "ai-alt" section that reuses the whole
     // aiNewsSection pipeline (independent search + community merge + synthesis) with
@@ -277,7 +295,7 @@ export function loadConfig({ date = null } = {}) {
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    aiAltModel: val("AI_ALT_MODEL") || "gpt-5.6-luna",
+    aiAltModel: val("AI_ALT_MODEL") || "gemini-3.6-flash",
     aiAltQueryTemplate: val("AI_ALT_QUERY"),
     aiAltFile: val("AI_ALT_FILE"),
     // The alt writer model gets its own synthesis budget instead of sharing
@@ -286,6 +304,22 @@ export function loadConfig({ date = null } = {}) {
     // the shared 90s budget used to time out and degrade the note to the raw
     // answer (measured 2026-08-06). Default 5min keeps the margin.
     aiAltSynthTimeoutMs: positiveInt("AI_ALT_SYNTH_TIMEOUT_MS", 300000),
+    // --- gemini-3.6-flash alt writer: client-side web_search tool loop ---
+    // gemini is the only writer model on the gateway that voluntarily emits
+    // web_search tool_calls (verified 2026-08-07; DeepSeek emits 0, Luna 502s).
+    // When the alt writer is gemini and this is on, the synthesis path runs a
+    // bounded client loop: each emitted query is executed through grok-search
+    // (Tavily/Firecrawl), results fed back, then the model converges to the brief.
+    // Set AI_ALT_GEMINI_WEBSEARCH=false to force plain single-shot synthesis (the
+    // same path as the other writers).
+    aiAltGeminiWebSearch: (() => {
+      const raw = val("AI_ALT_GEMINI_WEBSEARCH");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    // Hard cap on web_search rounds so a runaway tool-call loop can't spin forever:
+    // after this many rounds the loop drops the tool and forces a final answer.
+    aiAltGeminiMaxRounds: int("AI_ALT_GEMINI_MAX_ROUNDS", 2),
     // cwd-independent cache dir, so reruns always read the same on-disk cache.
     cacheDir: path.join(PROJECT_ROOT, "reports-cache"),
     // GitHub poster image generation (image-gen.mjs). The prompt file + reference
@@ -316,7 +350,12 @@ export function loadConfig({ date = null } = {}) {
 // Display-friendly slug for an alt-channel writer model, used for the alt file
 // name (AI-<slug>.md) and the H1 subtitle. Known models map to short labels;
 // anything else falls back to a sanitized kebab of the raw model id.
-const ALT_MODEL_SLUGS = { "deepseek-v4-pro": "DeepSeek", "grok-4.5": "Grok", "gpt-5.6-luna": "Luna" };
+const ALT_MODEL_SLUGS = {
+  "deepseek-v4-pro": "DeepSeek",
+  "grok-4.5": "Grok",
+  "gpt-5.6-luna": "Luna",
+  "gemini-3.6-flash": "Gemini",
+};
 export function modelSlug(model) {
   if (ALT_MODEL_SLUGS[model]) return ALT_MODEL_SLUGS[model];
   const slug = String(model ?? "")
@@ -330,7 +369,7 @@ export function modelSlug(model) {
 // the alt channel searches the same topic; name/title default from the model slug.
 export function resolveAltChannel(config) {
   if (!config.aiAltChannel) return null;
-  const model = config.aiAltModel || "gpt-5.6-luna";
+  const model = config.aiAltModel || "gemini-3.6-flash";
   const slug = modelSlug(model);
   return {
     name: config.aiAltFile || `AI-${slug}`,

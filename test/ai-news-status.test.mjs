@@ -170,3 +170,37 @@ test("shouldSynthesize: search ok + cited (no degraded/zero) -> false", () => {
     false,
   );
 });
+
+test("computeAiNewsStatus: fallback synthesis succeeds and is annotated", () => {
+  const status = computeAiNewsStatus({
+    searchOk: true,
+    synthesized: true,
+    synthAttemptedAndFailed: false,
+    zeroCitation: true,
+    sourceCount: 5,
+    hasUsableDegradedDump: false,
+    synthModel: "grok-4.5",
+    synthFellBack: true,
+    synthFallbackFrom: "gpt-5.6-luna",
+  });
+  assert.equal(status.ok, true);
+  assert.match(status.summary, /grok-4\.5/);
+  assert.match(status.summary, /gpt-5\.6-luna 失败，已回退 grok-4\.5/);
+});
+
+test("computeAiNewsStatus: fallback with identical model is not annotated", () => {
+  // No primary→fallback note when they are the same model (fallback would be degenerate).
+  const status = computeAiNewsStatus({
+    searchOk: true,
+    synthesized: true,
+    synthAttemptedAndFailed: false,
+    zeroCitation: false,
+    sourceCount: 2,
+    hasUsableDegradedDump: false,
+    synthModel: "grok-4.5",
+    synthFellBack: false,
+    synthFallbackFrom: null,
+  });
+  assert.equal(status.ok, true);
+  assert.equal(status.summary, "综合成功（grok-4.5，2 来源）");
+});

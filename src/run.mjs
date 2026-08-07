@@ -16,6 +16,27 @@ import {
 } from "./image-gen.mjs";
 import { writeSection, rescueMarkdown } from "./obsidian.mjs";
 
+// Render the raw linux.do news/34 posts (all of today's, verbatim) as a self-contained
+// 辅助资料 (auxiliary materials) note. Pure markdown, no pollution: it lists titles,
+// URLs, Beijing timestamps, and the Discourse excerpts — the raw input that fed the
+// AI synthesis. Kept separate from the shipped AI report so the brief stays clean.
+function renderLinuxDoAuxiliary(cards, date) {
+  const lines = [
+    `# linux.do 前沿快讯 辅助资料 · ${date}`,
+    "",
+    `共 ${cards.length} 条当天帖子（来源：https://linux.do/c/news/34）`,
+    "",
+  ];
+  for (const c of cards) {
+    lines.push(`## ${c.title}`);
+    lines.push(`- 链接：${c.url}`);
+    if (c.created_at) lines.push(`- 时间：${c.created_at}`);
+    if (c.excerpt) lines.push(`- 正文摘录：${c.excerpt}`);
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
 // The report and posters label their timestamp as 北京时间, so config.date must be
 // the Beijing (UTC+8) calendar date — not the host machine's local date, which on
 // a UTC/CI box would be off by up to a day and disagree with the {date} rendered on
@@ -90,6 +111,18 @@ async function run() {
         res.ok = false;
       } else {
         res.file = written.file;
+      }
+      // Dump the raw linux.do news/34 posts (auxiliary materials) that fed this
+      // section into a sibling <name>-辅助资料.md, so every forum post that went
+      // into synthesis is recorded verbatim. Best-effort: never blocks the section.
+      if (Array.isArray(res?.linuxdoRaw) && res.linuxdoRaw.length) {
+        const aux = renderLinuxDoAuxiliary(res.linuxdoRaw, config.date);
+        const auxWritten = await writeSection(config, `${res.name}-辅助资料`, aux);
+        if (auxWritten.error) {
+          res.auxError = auxWritten.error;
+        } else {
+          res.auxFile = auxWritten.file;
+        }
       }
       return res;
     }),
@@ -175,6 +208,9 @@ async function run() {
       let line = `${tag} ${v.name}: ${v.summary} → ${v.file}`;
       if (v.writeError) {
         line += `\n    ⚠️ vault 写入失败：${v.writeError.message}`;
+      }
+      if (v.auxFile) {
+        line += `\n    ${tag} 辅助资料: → ${v.auxFile}`;
       }
       return line;
     }

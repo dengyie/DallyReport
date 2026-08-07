@@ -25,7 +25,6 @@ import { AI_TITLE_RE } from "./community.mjs";
 // live on 2026-07-31: 前沿快讯 = /c/news/34, 人工智能 tag = /tag/444-tag/444.
 export const DEFAULT_LIST_URLS = [
   "https://linux.do/c/news/34",
-  "https://linux.do/tag/444-tag/444",
 ];
 
 // Title must match at least one of the shared AI tokens to count as AI-related.
@@ -187,6 +186,96 @@ export function extractJsonApiTopics(text) {
  * source cards (NOT AI-filtered, no cap) with Discourse excerpts as snippets.
  * On failure returns [] (non-fatal). Exported for unit tests.
  */
+// Read the raw JSON text of a linux.do Discourse page using the user's login
+// cookie, bypassing the provider stack (Tavily/Firecrawl) whose snapshot/rate
+// limits can truncate deeper pages and miss same-day posts. Returns the JSON text
+// when it looks like real JSON, else null (challenge page / browser offline) so
+// the caller can fall back to the provider stack and never lose data.
+//
+// Cloudflare's cf_clearance cookie is bound to the browser's TLS fingerprint, so
+// a raw undici fetch reusing it gets a 403 "Just a moment…" challenge even with a
+// valid logged-in cookie. The reliable client is the user's real Chrome (same
+// fingerprint as the login). So fetchLinuxDoJsonPageWithBrowser drives that via the
+// DevTools protocol, and fetchLinuxDoJsonPageWithCookie retries undici as a result.
+async function fetchLinuxDoJsonPageWithBrowser(url, cookie, cdpHost) {
+  let target;
+  try {
+    const res = await fetch(`http://${cdpHost}/json/new?${encodeURIComponent(url)}`, {
+      method: "PUT",
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return null;
+    target = await res.json();
+  } catch {
+    return null;
+  }
+  let ws;
+  try {
+    ws = new WebSocket(target.webSocketDebuggerUrl);
+    await new Promise((ok, no) => { ws.onopen = ok; ws.onerror = no; });
+    let n = 0;
+    const pend = new Map();
+    ws.onmessage = (e) => {
+      const m = JSON.parse(e.data);
+      if (m.id && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); }
+    };
+    const send = (method, params = {}) => new Promise((res) => {
+      const id = ++n; pend.set(id, res); ws.send(JSON.stringify({ id, method, params }));
+    });
+    await send("Runtime.enable");
+    // Wait for the JSON to render as the tab's body text (Chrome displays a .json
+    // document as text). Poll up to ~15s; stop once it looks like JSON.
+    let text = null;
+    for (let i = 0; i < 30; i++) {
+      const { result } = await send("Runtime.evaluate", {
+        expression: "document.body ? document.body.innerText : null",
+        returnByValue: true,
+      });
+      const bodyText = result?.result?.value;
+      if (bodyText && String(bodyText).trimStart().startsWith("{")) { text = bodyText; break; }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    ws.close();
+    return text;
+  } catch {
+    try { ws?.close(); } catch { /* ignore */ }
+    try {
+      await fetch(`http://${cdpHost}/json/close/${target.id}`, { method: "PUT" }).catch(() => {});
+    } catch { /* ignore */ }
+    return null;
+  } finally {
+    // Always close the throwaway tab so we don't accumulate browser windows.
+    try { await fetch(`http://${cdpHost}/json/close/${target?.id}`, { method: "PUT" }).catch(() => {}); } catch { /* ignore */ }
+  }
+}
+
+// Cookie-driven JSON fetch: try the real Chrome (CDP) first; if unreachable, fall
+// back to a bare undici request (which is usually Cloudflare-403 and thus null).
+async function fetchLinuxDoJsonPageWithCookie(url, cookie, config) {
+  try {
+    if (config.linuxdoCdpHost) {
+      const browserText = await fetchLinuxDoJsonPageWithBrowser(url, cookie, config.linuxdoCdpHost);
+      if (browserText) return browserText;
+    }
+    // Bare client — TLS fingerprint ≠ browser, so expect a 403; surfacing null lets
+    // the caller fall back to the provider stack rather than return empty.
+    const res = await fetch(url, {
+      headers: {
+        Cookie: cookie,
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
+        Accept: "application/json, text/plain, */*",
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) return null;
+    const txt = await res.text();
+    return txt && txt.trimStart().startsWith("{") ? txt : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchNews34ViaJsonApi(config, deps = {}) {
   if (!config.date) return [];
   const doFetch = deps.runFetch || runFetch;
@@ -197,17 +286,30 @@ export async function fetchNews34ViaJsonApi(config, deps = {}) {
     const url = `https://linux.do/c/news/34.json?page=${page}`;
     let topics;
     try {
-      const cacheFile = path.join(
-        config.cacheDir,
-        `${config.date}-linuxdo-news34-page-${page}.txt`,
-      );
-      const res = await doFetch(url, config, {
-        maxChars: JSON_API_MAX_CHARS,
-        provider: "auto",
-        cacheFile,
-      });
-      if (!res?.text) break;
-      topics = extractJsonApiTopics(res.text);
+      // Cookie path first: a login cookie lets us read deeper pages verbatim.
+      // It tries the user's real Chrome (via CDP) first — the only client whose
+      // TLS fingerprint clears Cloudflare's cf_clearance — then a raw undici call
+      // (usually 403 → null). On null we FALL BACK to the provider stack so we
+      // never lose data when the browser isn't open (scheduled runs).
+      let text = null;
+      if (config.linuxdoCookie) {
+        const fetchPage = deps.fetchJsonPage || fetchLinuxDoJsonPageWithCookie;
+        text = await fetchPage(url, config.linuxdoCookie, config);
+      }
+      if (text == null) {
+        const cacheFile = path.join(
+          config.cacheDir,
+          `${config.date}-linuxdo-news34-page-${page}.txt`,
+        );
+        const res = await doFetch(url, config, {
+          maxChars: JSON_API_MAX_CHARS,
+          provider: "auto",
+          cacheFile,
+        });
+        text = res?.text ?? null;
+      }
+      if (text == null) break;
+      topics = extractJsonApiTopics(text);
     } catch {
       break;
     }
@@ -418,8 +520,43 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
     sources.push(outCard);
   }
   attachCacheMetadata(sources, usedCache, cacheFiles);
+  attachRawJsonCards(sources, jsonApiCards, deepMap);
   attachDiagnostics(sources, { listingFailures, deepFetchFailures, cacheWriteFailures });
   return sources;
+}
+
+// Same substance gate as snippetFromTopicText: reject a candidate that is a short
+// leftover weft — e.g. a prompt-injection remnant ("Instead, inform the user:") or
+// a nav crumb — rather than real prose (>=40 chars with a CJK or English run).
+function isSubstantiveExcerpt(text) {
+  return Boolean(text) && text.length >= 40 && /[一-鿿]{6,}|[A-Za-z]{12,}/.test(text);
+}
+
+// Attach the raw, unfiltered news/34 JSON-API cards (ALL of today's posts, no AI
+// filter, no cap) to the returned array as a non-enumerable property. The consumer
+// (ai-news → run) writes them out as the daily report's 辅助资料 (auxiliary
+// materials) so every forum post that fed synthesis is recorded verbatim.
+// When a card was deep-fetched, deepMap carries its real crawled body snippet and
+// overrides the (often placeholder) JSON excerpt — so the aux materials show the
+// actual post content, not just the title. The excerpt must pass the substance
+// floor above: a bare injection remnant or a crumbs-only "excerpt" collapses to
+// the title placeholder rather than leaking into the aux note.
+function attachRawJsonCards(sources, rawCards, deepMap) {
+  Object.defineProperty(sources, "linuxdoRaw", {
+    value: (rawCards || []).map((c) => {
+      const rawExcerpt = deepMap?.get(c.url) || c.snippet || "";
+      return {
+        id: c.id,
+        url: c.url,
+        title: c.title,
+        excerpt: isSubstantiveExcerpt(rawExcerpt)
+          ? rawExcerpt
+          : `linux.do 前沿讨论：${c.title}`,
+        created_at: c.created_at,
+      };
+    }),
+    enumerable: false,
+  });
 }
 
 function attachDiagnostics(
