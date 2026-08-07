@@ -17,6 +17,7 @@
 // Isolation: any failure returns [] so the AI section still runs on general sources.
 
 import path from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
 import { runFetch } from "./grok-cli.mjs";
 import { sanitizeSnippet, isInjectionOnlySource } from "./snippet-hygiene.mjs";
 import { AI_TITLE_RE } from "./community.mjs";
@@ -654,4 +655,240 @@ function normalizeUrl(u) {
   } catch {
     return String(u).replace(/\/$/, "");
   }
+}
+
+// ---------------------------------------------------------------------------
+// Full-post enrichment: crawl each news/34 topic's COMPLETE body (OP + replies)
+// via the Discourse topic JSON API (t/{id}.json, cookie/CDP path) and download
+// its attachments (images/pdf/...) from the public CDN. This is a best-effort,
+// post-report step — the aux note and AI brief never depend on it succeeding.
+// ---------------------------------------------------------------------------
+
+// Attachment-ish file extensions; anything else that isn't a page link is ignored.
+const ATTACHMENT_EXT_RE =
+  /\.(?:png|jpe?g|gif|webp|avif|bmp|svg|mp4|webm|pdf|zip|rar|7z|tar|gz|docx?|xlsx?|pptx?|txt|md|json|sql|bin)(?:[?#].*)?$/i;
+// CDN serves originals under /original/ and thumbnails under /optimized/; the
+// original is the full-res file we actually want to archive.
+const ASSET_URL_RE = /(?:ldstatic\.com|linux\.do)\/(?:uploads|system)[^"'\s]*\/(?:original|optimized)\//i;
+
+/**
+ * Convert a Discourse post's `cooked` HTML into readable markdown. Unlike the
+ * model-snippet path (snippetFromTopicText), this keeps the WHOLE body — it is
+ * for humans reading the archived post, not for synthesis, so no 40-char gate.
+ *
+ * @param {string} html       the cooked HTML of one post
+ * @param {{rewrite?: (u: string) => string}} [opts] rewrite maps a CDN src to a
+ *   local path (e.g. "../linuxdo-attachments/123/x.png") so images resolve in
+ *   the vault.
+ */
+export function cookedToMarkdown(html, { rewrite } = {}) {
+  if (!html) return "";
+  const map = (u) => (rewrite ? rewrite(u) || u : u);
+  let s = String(html);
+  // Drop script/style/iframe + forum chrome containers wholesale.
+  s = s.replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<iframe[\s\S]*?<\/iframe>/gi, "")
+    .replace(/<(nav|header|footer|aside)[^>]*>[\s\S]*?<\/\1>/gi, "")
+    .replace(/<(nav|header|footer|aside)[^>]*\/>/gi, "");
+  // Code blocks before anything else so their contents survive tag-stripping.
+  s = s.replace(/<pre[^>]*>[\s\S]*?<\/pre>/gi, (m) => `\n\`\`\`\n${m.replace(/<[^>]+>/g, "").trim()}\n\`\`\`\n`);
+  // Images -> markdown with the (possibly rewritten) src.
+  s = s.replace(/<img[^>]*?src=["']([^"']+)["'][^>]*?>/gi, (_m, src) => `\n![附件](${map(src)})\n`);
+  // Links -> markdown links (skip empty/in-page anchors).
+  s = s.replace(/<a[^>]*?href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m, href, text) => {
+    const t = text.replace(/<[^>]+>/g, "").trim();
+    if (!href || href.startsWith("#")) return t || "";
+    return `[${t || href}](${map(href)})`;
+  });
+  // Inline emphasis/code.
+  s = s.replace(/<(strong|b)>([\s\S]*?)<\/\1>/gi, "**$2**")
+    .replace(/<(em|i)>([\s\S]*?)<\/\1>/gi, "*$2*")
+    .replace(/<code>([\s\S]*?)<\/code>/gi, "`$1`");
+  // Block boundaries -> line breaks, then drop whatever tags remain.
+  s = s.replace(/<\/(?:p|div|li|h[1-6]|blockquote|tr)>/gi, "\n")
+    .replace(/<(?:p|div|li|h[1-6]|blockquote|tr|br)[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, "");
+  // Decode a few common entities.
+  s = s.replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;/gi, "'");
+  // Collapse 3+ blank lines and trim trailing whitespace per line.
+  return s
+    .split("\n")
+    .map((l) => l.replace(/\s+$/g, ""))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// Stable, deduplicated attachment list from cooked HTML. Prefers original
+// (full-res) over optimized variants of the same upload; keeps first occurrence
+// order.
+export function extractAttachments(html) {
+  const found = new Map(); // normalized url -> { url, kind, basename, original: bool }
+  const consider = (url, kind) => {
+    if (!url) return;
+    if (!ASSET_URL_RE.test(url) && !ATTACHMENT_EXT_RE.test(url)) return;
+    const clean = url.split(/[?#]/)[0];
+    if (!clean) return;
+    const isOrig = /\/original\//i.test(clean);
+    const existing = found.get(clean);
+    if (existing) {
+      if (isOrig && !existing.original) existing.original = true;
+      return;
+    }
+    found.set(clean, {
+      url: clean,
+      kind,
+      basename: decodeURIComponent(clean.split("/").pop() || "attachment"),
+      original: isOrig,
+    });
+  };
+  const imgRe = /<img[^>]*?src=["']([^"']+)["']/gi;
+  let m;
+  while ((m = imgRe.exec(html)) !== null) consider(m[1], "image");
+  // Any <a href> is a candidate; consider() filters to attachment-shaped URLs
+  // (CDN asset path or a known file extension), so nav/thread links never match.
+  const aRe = /<a[^>]*?href=["']([^"']+)["']/gi;
+  while ((m = aRe.exec(html)) !== null) consider(m[1], "file");
+  // Drop optimized dupes that have an original sibling of the same basename.
+  const byBase = new Map();
+  for (const a of found.values()) {
+    const key = a.basename.toLowerCase();
+    if (!byBase.has(key) || (a.original && !byBase.get(key).original)) byBase.set(key, a);
+  }
+  return [...byBase.values()];
+}
+
+/**
+ * Download one attachment to destFile. Plain undici is fine — the CDN assets are
+ * public (verified 2026-08-07). Returns { bytes } or null on any failure.
+ */
+async function downloadAttachmentAsset(url, destFile, { fetchImpl = fetch, timeoutMs = 30000 } = {}) {
+  try {
+    const r = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!r.ok) return null;
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (!buf.length) return null;
+    await writeFile(destFile, buf);
+    return { bytes: buf.length };
+  } catch {
+    return null;
+  }
+}
+
+// Small concurrency limiter so we never open dozens of CDP tabs / downloads at once.
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      try { out[i] = await fn(items[i], i); } catch { out[i] = null; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+/**
+ * Crawl COMPLETE post bodies + attachments for the news/34 cards (e.g. the raw
+ * `linuxdoRaw` list) into the vault's date folder:
+ *
+ *   <obsidianDir>/<date>/linuxdo-posts/<id>-<slug>.md         full thread markdown
+ *   <obsidianDir>/<date>/linuxdo-attachments/<id>/<file>      downloaded files
+ *
+ * Returns one record per successfully enriched post:
+ *   { id, url, title, created_at, postFile, embed, attachments: [{url, local, bytes}] }
+ * Best-effort: a failing post is skipped (not included), never throws.
+ */
+export async function enrichLinuxdoPosts(cards, config, deps = {}) {
+  if (!config?.date || !config?.obsidianDir) return [];
+  if (config.linuxdoFullPosts === false) return [];
+  const limit = config.linuxdoFullPostsLimit ?? 40;
+  const maxPerPost = config.linuxdoAttachMaxPerPost ?? 20;
+  const maxBytesPerPost = config.linuxdoAttachMaxBytesPerPost ?? 20 * 1024 * 1024;
+  const withAttachments = config.linuxdoDownloadAttachments !== false;
+  const fetchTopic = deps.fetchTopic || ((id) => fetchLinuxDoJsonPageWithCookie(`https://linux.do/t/${id}.json`, config.linuxdoCookie, config));
+  const download = deps.download || downloadAttachmentAsset;
+
+  const dateDir = path.join(config.obsidianDir, config.date);
+  const postsDir = path.join(dateDir, "linuxdo-posts");
+  const attachRoot = path.join(dateDir, "linuxdo-attachments");
+  await mkdir(postsDir, { recursive: true }).catch(() => {});
+  await mkdir(attachRoot, { recursive: true }).catch(() => {});
+
+  const targets = (cards || []).slice(0, limit);
+  const results = await mapLimit(targets, 3, async (card) => {
+    const id = card?.id || Number(/\/(\d+)$/.exec(card?.url || "")?.[1] || 0);
+    if (!id) return null;
+    let jsonText = null;
+    try { jsonText = await fetchTopic(id); } catch { /* best-effort */ }
+    if (!jsonText) return null;
+    let topic;
+    try { topic = JSON.parse(jsonText); } catch { return null; }
+    const posts = topic?.post_stream?.posts || [];
+    if (!posts.length) return null;
+    const title = topic?.title || card?.title || `帖子 ${id}`;
+    const allCooked = posts.map((p) => p.cooked || "").join("\n");
+
+    // Attachments: extract first, then rewrite their CDN srcs to local paths.
+    const attachList = withAttachments ? extractAttachments(allCooked) : [];
+    const localByUrl = new Map();
+    const uploaded = [];
+    let totalBytes = 0;
+    if (withAttachments && attachList.length) {
+      const aDir = path.join(attachRoot, String(id));
+      await mkdir(aDir, { recursive: true }).catch(() => {});
+      for (const a of attachList) {
+        if (uploaded.length >= maxPerPost) break;
+        const safeBase = a.basename.replace(/[^\w.\-()一-鿿 ]+/g, "_");
+        const dest = path.join(aDir, safeBase);
+        const res = await download(a.url, dest, config);
+        if (!res?.bytes) continue;
+        totalBytes += res.bytes;
+        if (totalBytes > maxBytesPerPost) { totalBytes -= res.bytes; break; }
+        uploaded.push({ url: a.url, local: path.relative(dateDir, dest), bytes: res.bytes });
+        localByUrl.set(a.url, `../${path.relative(dateDir, dest)}`);
+      }
+    }
+
+    const body = cookedToMarkdown(allCooked, {
+      rewrite: (u) => localByUrl.get(u.split(/[?#]/)[0]) || localByUrl.get(u) || null,
+    });
+
+    const slug = modelSlugLike(title);
+    const fileName = `${id}-${slug}.md`;
+    const postFile = path.join(postsDir, fileName);
+    const header = [
+      `# ${title}`,
+      "",
+      `- 链接：${card?.url || `https://linux.do/t/${id}`}`,
+      `- 来源：https://linux.do/c/news/34`,
+      `- 主题 ID：${id}`,
+      `- 时间：${card?.created_at || topic?.created_at || ""}`.replace(/- 时间：$/, ""),
+      "",
+    ];
+    const attachBlock = uploaded.length
+      ? ["", "## 附件", ""].concat(uploaded.map((u) => `- [${u.local.split("/").pop()}](../${u.local})`))
+      : [];
+    const md = [...header, body, ...attachBlock, ""].join("\n");
+    try { await writeFile(postFile, md, "utf8"); } catch { return null; }
+
+    return {
+      id,
+      url: card?.url || `https://linux.do/t/${id}`,
+      title,
+      created_at: card?.created_at || topic?.created_at || null,
+      postFile: path.relative(dateDir, postFile),
+      embed: `![[${config.date}/linuxdo-posts/${fileName}]]`,
+      attachments: uploaded,
+    };
+  });
+  return results.filter(Boolean);
+}
+
+// File-name slug mirror of config.modelSlug: kebab of [\w] runs, empty -> "post".
+function modelSlugLike(s) {
+  const slug = String(s ?? "").replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
+  return slug || "post";
 }

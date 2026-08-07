@@ -15,12 +15,17 @@ import {
   hasAiPosterHeadlines,
 } from "./image-gen.mjs";
 import { writeSection, rescueMarkdown } from "./obsidian.mjs";
+import { enrichLinuxdoPosts } from "./linuxdo.mjs";
 
 // Render the raw linux.do news/34 posts (all of today's, verbatim) as a self-contained
 // 辅助资料 (auxiliary materials) note. Pure markdown, no pollution: it lists titles,
 // URLs, Beijing timestamps, and the Discourse excerpts — the raw input that fed the
 // AI synthesis. Kept separate from the shipped AI report so the brief stays clean.
-function renderLinuxDoAuxiliary(cards, date) {
+// postsById (optional) comes from enrichLinuxdoPosts: full body + attachments for
+// this post were crawled to <date>/linuxdo-posts & linuxdo-attachments. When present
+// we surface the attachment count and embed the full thread so Obsidian lazy-embeds
+// the whole post instead of a giant inline note.
+function renderLinuxDoPostAuxiliary(cards, date, postsById = new Map()) {
   const lines = [
     `# linux.do 前沿快讯 辅助资料 · ${date}`,
     "",
@@ -32,6 +37,18 @@ function renderLinuxDoAuxiliary(cards, date) {
     lines.push(`- 链接：${c.url}`);
     if (c.created_at) lines.push(`- 时间：${c.created_at}`);
     if (c.excerpt) lines.push(`- 正文摘录：${c.excerpt}`);
+    const rec = postsById.get(c.url) || postsById.get(c.id);
+    if (rec?.attachments?.length) lines.push(`- 附件：${rec.attachments.length} 个已下载`);
+    if (rec?.embed) {
+      lines.push("");
+      lines.push(`<details><summary>展开完整帖子（${rec.title}）</summary>`);
+      lines.push("");
+      lines.push(rec.embed);
+      lines.push("");
+      lines.push(`</details>`);
+      lines.push("");
+      continue;
+    }
     lines.push("");
   }
   return lines.join("\n");
@@ -116,12 +133,32 @@ async function run() {
       // section into a sibling <name>-辅助资料.md, so every forum post that went
       // into synthesis is recorded verbatim. Best-effort: never blocks the section.
       if (Array.isArray(res?.linuxdoRaw) && res.linuxdoRaw.length) {
-        const aux = renderLinuxDoAuxiliary(res.linuxdoRaw, config.date);
+        const aux = renderLinuxDoPostAuxiliary(res.linuxdoRaw, config.date);
         const auxWritten = await writeSection(config, `${res.name}-辅助资料`, aux);
         if (auxWritten.error) {
           res.auxError = auxWritten.error;
         } else {
           res.auxFile = auxWritten.file;
+        }
+        // Post-report enrichment (best-effort, non-blocking): crawl COMPLETE post
+        // bodies (OP + replies) via the Discourse topic JSON API and download
+        // attachments into the vault. On success the aux is re-rendered with a
+        // per-post attachment count + a collapsed embed of the full thread, so the
+        // aux file stays small while Obsidian lazy-loads the full posts.
+        try {
+          const posts = await enrichLinuxdoPosts(res.linuxdoRaw, config);
+          if (posts.length && !auxWritten.error) {
+            const byUrl = new Map(posts.map((p) => [p.url, p]));
+            const aux2 = renderLinuxDoPostAuxiliary(res.linuxdoRaw, config.date, byUrl);
+            const w2 = await writeSection(config, `${res.name}-辅助资料`, aux2);
+            if (!w2.error) {
+              res.auxFile = w2.file;
+              res.auxPosts = posts.length;
+            }
+          }
+        } catch (e) {
+          // Enrichment is additive; a failure leaves the base aux in place.
+          res.auxEnrichError = e?.message || String(e);
         }
       }
       return res;
@@ -210,7 +247,7 @@ async function run() {
         line += `\n    ⚠️ vault 写入失败：${v.writeError.message}`;
       }
       if (v.auxFile) {
-        line += `\n    ${tag} 辅助资料: → ${v.auxFile}`;
+        line += `\n    ${tag} 辅助资料: → ${v.auxFile}${v.auxPosts ? `（完整帖子 ${v.auxPosts}）` : ""}`;
       }
       return line;
     }

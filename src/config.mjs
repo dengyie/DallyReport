@@ -240,6 +240,24 @@ export function loadConfig({ date = null } = {}) {
     // synthesis model real body content for the top ~12 of today's posts; the rest
     // stay title-only. Raise for richer analysis, lower for a faster run.
     linuxdoNews34DeepLimit: int("LINUXDO_NEWS34_DEEP_FETCH_LIMIT", 40),
+    // Post-report enrichment: crawl COMPLETE post bodies (OP + replies) via the
+    // Discourse topic JSON API and download attachments into the vault. Disable to
+    // keep the run light (scheduled/headless without the 9222 browser).
+    linuxdoFullPosts: (() => {
+      const raw = val("LINUXDO_FULL_POSTS");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    linuxdoDownloadAttachments: (() => {
+      const raw = val("LINUXDO_DOWNLOAD_ATTACHMENTS");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    // How many today's posts to fully crawl (cap on the enrichment fan-out).
+    linuxdoFullPostsLimit: int("LINUXDO_FULL_POSTS_LIMIT", 40),
+    // Attachment safety valves per post: max files and max accumulated bytes.
+    linuxdoAttachMaxPerPost: int("LINUXDO_ATTACH_MAX_PER_POST", 20),
+    linuxdoAttachMaxBytesPerPost: int("LINUXDO_ATTACH_MAX_BYTES_PER_POST", 20 * 1024 * 1024),
     // Cap on total sources fed to synthesis after merge (community first).
     sourceMaxTotal: int("AI_SOURCE_MAX_TOTAL", 18),
     // --- nodeseek.com community AI sources (nodeseek.mjs) ---
