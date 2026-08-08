@@ -23,6 +23,7 @@ import os from "node:os";
 import { readFileSync, rmSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { trackChild } from "./child-tracker.mjs";
 import {
   assertImageCreds,
   imageApiUrl,
@@ -112,6 +113,9 @@ export function sipsDownscale(
       finish(false);
       return;
     }
+    // Register with the global child tracker so run.mjs reaps sips (SIGKILL) if the
+    // main process is interrupted mid-downscale — otherwise it would orphan.
+    trackChild(child);
     child.on("error", () => finish(false));
     child.on("exit", (code) => finish(code === 0));
     timer = setTimeout(() => {

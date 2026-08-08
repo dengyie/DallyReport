@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { trackChild } from "./child-tracker.mjs";
 
 // Environment variables grok-search reads via its own config.js (process.env only,
 // no .env auto-load). We forward every keys it cares about, sourcing from .env
@@ -57,6 +58,9 @@ function runScript(scriptPath, args) {
       [scriptPath, ...args],
       { env: childEnv(), stdio: ["ignore", "pipe", "pipe"] },
     );
+    // Register with the global child tracker so run.mjs reaps this process (SIGKILL)
+    // if the main run is interrupted mid-search — otherwise it would orphan.
+    trackChild(child);
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (c) => (stdout += c.toString()));

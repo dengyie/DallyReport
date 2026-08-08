@@ -16,6 +16,8 @@ import {
 } from "./image-gen.mjs";
 import { writeSection, rescueMarkdown } from "./obsidian.mjs";
 import { enrichLinuxdoPosts } from "./linuxdo.mjs";
+import { acquireSingletonLock } from "./lock.mjs";
+import { killAllChildren } from "./child-tracker.mjs";
 
 // Render the raw linux.do news/34 posts (all of today's, verbatim) as a self-contained
 // 辅助资料 (auxiliary materials) note. Pure markdown, no pollution: it lists titles,
@@ -65,22 +67,69 @@ function todayBeijing() {
 function parseArgs(argv) {
   const args = [...argv];
   let section = null;
+  let date = null;
   while (args.length) {
     const a = args.shift();
     if (a === "--section") section = args.shift();
+    else if (a === "--date") date = args.shift();
     else if (a === "--help" || a === "-h") return { help: true };
   }
-  return { section };
+  return { section, date };
 }
 
 async function run() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
-    console.log("Usage: node src/run.mjs [--section ai|ai-alt|github]");
+    console.log("Usage: node src/run.mjs [--section ai|ai-alt|github] [--date YYYY-MM-DD]");
     process.exit(0);
   }
 
-  const config = loadConfig({ date: todayBeijing() });
+  // Default to today's Beijing date; --date overrides it for backfill — e.g. run
+  // yesterday's report on a machine that was off, or regenerate a specific day.
+  // The date stamps the output dir, front-matter, H1, poster {date}, and the
+  // AI_QUERY {date} placeholder, so an explicit date keeps all four in agreement.
+  let date = todayBeijing();
+  if (opts.date) {
+    // Format must be YYYY-MM-DD AND round-trip through the calendar: a regex like
+    // /^\d{4}-\d{2}-\d{2}$/ would accept 2026-99-99 and then stamp an impossible
+    // directory/query date. Rebuild the components from UTC so 2026-02-30 etc.
+    // are rejected too.
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(opts.date);
+    const ok = m && (() => {
+      const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+      const dt = new Date(Date.UTC(y, mo - 1, d));
+      return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
+    })();
+    if (!ok) {
+      console.error(`无效日期: ${opts.date}（应为合法的 YYYY-MM-DD）`);
+      process.exit(2);
+    }
+    date = opts.date;
+  }
+
+  const config = loadConfig({ date });
+
+  // Single-instance guard: refuse to start if another run is already in flight (a
+  // double-fired cron, or a manual run while the scheduled one is in image-gen).
+  // The lock also gives every exit path a single place to drop the lock and reap
+  // in-flight children, so an interrupted run leaves no orphan processes and no
+  // stale lock that would block the next run.
+  const lockPath = path.join(config.cacheDir, "run.lock");
+  const lock = acquireSingletonLock(lockPath);
+  if (lock.error) {
+    console.error(`⏭️ 已有实例在运行，本次退出：${lock.error}`);
+    process.exit(0);
+  }
+  // Single cleanup path: the 'exit' handler reaps children (SIGKILL) and drops the
+  // lock. SIGINT/SIGTERM just exit — process.exit() fires 'exit', so cleanup runs
+  // exactly once instead of being duplicated (and double-fired) in each handler.
+  process.on("exit", () => {
+    killAllChildren();
+    lock.release();
+  });
+  process.on("SIGINT", () => process.exit(130));
+  process.on("SIGTERM", () => process.exit(143));
+
   const pathWarnings = validateRuntimePaths(config);
   if (pathWarnings.length) {
     console.warn(`⚠️ 运行路径提醒：\n${pathWarnings.map((warning) => `  - ${warning}`).join("\n")}`);
@@ -272,7 +321,13 @@ async function run() {
     return `❌ ${n}: ${r.reason?.message || r.reason}`;
   });
   if (posterLines.length) summary.push(...posterLines);
-  console.log(`\nDallyReport ${config.date}\n` + summary.join("\n") + "\n");
+  const text = `\nDallyReport ${config.date}\n` + summary.join("\n") + "\n";
+  // Flush stdout, then exit(0) deterministically. Forcing the exit releases every
+  // handle (undici keep-alive sockets, CDP connections, child processes) instead of
+  // letting the process hang a few seconds on background connections after the
+  // report is already written. The 'exit' handler reaps any in-flight children and
+  // drops the lock. Writing through the callback first avoids truncating the summary.
+  process.stdout.write(text, (err) => process.exit(err ? 1 : 0));
 }
 
 // Insert a poster embed into the GitHub section markdown. Placed right under the
