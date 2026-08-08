@@ -1,12 +1,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { cookedToMarkdown, extractAttachments, enrichLinuxdoPosts } from "../src/linuxdo.mjs";
+import {
+  cookedToMarkdown,
+  extractAttachments,
+  attachmentKey,
+  enrichLinuxdoPosts,
+} from "../src/linuxdo.mjs";
 
 const IMG_ORIG = "https://cdn3.ldstatic.com/original/4X/3/5/c/35cab35942d147a12df3c18a806afa15045af2e7.png";
 const IMG_ORIG2 = "https://cdn3.ldstatic.com/original/4X/1/2/3/abcdef123456789.png";
+const IMG_ORIG3 =
+  "https://cdn3.ldstatic.com/original/4X/9/8/7/0123456789012345678901234567890123456789.png";
+// The resized variant Discourse emits for the SAME upload as IMG_ORIG (same 40-hex
+// stem + `_2_500x500`): must dedup to the full-res original, not be downloaded too.
+const IMG_OPT =
+  "https://cdn3.ldstatic.com/optimized/4X/3/5/c/35cab35942d147a12df3c18a806afa15045af2e7_2_500x500.png";
 
 function cookedHtml() {
   return `<div>
@@ -116,12 +127,149 @@ test("enrichLinuxdoPosts: honors fullPostsLimit (caps fan-out)", async () => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-test("enrichLinuxdoPosts: no cookie/browser — fetchTopic null -> silently skipped", async () => {
+test("enrichLinuxPosts: no cookie / browser — fetchTopic null -> silently skipped", async () => {
   const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-null-"));
   const config = { date: "2026-08-07", obsidianDir: tmp, linuxdoFullPosts: true };
   const cards = [{ id: 10, url: "https://linux.do/t/topic/10", title: "A" }];
   const fetchTopic = async () => null;
   const out = await enrichLinuxdoPosts(cards, config, { fetchTopic, download: async () => null });
   assert.equal(out.length, 0);
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+// --- post-review fixes: dedup + budget + gates ---
+
+test("attachmentKey: collapses Discourse resize suffixes to the identity stem", () => {
+  const stem = "35cab35942d147a12df3c18a806afa15045af2e7";
+  assert.equal(attachmentKey(`${stem}_2_500x500.png`), stem, "hash-named thumbnails collapse to their hash");
+  assert.equal(attachmentKey(`${stem}.png`), stem);
+  // User-named uploads: a trailing `_<n>_<W>x<H>` / `_<W>x<H>` / `_2x` marker is stripped.
+  assert.equal(attachmentKey("report_2_500x500.pdf"), "report.pdf");
+  assert.equal(attachmentKey("report_2x_1024x576.jpg"), "report.jpg");
+  assert.equal(attachmentKey("report_2x.png"), "report.png");
+  assert.equal(attachmentKey("正常的图片.png"), "正常的图片.png");
+});
+
+test("extractAttachments: lightbox <a><img> collapses to the original, drops the thumb", () => {
+  const list = extractAttachments(`<a href="${IMG_ORIG}"><img src="${IMG_OPT}"></a>`);
+  assert.equal(list.length, 1, "resized sibling deduped against its full-res original");
+  assert.equal(list[0].url, IMG_ORIG, "the original URL wins");
+  assert.equal(list[0].original, true);
+  assert.equal(list[0].basename, "35cab35942d147a12df3c18a806afa15045af2e7.png", "kept under the clean name, no _2_500x500");
+});
+
+test("enrich: lightbox thread downloads one original; both image srcs rewrite to it", async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-lightbox-"));
+  const config = {
+    date: "2026-08-07",
+    obsidianDir: tmp,
+    linuxdoFullPosts: true,
+    linuxdoDownloadAttachments: true,
+    linuxdoFullPostsLimit: 40,
+    linuxdoAttachMaxPerPost: 20,
+    linuxdoAttachMaxBytesPerPost: 20 * 1024 * 1024,
+  };
+  const cards = [{ id: 10, url: "https://linux.do/t/topic/10", title: "Lightbox", created_at: "2026-08-07T00:00:00Z" }];
+  const fetched = [];
+  const fetchTopic = async () => {
+    return makeTopicJson("Lightbox", [`<p>正文</p><a href="${IMG_ORIG}"><img src="${IMG_OPT}"></a>`])
+  };
+  const download = async (_url, dest) => { writeFileSync(dest, "x", "utf8"); return { bytes: 1 }; };
+
+  const out = await enrichLinuxdoPosts(cards, config, { fetchTopic, download });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].attachments.length, 1, "only the original is archived");
+  assert.equal(
+    path.basename(out[0].attachments[0].local),
+    "35cab35942d147a12df3c18a806afa15045af2e7.png",
+    "stored under the original file name (thumb name not used)",
+  );
+  const md = readFileSync(path.join(tmp, "2026-08-07", "linuxdo-posts", path.basename(out[0].postFile)), "utf8");
+  // The optimized <img src> (not downloaded itself) rewrites to the same local original.
+  assert.match(
+    md,
+    /!\[附件\]\(\.\.\/linuxdo-attachments\/10\/35cab35942d147a12df3c18a806afa15045af2e7\.png\)/,
+    "optimized src resolves to the archived local original",
+  );
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test("enrich: withAttachments=false writes the full post but downloads nothing", async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-noattach-"));
+  const config = {
+    date: "2026-08-07",
+    obsidianDir: tmp,
+    linuxdoFullPosts: true,
+    linuxdoDownloadAttachments: false,
+  };
+  const cards = [{ id: 10, url: "https://linux.do/t/topic/10", title: "A" }];
+  let downloads = 0;
+  const fetchTopic = async () => makeTopicJson("A", [`<p>正文全文足够长</p><img src="${IMG_ORIG}">`]);
+  const download = async () => { downloads += 1; return { bytes: 1 }; };
+
+  const out = await enrichLinuxdoPosts(cards, config, { fetchTopic, download });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].attachments.length, 0);
+  assert.equal(downloads, 0, "no attachments fetched");
+  const postFile = path.join(tmp, "2026-08-07", "linuxdo-posts", path.basename(out[0].postFile));
+  assert.ok(existsSync(postFile), "full post markdown is still written");
+  const attachDir = path.join(tmp, "2026-08-07", "linuxdo-attachments");
+  assert.equal(existsSync(attachDir) ? readdirSync(attachDir).length : 0, 0, "no attachment files");
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test("enrich: linuxdoFullPosts=false disables fetches entirely", async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-off-"));
+  const config = { date: "2026-08-07", obsidianDir: tmp, linuxdoFullPosts: false };
+  const cards = [{ id: 10, url: "https://linux.do/t/topic/10", title: "A" }];
+  let fetches = 0;
+  const fetchTopic = async () => { fetches += 1; return "{}"; };
+  const out = await enrichLinuxdoPosts(cards, config, { fetchTopic, download: async () => null });
+  assert.equal(out.length, 0);
+  assert.equal(fetches, 0, "disabled → no topic fetched");
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test("enrich: byte budget stops pulling files but keeps the over-budget one linked (no orphan)", async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-bytes-"));
+  const config = {
+    date: "2026-08-07",
+    obsidianDir: tmp,
+    linuxdoFullPosts: true,
+    linuxdoDownloadAttachments: true,
+    linuxdoAttachMaxPerPost: 20,
+    linuxdoAttachMaxBytesPerPost: 5,
+  };
+  const cards = [{ id: 10, url: "https://linux.do/t/topic/10", title: "A" }];
+  const fetchTopic = async () =>
+    makeTopicJson("A", [`<p>正文</p><img src="${IMG_ORIG}"><img src="${IMG_ORIG2}"><img src="${IMG_ORIG3}">`]);
+  const download = async (_url, dest) => { writeFileSync(dest, "xxx", "utf8"); return { bytes: 3 }; };
+
+  const out = await enrichLinuxdoPosts(cards, config, { fetchTopic, download });
+  assert.equal(out[0].attachments.length, 2, "stops fetching once the byte budget is exhausted");
+  const total = out[0].attachments.reduce((n, a) => n + a.bytes, 0);
+  assert.equal(total, 6, "the file that pushed over budget is still recorded");
+  for (const a of out[0].attachments) {
+    assert.ok(existsSync(path.join(tmp, "2026-08-07", a.local)), `recorded file exists: ${a.local}`);
+  }
+  const md = readFileSync(path.join(tmp, "2026-08-07", "linuxdo-posts", path.basename(out[0].postFile)), "utf8");
+  assert.ok(md.includes(`- [${path.basename(out[0].attachments[0].local)}]`), "attachment list section still rendered");
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test("enrich: a failing topic doesn't drop its siblings (partial success)", async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-partial-"));
+  const config = { date: "2026-08-07", obsidianDir: tmp, linuxdoFullPosts: true };
+  const cards = [
+    { id: 10, url: "https://linux.do/t/topic/10", title: "A" },
+    { id: 11, url: "https://linux.do/t/topic/11", title: "B" },
+  ];
+  const fetchTopic = async (id) => {
+    if (id === 11) throw new Error("stub: fetch failed for 11");
+    return makeTopicJson("A", [`<p>正文足够长十</p>`]);
+  };
+  const out = await enrichLinuxdoPosts(cards, config, { fetchTopic, download: async () => null });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].id, 10);
   rmSync(tmp, { recursive: true, force: true });
 });

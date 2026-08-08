@@ -667,9 +667,12 @@ function normalizeUrl(u) {
 // Attachment-ish file extensions; anything else that isn't a page link is ignored.
 const ATTACHMENT_EXT_RE =
   /\.(?:png|jpe?g|gif|webp|avif|bmp|svg|mp4|webm|pdf|zip|rar|7z|tar|gz|docx?|xlsx?|pptx?|txt|md|json|sql|bin)(?:[?#].*)?$/i;
-// CDN serves originals under /original/ and thumbnails under /optimized/; the
+// Asset URLs we treat as attachments. The CDN's real layout is
+// cdn3.ldstatic.com/original/4X/… (no `uploads` segment) with thumbnails under
+// /optimized/; self-hosted Discourse files live under /uploads or /system. The
 // original is the full-res file we actually want to archive.
-const ASSET_URL_RE = /(?:ldstatic\.com|linux\.do)\/(?:uploads|system)[^"'\s]*\/(?:original|optimized)\//i;
+const ASSET_URL_RE =
+  /(?:ldstatic\.com|linux\.do)\/(?:uploads|system|original|optimized)[^"'\s]*\//i;
 
 /**
  * Convert a Discourse post's `cooked` HTML into readable markdown. Unlike the
@@ -750,13 +753,32 @@ export function extractAttachments(html) {
   // (CDN asset path or a known file extension), so nav/thread links never match.
   const aRe = /<a[^>]*?href=["']([^"']+)["']/gi;
   while ((m = aRe.exec(html)) !== null) consider(m[1], "file");
-  // Drop optimized dupes that have an original sibling of the same basename.
+  // Drop optimized/resized dupes that share a stem with the full-res original
+  // (Discourse emits <a href=original><img src=optimized> lightboxes, and the
+  // resized basename has a `_<n>_<W>x<H>` / `_2x` suffix the stem doesn't).
   const byBase = new Map();
   for (const a of found.values()) {
-    const key = a.basename.toLowerCase();
-    if (!byBase.has(key) || (a.original && !byBase.get(key).original)) byBase.set(key, a);
+    const key = attachmentKey(a.basename);
+    const prev = byBase.get(key);
+    if (!prev || (a.original && !prev.original)) byBase.set(key, a);
   }
   return [...byBase.values()];
+}
+
+// The identity stem of a Discourse attachment filename. Uploads are renamed to
+// their content hash (40+ hex) and resized variants append a size token after
+// it (e.g. `…_2_500x500.png`), so for hash-named files the hash IS the key and
+// the suffix is ignored. User-named files only get a trailing `_<n>_<W>x<H>` /
+// `_<W>x<H>` / `_2x` marker stripped.
+export function attachmentKey(basename) {
+  const b = String(basename);
+  const hash = /^([0-9a-f]{40,64})/i.exec(b);
+  if (hash) return hash[1].toLowerCase();
+  return b
+    .replace(/_\d+_\d+x\d+(?=\.[^.]+$)/i, "")
+    .replace(/_\d+x\d+(?=\.[^.]+$)/i, "")
+    .replace(/_2x(?=\.[^.]+$)/i, "")
+    .toLowerCase();
 }
 
 /**
@@ -834,6 +856,7 @@ export async function enrichLinuxdoPosts(cards, config, deps = {}) {
     // Attachments: extract first, then rewrite their CDN srcs to local paths.
     const attachList = withAttachments ? extractAttachments(allCooked) : [];
     const localByUrl = new Map();
+    const byStem = new Map();
     const uploaded = [];
     let totalBytes = 0;
     if (withAttachments && attachList.length) {
@@ -841,19 +864,36 @@ export async function enrichLinuxdoPosts(cards, config, deps = {}) {
       await mkdir(aDir, { recursive: true }).catch(() => {});
       for (const a of attachList) {
         if (uploaded.length >= maxPerPost) break;
+        // Reserve the byte budget BEFORE pulling the next file — a file that then
+        // pushes us over the budget is still kept and recorded (it's already on
+        // disk; dropping it would orphan the bytes), just nothing more is fetched.
+        if (totalBytes >= maxBytesPerPost) break;
         const safeBase = a.basename.replace(/[^\w.\-()一-鿿 ]+/g, "_");
         const dest = path.join(aDir, safeBase);
         const res = await download(a.url, dest, config);
-        if (!res?.bytes) continue;
-        totalBytes += res.bytes;
-        if (totalBytes > maxBytesPerPost) { totalBytes -= res.bytes; break; }
-        uploaded.push({ url: a.url, local: path.relative(dateDir, dest), bytes: res.bytes });
-        localByUrl.set(a.url, `../${path.relative(dateDir, dest)}`);
+        const bytes = res?.bytes || 0;
+        if (!bytes) continue;
+        const rel = path.relative(dateDir, dest);
+        uploaded.push({ url: a.url, basename: safeBase, local: rel, bytes });
+        localByUrl.set(a.url, `../${rel}`);
+        if (!byStem.has(attachmentKey(a.basename))) byStem.set(attachmentKey(a.basename), `../${rel}`);
+        totalBytes += bytes;
       }
     }
 
     const body = cookedToMarkdown(allCooked, {
-      rewrite: (u) => localByUrl.get(u.split(/[?#]/)[0]) || localByUrl.get(u) || null,
+      // Exact URL first; otherwise fall back to the attachment stem so an
+      // <img src=‹optimized/_2x_…›> resolves to the same local original as its
+      // lightbox <a href=‹original›> sibling.
+      rewrite: (u) => {
+        const clean = u.split(/[?#]/)[0];
+        return (
+          localByUrl.get(clean)
+          || byStem.get(attachmentKey(decodeURIComponent(clean.split("/").pop() || "")))
+          || localByUrl.get(u)
+          || null
+        );
+      },
     });
 
     const slug = modelSlugLike(title);
@@ -884,7 +924,16 @@ export async function enrichLinuxdoPosts(cards, config, deps = {}) {
       attachments: uploaded,
     };
   });
-  return results.filter(Boolean);
+  const enriched = results.filter(Boolean);
+  if (targets.length && enriched.length !== targets.length) {
+    // Enrichment is additive, so a partial failure is only surfaced as a warning
+    // (never an error) — the aux note and report already went out with the cards.
+    console.warn(
+      `⚠ 完整帖补全 ${enriched.length}/${targets.length} 帖` +
+        `（跳过 ${targets.length - enriched.length} 帖：无 cookie/CDP、正文为空或下载失败，不影响报告）`,
+    );
+  }
+  return enriched;
 }
 
 // File-name slug mirror of config.modelSlug: kebab of [\w] runs, empty -> "post".

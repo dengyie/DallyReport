@@ -258,6 +258,11 @@ export function loadConfig({ date = null } = {}) {
     // Attachment safety valves per post: max files and max accumulated bytes.
     linuxdoAttachMaxPerPost: int("LINUXDO_ATTACH_MAX_PER_POST", 20),
     linuxdoAttachMaxBytesPerPost: int("LINUXDO_ATTACH_MAX_BYTES_PER_POST", 20 * 1024 * 1024),
+    // Wall-clock budget for the whole post-report enrichment (complete-body crawl
+    // + attachment downloads). On expiry the run skips re-rendering the 辅助资料
+    // with embeds and prints a warning — the report and posters are unaffected.
+    // 0 = no ceiling (the crawl still runs, it just may extend the run).
+    linuxdoEnrichBudgetMs: int("LINUXDO_ENRICH_BUDGET_MS", 120000),
     // Cap on total sources fed to synthesis after merge (community first).
     sourceMaxTotal: int("AI_SOURCE_MAX_TOTAL", 18),
     // --- nodeseek.com community AI sources (nodeseek.mjs) ---

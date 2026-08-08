@@ -73,6 +73,28 @@ function parseArgs(argv) {
   return { section };
 }
 
+// Race an async step against a wall-clock budget. On a timeout the step keeps
+// winding down in the background (its fetches carry their own finite AbortSignal
+// timeouts) and the runner proceeds with what it already had — a slow linux.do
+// crawl never stalls the shipped report or posters. budget 0 = no ceiling.
+async function withBudget(promise, ms, label) {
+  if (!(ms > 0)) return promise;
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} 超过 ${ms}ms 预算，本轮跳过（未完成的文件可能在后台落盘）`)),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function run() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -132,6 +154,8 @@ async function run() {
       // Dump the raw linux.do news/34 posts (auxiliary materials) that fed this
       // section into a sibling <name>-辅助资料.md, so every forum post that went
       // into synthesis is recorded verbatim. Best-effort: never blocks the section.
+      // Full-body enrichment runs once, after the poster steps, in the shared
+      // post-pass below — not here, so a dual-channel day crawls each topic once.
       if (Array.isArray(res?.linuxdoRaw) && res.linuxdoRaw.length) {
         const aux = renderLinuxDoPostAuxiliary(res.linuxdoRaw, config.date);
         const auxWritten = await writeSection(config, `${res.name}-辅助资料`, aux);
@@ -139,26 +163,6 @@ async function run() {
           res.auxError = auxWritten.error;
         } else {
           res.auxFile = auxWritten.file;
-        }
-        // Post-report enrichment (best-effort, non-blocking): crawl COMPLETE post
-        // bodies (OP + replies) via the Discourse topic JSON API and download
-        // attachments into the vault. On success the aux is re-rendered with a
-        // per-post attachment count + a collapsed embed of the full thread, so the
-        // aux file stays small while Obsidian lazy-loads the full posts.
-        try {
-          const posts = await enrichLinuxdoPosts(res.linuxdoRaw, config);
-          if (posts.length && !auxWritten.error) {
-            const byUrl = new Map(posts.map((p) => [p.url, p]));
-            const aux2 = renderLinuxDoPostAuxiliary(res.linuxdoRaw, config.date, byUrl);
-            const w2 = await writeSection(config, `${res.name}-辅助资料`, aux2);
-            if (!w2.error) {
-              res.auxFile = w2.file;
-              res.auxPosts = posts.length;
-            }
-          }
-        } catch (e) {
-          // Enrichment is additive; a failure leaves the base aux in place.
-          res.auxEnrichError = e?.message || String(e);
         }
       }
       return res;
@@ -234,6 +238,44 @@ async function run() {
       posterLines.push("⏭️ AIPoster: 跳过（无有效新闻标题）");
     } else if (ar.status === "rejected") {
       posterLines.push("⏭️ AIPoster: 跳过（AI 板块执行失败，未生成海报）");
+    }
+  }
+
+  // Post-report enrichment (best-effort, non-blocking): crawl COMPLETE post
+  // bodies (OP + replies) via the Discourse topic JSON API and download
+  // attachments into the vault. Runs ONCE across all sections (ai + ai-alt share
+  // today's linux.do posts, so a dual-channel day crawls each topic a single
+  // time), and AFTER the poster steps so image generation is never delayed. On
+  // success each linux.do-carrying section's 辅助资料 is re-rendered with a
+  // per-post attachment count + a collapsed embed of the full thread, so the aux
+  // file stays small while Obsidian lazy-loads the full posts. Wall-clock-budgeted
+  // so a slow browser can't stall the summary.
+  const cardSections = results
+    .filter((r) => r.status === "fulfilled")
+    .map((r) => r.value)
+    .filter((v) => Array.isArray(v?.linuxdoRaw) && v.linuxdoRaw.length && !v.auxError);
+  let posts = [];
+  if (cardSections.length) {
+    try {
+      posts = await withBudget(
+        enrichLinuxdoPosts(cardSections[0].linuxdoRaw, config),
+        config.linuxdoEnrichBudgetMs ?? 120000,
+        "完整帖补全",
+      );
+    } catch (e) {
+      // Enrichment is additive; the base aux (and the report) already went out.
+      console.warn(`⚠ 完整帖补全跳过：${e?.message || String(e)}`);
+    }
+  }
+  if (posts.length) {
+    const byUrl = new Map(posts.map((p) => [p.url, p]));
+    for (const v of cardSections) {
+      const aux2 = renderLinuxDoPostAuxiliary(v.linuxdoRaw, config.date, byUrl);
+      const w2 = await writeSection(config, `${v.name}-辅助资料`, aux2);
+      if (!w2.error) {
+        v.auxFile = w2.file;
+        v.auxPosts = posts.length;
+      }
     }
   }
 
