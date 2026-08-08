@@ -179,3 +179,47 @@ maybeCreds("synthesizeWithWebSearch: missing searchImpl -> SYNTH_NO_SEARCH_IMPL"
     (err) => err.code === "SYNTH_NO_SEARCH_IMPL",
   );
 });
+
+// Regression: synthesizeWithWebSearch's timeoutMs must be a REAL overall ceiling, not
+// silently overrun by per-round respites. Previously postChatComplete did
+// `Math.max(10000, deadline - Date.now())`, so once the shared deadline was spent each
+// subsequent round still got a fresh 10s floor — the loop could keep POSTing past the
+// declared budget. The fix fails fast with SYNTH_TIMEOUT once the budget is gone.
+// Here a tiny timeoutMs + a fetch that outlives it burns the whole budget in round 1,
+// so the loop's next POST (round 2, since round 1 yields a tool_call) must surface the
+// spent deadline as SYNTH_TIMEOUT instead of issuing another request.
+maybeCreds("synthesizeWithWebSearch: spent overall budget -> SYNTH_TIMEOUT, not a padded 10s floor", async () => {
+  let fetchCalls = 0;
+  const slowToolCallFetch = async () => {
+    fetchCalls += 1;
+    await new Promise((r) => setTimeout(r, 30)); // outlives the 10ms budget
+    const payload = toolCallResponse("call_1", "查询");
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify(payload);
+      },
+      async json() {
+        return payload;
+      },
+    };
+  };
+  await assert.rejects(
+    () =>
+      synthesizeWithWebSearch({
+        query: "q",
+        date: "2026-08-07",
+        sources: [{ url: "u", title: "t", snippet: "s" }],
+        model: "gemini-3.6-flash",
+        timeoutMs: 10, // tiny budget: round 1's 30ms fetch consumes it entirely
+        maxSearchRounds: 2, // round 1 emits a tool_call, so the loop requests round 2
+        fetch: slowToolCallFetch,
+        searchImpl: async () => "检索片段",
+      }),
+    (err) => err.code === "SYNTH_TIMEOUT" && /预算已耗尽/.test(err.message),
+  );
+  // Exact count is timing-dependent (the spent deadline may trip on round 1 or round 2),
+  // but we must never issue the full round 2 + forced-final cascade the old floor allowed.
+  assert.ok(fetchCalls <= 2, `old 10s floor could keep POSTing; got ${fetchCalls} fetches`);
+});

@@ -273,12 +273,18 @@ function parseToolQuery(argumentsRaw) {
   }
 }
 
-// One POST to the gateway, honoring a shared wall-clock deadline (each call gets the
-// remaining budget, never less than a floor so a short pre-scheduled timeout can't
-// abort a legitimately slow-but-progressing round into an instant failure). Returns
-// normalized { text, tool_calls, finish }.
+// One POST to the gateway, honoring a shared wall-clock deadline. Each call gets the
+// budget *remaining* until the deadline — never an artificial floor, so the loop's
+// declared overall timeout (synthesizeWithWebSearch's timeoutMs) is a real ceiling
+// and not silently overrun by N 10s respites. A round whose time is already gone
+// fails fast with SYNTH_TIMEOUT instead of starting a doomed request.
 async function postChatComplete(doFetch, endpoint, apiKey, body, deadline) {
-  const remaining = Math.max(10000, deadline - Date.now());
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    const err = new Error("综合整体预算已耗尽（timeoutMs 用尽）");
+    err.code = "SYNTH_TIMEOUT";
+    throw err;
+  }
   let resp;
   try {
     resp = await doFetch(endpoint, {
