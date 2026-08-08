@@ -73,28 +73,6 @@ function parseArgs(argv) {
   return { section };
 }
 
-// Race an async step against a wall-clock budget. On a timeout the step keeps
-// winding down in the background (its fetches carry their own finite AbortSignal
-// timeouts) and the runner proceeds with what it already had — a slow linux.do
-// crawl never stalls the shipped report or posters. budget 0 = no ceiling.
-async function withBudget(promise, ms, label) {
-  if (!(ms > 0)) return promise;
-  let timer;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise((_resolve, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`${label} 超过 ${ms}ms 预算，本轮跳过（未完成的文件可能在后台落盘）`)),
-          ms,
-        );
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 async function run() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -248,8 +226,10 @@ async function run() {
   // time), and AFTER the poster steps so image generation is never delayed. On
   // success each linux.do-carrying section's 辅助资料 is re-rendered with a
   // per-post attachment count + a collapsed embed of the full thread, so the aux
-  // file stays small while Obsidian lazy-loads the full posts. Wall-clock-budgeted
-  // so a slow browser can't stall the summary.
+  // file stays small while Obsidian lazy-loads the full posts. enrichLinuxdoPosts
+  // bounds itself to LINUXDO_ENRICH_BUDGET_MS and RETURNS the partial results
+  // instead of throwing, so a slow browser can't stall the summary and everything
+  // archived is linked (nothing on disk goes unreferenced).
   const cardSections = results
     .filter((r) => r.status === "fulfilled")
     .map((r) => r.value)
@@ -257,11 +237,7 @@ async function run() {
   let posts = [];
   if (cardSections.length) {
     try {
-      posts = await withBudget(
-        enrichLinuxdoPosts(cardSections[0].linuxdoRaw, config),
-        config.linuxdoEnrichBudgetMs ?? 120000,
-        "完整帖补全",
-      );
+      posts = await enrichLinuxdoPosts(cardSections[0].linuxdoRaw, config);
     } catch (e) {
       // Enrichment is additive; the base aux (and the report) already went out.
       console.warn(`⚠ 完整帖补全跳过：${e?.message || String(e)}`);

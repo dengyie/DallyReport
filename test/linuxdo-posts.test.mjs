@@ -8,6 +8,7 @@ import {
   extractAttachments,
   attachmentKey,
   enrichLinuxdoPosts,
+  downloadAttachmentAsset,
 } from "../src/linuxdo.mjs";
 
 const IMG_ORIG = "https://cdn3.ldstatic.com/original/4X/3/5/c/35cab35942d147a12df3c18a806afa15045af2e7.png";
@@ -271,5 +272,180 @@ test("enrich: a failing topic doesn't drop its siblings (partial success)", asyn
   const out = await enrichLinuxdoPosts(cards, config, { fetchTopic, download: async () => null });
   assert.equal(out.length, 1);
   assert.equal(out[0].id, 10);
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+// --- second review pass fixes: host gate, streaming cap, reuse, deadline, continuation ---
+
+test("enrich: external-host img/link is never downloaded (host gate)", async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-gate-"));
+  const config = {
+    date: "2026-08-07",
+    obsidianDir: tmp,
+    linuxdoFullPosts: true,
+    linuxdoDownloadAttachments: true,
+  };
+  const cards = [{ id: 10, url: "https://linux.do/t/topic/10", title: "A" }];
+  const fetchedHosts = [];
+  const fetchTopic = async () =>
+    makeTopicJson("A", [
+      `<p>正文</p><img src="https://evil.example.com/steal.png"><a href="https://evil.example.com/report.pdf">pdf</a>`,
+    ]);
+  const download = async (_u, dest) => { writeFileSync(dest, "x", "utf8"); return { bytes: 1 }; };
+
+  const out = await enrichLinuxdoPosts(cards, config, { fetchTopic, download });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].attachments.length, 0, "third-party host files never downloaded");
+  // The md still renders them as plain links (readable), just not pulled.
+  const md = readFileSync(path.join(tmp, "2026-08-07", "linuxdo-posts", path.basename(out[0].postFile)), "utf8");
+  assert.match(md, /steal\.png/);
+  const attachDir = path.join(tmp, "2026-08-07", "linuxdo-attachments");
+  assert.equal(existsSync(attachDir) ? readdirSync(attachDir).length : 0, 0, "no attachments folder");
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test("downloadAttachmentAsset: refuses a single file over maxBytes via Content-Length", async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), "dally-cap-cl-"));
+  const dest = path.join(tmp, "big.bin");
+  const fetchImpl = async () =>
+    new Response("x".repeat(2048), { status: 200, headers: { "content-length": "2048" } });
+  const res = await downloadAttachmentAsset("https://cdn3.ldstatic.com/original/4X/x/big.bin", dest, {
+    fetchImpl,
+    maxBytes: 100,
+  });
+  assert.equal(res, null, "over-cap file refused before buffering");
+  assert.equal(existsSync(dest), false, "nothing written to disk");
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test("downloadAttachmentAsset: streaming counter aborts mid-body when no Content-Length", async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), "dally-cap-stream-"));
+  const dest = path.join(tmp, "big.bin");
+  let canceled = false;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(2048));
+      controller.enqueue(new Uint8Array(2048));
+      controller.close();
+    },
+    cancel() { canceled = true; },
+  });
+  const fetchImpl = async () => new Response(body, { status: 200 }); // no content-length header
+  const res = await downloadAttachmentAsset("https://cdn3.ldstatic.com/original/4X/x/big.bin", dest, {
+    fetchImpl,
+    maxBytes: 100,
+  });
+  assert.equal(res, null, "over-cap stream aborted");
+  assert.equal(existsSync(dest), false, "nothing written");
+  assert.ok(canceled, "reader canceled as soon as the cap is crossed");
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test("enrich: re-run of the same date reuses the on-disk attachment (no re-download)", async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-reuse-"));
+  const config = {
+    date: "2026-08-07",
+    obsidianDir: tmp,
+    linuxdoFullPosts: true,
+    linuxdoDownloadAttachments: true,
+  };
+  const cards = [{ id: 10, url: "https://linux.do/t/topic/10", title: "A" }];
+  const fetchTopic = async () => makeTopicJson("A", [`<p>正文</p><img src="${IMG_ORIG}">`]);
+  let downloads = 0;
+  const download = async (u, dest) => { downloads += 1; writeFileSync(dest, "x", "utf8"); return { bytes: 1 }; };
+
+  const out1 = await enrichLinuxdoPosts(cards, config, { fetchTopic, download });
+  assert.equal(out1[0].attachments.length, 1);
+  assert.equal(downloads, 1, "first run downloads it");
+  const out2 = await enrichLinuxdoPosts(cards, config, { fetchTopic, download });
+  assert.equal(out2[0].attachments.length, 1, "second run still reports the attachment");
+  assert.equal(downloads, 1, "second run reuses the archived file, no re-fetch");
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test("enrich: budget expiry stops scheduling new topics but returns partial results", async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-deadline-"));
+  const config = {
+    date: "2026-08-07",
+    obsidianDir: tmp,
+    linuxdoFullPosts: true,
+    linuxdoDownloadAttachments: false,
+    linuxdoEnrichBudgetMs: 30,
+  };
+  const cards = [1, 2, 3, 4].map((id) => ({
+    id,
+    url: `https://linux.do/t/topic/${id}`,
+    title: `T${id}`,
+  }));
+  const fetchTopic = async (id) => {
+    await new Promise((r) => setTimeout(r, 80)); // slower than the 30ms budget
+    return JSON.stringify({ title: `T${id}`, post_stream: { posts: [{ cooked: `<p>正文 ${id}</p>` }] } });
+  };
+  const out = await enrichLinuxdoPosts(cards, config, { fetchTopic, download: async () => null });
+  assert.ok(Array.isArray(out), "always returns an array, never throws");
+  assert.ok(out.length > 0, "in-flight topics complete and are returned");
+  assert.ok(out.length < cards.length, "budget stops scheduling NEW topics past the deadline");
+  for (const rec of out) {
+    assert.ok(existsSync(path.join(tmp, "2026-08-07", "linuxdo-posts", path.basename(rec.postFile))), `md for ${rec.id}`);
+  }
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test("enrich: long threads paginate remaining posts and preserve order", async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-longthread-"));
+  const config = {
+    date: "2026-08-07",
+    obsidianDir: tmp,
+    linuxdoFullPosts: true,
+    linuxdoDownloadAttachments: false,
+  };
+  const cards = [{ id: 10, url: "https://linux.do/t/topic/10", title: "A" }];
+  // Topic JSON carries the full stream (5 ids) but only 2 posts; the remaining 3
+  // come back through fetchTopicPosts (Discourse /posts.json paging).
+  const firstPage = {
+    title: "长帖",
+    post_stream: {
+      stream: [101, 102, 103, 104, 105],
+      posts: [
+        { id: 101, post_number: 1, cooked: "<p>OP</p>" },
+        { id: 102, post_number: 2, cooked: "<p>回 2</p>" },
+      ],
+    },
+  };
+  const pageCalls = [];
+  const fetchTopic = async () => JSON.stringify(firstPage);
+  const fetchTopicPosts = async (_id, ids) => {
+    pageCalls.push(ids);
+    return JSON.stringify({
+      post_stream: { posts: ids.map((id) => ({ id, post_number: id - 100, cooked: `<p>回 ${id - 100}</p>` })) },
+    });
+  };
+  const out = await enrichLinuxdoPosts(cards, config, { fetchTopic, fetchTopicPosts, download: async () => null });
+  assert.equal(out.length, 1);
+  assert.ok(pageCalls.length >= 1, "paged the remaining posts");
+  const md = readFileSync(path.join(tmp, "2026-08-07", "linuxdo-posts", path.basename(out[0].postFile)), "utf8");
+  assert.match(md, /OP/);
+  for (const n of [2, 3, 4, 5]) assert.match(md, new RegExp(`回 ${n}`));
+  assert.ok(md.indexOf("回 2") < md.indexOf("回 3"), "post_number order preserved");
+  assert.ok(md.indexOf("回 4") < md.indexOf("回 5"), "post_number order preserved");
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test("enrich: all-failed downloads leave no empty attachments dir behind", async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-cleandir-"));
+  const config = {
+    date: "2026-08-07",
+    obsidianDir: tmp,
+    linuxdoFullPosts: true,
+    linuxdoDownloadAttachments: true,
+  };
+  const cards = [{ id: 10, url: "https://linux.do/t/topic/10", title: "A" }];
+  const fetchTopic = async () => makeTopicJson("A", [`<p>正文</p><img src="${IMG_ORIG}">`]);
+  const download = async () => null; // every download fails
+  const out = await enrichLinuxdoPosts(cards, config, { fetchTopic, download });
+  assert.equal(out.length, 1, "post md still written when attachments fail");
+  assert.equal(out[0].attachments.length, 0);
+  const attachDir = path.join(tmp, "2026-08-07", "linuxdo-attachments");
+  assert.equal(existsSync(attachDir), false, "empty attachments dir swept after all failures");
   rmSync(tmp, { recursive: true, force: true });
 });

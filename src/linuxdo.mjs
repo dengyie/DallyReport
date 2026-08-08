@@ -17,7 +17,7 @@
 // Isolation: any failure returns [] so the AI section still runs on general sources.
 
 import path from "node:path";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, stat, rmdir } from "node:fs/promises";
 import { runFetch } from "./grok-cli.mjs";
 import { sanitizeSnippet, isInjectionOnlySource } from "./snippet-hygiene.mjs";
 import { AI_TITLE_RE } from "./community.mjs";
@@ -664,15 +664,28 @@ function normalizeUrl(u) {
 // post-report step — the aux note and AI brief never depend on it succeeding.
 // ---------------------------------------------------------------------------
 
-// Attachment-ish file extensions; anything else that isn't a page link is ignored.
+// Attachment-ish extensions, anything else that isn't a page link is ignored.
 const ATTACHMENT_EXT_RE =
   /\.(?:png|jpe?g|gif|webp|avif|bmp|svg|mp4|webm|pdf|zip|rar|7z|tar|gz|docx?|xlsx?|pptx?|txt|md|json|sql|bin)(?:[?#].*)?$/i;
-// Asset URLs we treat as attachments. The CDN's real layout is
-// cdn3.ldstatic.com/original/4X/… (no `uploads` segment) with thumbnails under
-// /optimized/; self-hosted Discourse files live under /uploads or /system. The
-// original is the full-res file we actually want to archive.
+// Asset URLs we treat as downloadable attachments. Host is REQUIRED to be the
+// forum/CDN originaries (linux.do or *.ldstatic.com) so a thread linking to an
+// arbitrary third-party host (someone pasting <img src="https://evil.example/x.png">
+// or <a href="https://other.site/report.pdf">) can NEVER make the crawler pull
+// files from that host into the vault. Only a same-origin storage path — the CDN
+// server (original/optimized) or self-hosted Discourse uploads — qualifies.
 const ASSET_URL_RE =
-  /(?:ldstatic\.com|linux\.do)\/(?:uploads|system|original|optimized)[^"'\s]*\//i;
+  /^(?:https?:)?\/\/(?:[^/]*\.)?(?:ldstatic\.com|linux\.do)\/(?:uploads|system|original|optimized)[^"'\s]*\//i;
+// A URL only counts as a downloadable attachment when BOTH conditions hold:
+//  - host must be the forum/CDN origin (linux.do / *.ldstatic.com), AND
+//  - it either is an asset-storage path (ASSET_URL_RE) or carries an attachment
+//    file extension (ATTACHMENT_EXT_RE — used for `/uploads/.../x.pdf`-style
+//    links where the ext drives the decision).
+// Any other host (external img/links pasted into a thread) is left as a plain
+// markdown link and never downloaded.
+function isAttachmentUrl(url) {
+  if (!url || !/^(?:https?:)?\/\/(?:[^/]*\.)?(?:ldstatic\.com|linux\.do)\//i.test(url)) return false;
+  return ASSET_URL_RE.test(url) || ATTACHMENT_EXT_RE.test(url);
+}
 
 /**
  * Convert a Discourse post's `cooked` HTML into readable markdown. Unlike the
@@ -698,9 +711,13 @@ export function cookedToMarkdown(html, { rewrite } = {}) {
   s = s.replace(/<pre[^>]*>[\s\S]*?<\/pre>/gi, (m) => `\n\`\`\`\n${m.replace(/<[^>]+>/g, "").trim()}\n\`\`\`\n`);
   // Images -> markdown with the (possibly rewritten) src.
   s = s.replace(/<img[^>]*?src=["']([^"']+)["'][^>]*?>/gi, (_m, src) => `\n![附件](${map(src)})\n`);
-  // Links -> markdown links (skip empty/in-page anchors).
-  s = s.replace(/<a[^>]*?href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m, href, text) => {
+  // Links -> markdown links (skip empty/in-page anchors). A lightbox `<a>` that
+  // only wraps an image already converted above (Discourse emits
+  // `<a href="original"><img src="original">` for full-size) becomes the bare
+  // image markdown instead of a self-referential `[![…](../…)](../…)` link.
+  s = s.replace(/<a[^>]*?href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_a, href, text) => {
     const t = text.replace(/<[^>]+>/g, "").trim();
+    if (/^!\[[^\]]*\]\([^)]*\)$/.test(t)) return t;
     if (!href || href.startsWith("#")) return t || "";
     return `[${t || href}](${map(href)})`;
   });
@@ -725,12 +742,14 @@ export function cookedToMarkdown(html, { rewrite } = {}) {
 
 // Stable, deduplicated attachment list from cooked HTML. Prefers original
 // (full-res) over optimized variants of the same upload; keeps first occurrence
-// order.
+// order. Host-gated: only linux.do / *.ldstatic.com URLs are ever treated as
+// downloadable attachments (see ASSET_URL_RE) so a hostile thread can't make the
+// crawler pull arbitrary third-party files into the vault.
 export function extractAttachments(html) {
   const found = new Map(); // normalized url -> { url, kind, basename, original: bool }
   const consider = (url, kind) => {
     if (!url) return;
-    if (!ASSET_URL_RE.test(url) && !ATTACHMENT_EXT_RE.test(url)) return;
+    if (!isAttachmentUrl(url)) return;
     const clean = url.split(/[?#]/)[0];
     if (!clean) return;
     const isOrig = /\/original\//i.test(clean);
@@ -784,13 +803,44 @@ export function attachmentKey(basename) {
 /**
  * Download one attachment to destFile. Plain undici is fine — the CDN assets are
  * public (verified 2026-08-07). Returns { bytes } or null on any failure.
+ *
+ * A single file larger than maxBytes is refused before we buffer it (checked via
+ * Content-Length when present, else streamed with a running cap). This is the
+ * per-file analogue of the per-post budget: a 500MB file dropped into a thread
+ * must not balloon memory or blow past LINUXDO_ATTACH_MAX_BYTES_PER_POST. The
+ * post-level "file that pushes the running total over the cap is kept" behavior
+ * still applies — that file is within maxBytes here, so it survives.
  */
-async function downloadAttachmentAsset(url, destFile, { fetchImpl = fetch, timeoutMs = 30000 } = {}) {
+export async function downloadAttachmentAsset(url, destFile, { fetchImpl = fetch, timeoutMs = 30000, maxBytes = 0 } = {}) {
   try {
     const r = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
     if (!r.ok) return null;
+    const declared = Number(r.headers.get("content-length"));
+    if (maxBytes > 0 && Number.isFinite(declared) && declared > maxBytes) return null;
+    if (maxBytes > 0 && r.body) {
+      // No (or over-limit) Content-Length: stream with a running byte counter so a
+      // runaway file aborts early instead of buffering everything into memory.
+      const reader = r.body.getReader();
+      const chunks = [];
+      let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.length;
+        if (total > maxBytes) {
+          await reader.cancel().catch(() => {});
+          return null; // never written → nothing orphaned
+        }
+        chunks.push(value);
+      }
+      const buf = Buffer.concat(chunks);
+      if (!buf.length) return null;
+      await writeFile(destFile, buf);
+      return { bytes: buf.length };
+    }
     const buf = Buffer.from(await r.arrayBuffer());
     if (!buf.length) return null;
+    if (maxBytes > 0 && buf.length > maxBytes) return null;
     await writeFile(destFile, buf);
     return { bytes: buf.length };
   } catch {
@@ -798,12 +848,16 @@ async function downloadAttachmentAsset(url, destFile, { fetchImpl = fetch, timeo
   }
 }
 
-// Small concurrency limiter so we never open dozens of CDP tabs / downloads at once.
-async function mapLimit(items, limit, fn) {
+// Small concurrency limiter so we never open dozens of CDP tabs / downloads at
+// once. `deadline` (epoch ms; 0 = none) stops the loop scheduling NEW items once
+// passed, so a wall-clock budget bounds the crawl while the returns stay partial
+// (nothing already running is aborted — it's bounded by its own fetch timeouts).
+async function mapLimit(items, limit, fn, deadline = 0) {
   const out = new Array(items.length);
   let next = 0;
   const worker = async () => {
     while (next < items.length) {
+      if (deadline && Date.now() >= deadline) break;
       const i = next++;
       try { out[i] = await fn(items[i], i); } catch { out[i] = null; }
     }
@@ -821,8 +875,13 @@ async function mapLimit(items, limit, fn) {
  *
  * Returns one record per successfully enriched post:
  *   { id, url, title, created_at, postFile, embed, attachments: [{url, local, bytes}] }
- * Best-effort: a failing post is skipped (not included), never throws.
+ *
+ * Best-effort: a failing post is skipped (not included), never throws. Wall-clock
+ * bounded by LINUXDO_ENRICH_BUDGET_MS (default 120s, 0 = no ceiling): past the
+ * deadline it stops scheduling NEW topics and returns the partial results — run.mjs
+ * then links everything actually archived, so nothing on disk goes unreferenced.
  */
+const POSTS_CHUNK = 50; // continuation posts fetched per /posts.json request
 export async function enrichLinuxdoPosts(cards, config, deps = {}) {
   if (!config?.date || !config?.obsidianDir) return [];
   if (config.linuxdoFullPosts === false) return [];
@@ -830,14 +889,26 @@ export async function enrichLinuxdoPosts(cards, config, deps = {}) {
   const maxPerPost = config.linuxdoAttachMaxPerPost ?? 20;
   const maxBytesPerPost = config.linuxdoAttachMaxBytesPerPost ?? 20 * 1024 * 1024;
   const withAttachments = config.linuxdoDownloadAttachments !== false;
+  const budgetMs = Number(config.linuxdoEnrichBudgetMs ?? 120000);
+  const deadline = budgetMs > 0 ? Date.now() + budgetMs : 0;
   const fetchTopic = deps.fetchTopic || ((id) => fetchLinuxDoJsonPageWithCookie(`https://linux.do/t/${id}.json`, config.linuxdoCookie, config));
+  // Discourse t/{id}.json returns only the first page of posts plus the full id
+  // list (post_stream.stream); fetchTopicPosts pages the remainder.
+  const fetchTopicPosts = deps.fetchTopicPosts || ((id, postIds) =>
+    fetchLinuxDoJsonPageWithCookie(
+      `https://linux.do/t/${id}/posts.json?${postIds.map((i) => `post_ids[]=${i}`).join("&")}`,
+      config.linuxdoCookie,
+      config,
+    ));
   const download = deps.download || downloadAttachmentAsset;
 
   const dateDir = path.join(config.obsidianDir, config.date);
   const postsDir = path.join(dateDir, "linuxdo-posts");
   const attachRoot = path.join(dateDir, "linuxdo-attachments");
+  // Posts dir is always created; the attachments root is created lazily (only when
+  // a post actually writes a file) so attachment-disabled / all-failed days leave
+  // no empty folder behind.
   await mkdir(postsDir, { recursive: true }).catch(() => {});
-  await mkdir(attachRoot, { recursive: true }).catch(() => {});
 
   const targets = (cards || []).slice(0, limit);
   const results = await mapLimit(targets, 3, async (card) => {
@@ -848,8 +919,30 @@ export async function enrichLinuxdoPosts(cards, config, deps = {}) {
     if (!jsonText) return null;
     let topic;
     try { topic = JSON.parse(jsonText); } catch { return null; }
-    const posts = topic?.post_stream?.posts || [];
+    let posts = [...(topic?.post_stream?.posts || [])];
     if (!posts.length) return null;
+    // Long threads: t/{id}.json returns only the first page of posts; the full id
+    // list is in post_stream.stream. Page the remainder so the archived "full"
+    // thread actually is full. Best-effort: a paging failure keeps what we have.
+    const stream = topic?.post_stream?.stream || [];
+    if (stream.length > posts.length) {
+      const have = new Set(posts.map((p) => p.id));
+      const missing = stream.filter((pid) => !have.has(pid));
+      for (let i = 0; i < missing.length; i += POSTS_CHUNK) {
+        if (deadline && Date.now() >= deadline) break;
+        const chunk = missing.slice(i, i + POSTS_CHUNK);
+        let pageText = null;
+        try { pageText = await fetchTopicPosts(id, chunk); } catch { break; }
+        if (!pageText) break;
+        let page;
+        try { page = JSON.parse(pageText); } catch { break; }
+        const extra = page?.post_stream?.posts || [];
+        if (!extra.length) break;
+        posts.push(...extra);
+        if (extra.length < chunk.length) break; // all requested ids returned
+      }
+      posts.sort((a, b) => (a.post_number ?? 0) - (b.post_number ?? 0));
+    }
     const title = topic?.title || card?.title || `帖子 ${id}`;
     const allCooked = posts.map((p) => p.cooked || "").join("\n");
 
@@ -861,16 +954,29 @@ export async function enrichLinuxdoPosts(cards, config, deps = {}) {
     let totalBytes = 0;
     if (withAttachments && attachList.length) {
       const aDir = path.join(attachRoot, String(id));
-      await mkdir(aDir, { recursive: true }).catch(() => {});
       for (const a of attachList) {
         if (uploaded.length >= maxPerPost) break;
+        if (deadline && Date.now() >= deadline) break;
         // Reserve the byte budget BEFORE pulling the next file — a file that then
         // pushes us over the budget is still kept and recorded (it's already on
         // disk; dropping it would orphan the bytes), just nothing more is fetched.
         if (totalBytes >= maxBytesPerPost) break;
         const safeBase = a.basename.replace(/[^\w.\-()一-鿿 ]+/g, "_");
         const dest = path.join(aDir, safeBase);
-        const res = await download(a.url, dest, config);
+        // Re-run of the same date: file already archived → reuse, don't re-fetch.
+        const existing = await stat(dest).catch(() => null);
+        if (existing?.size > 0) {
+          const rel = path.relative(dateDir, dest);
+          uploaded.push({ url: a.url, basename: safeBase, local: rel, bytes: existing.size });
+          localByUrl.set(a.url, `../${rel}`);
+          if (!byStem.has(attachmentKey(a.basename))) byStem.set(attachmentKey(a.basename), `../${rel}`);
+          totalBytes += existing.size;
+          continue;
+        }
+        await mkdir(aDir, { recursive: true }).catch(() => {});
+        // Single-file cap: refuse a file that ALONE exceeds the per-post budget
+        // (downloadAttachmentAsset checks Content-Length / streams before buffering).
+        const res = await download(a.url, dest, { maxBytes: maxBytesPerPost });
         const bytes = res?.bytes || 0;
         if (!bytes) continue;
         const rel = path.relative(dateDir, dest);
@@ -879,6 +985,8 @@ export async function enrichLinuxdoPosts(cards, config, deps = {}) {
         if (!byStem.has(attachmentKey(a.basename))) byStem.set(attachmentKey(a.basename), `../${rel}`);
         totalBytes += bytes;
       }
+      // A per-post folder with nothing in it (all downloads failed) is cruft.
+      if (!uploaded.length) await rmdir(aDir).catch(() => {});
     }
 
     const body = cookedToMarkdown(allCooked, {
@@ -923,14 +1031,16 @@ export async function enrichLinuxdoPosts(cards, config, deps = {}) {
       embed: `![[${config.date}/linuxdo-posts/${fileName}]]`,
       attachments: uploaded,
     };
-  });
+  }, deadline);
   const enriched = results.filter(Boolean);
+  // Drop the attachments root if the whole day ended up empty (disabled / all failed).
+  if (withAttachments) await rmdir(attachRoot).catch(() => {});
   if (targets.length && enriched.length !== targets.length) {
     // Enrichment is additive, so a partial failure is only surfaced as a warning
     // (never an error) — the aux note and report already went out with the cards.
     console.warn(
       `⚠ 完整帖补全 ${enriched.length}/${targets.length} 帖` +
-        `（跳过 ${targets.length - enriched.length} 帖：无 cookie/CDP、正文为空或下载失败，不影响报告）`,
+        `（跳过 ${targets.length - enriched.length} 帖：无 cookie/CDP、正文为空、超预算或下载失败，不影响报告）`,
     );
   }
   return enriched;
