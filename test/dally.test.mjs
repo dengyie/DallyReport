@@ -60,6 +60,19 @@ test("parseTrending: handles a repo missing the language line", () => {
   assert.equal(ecc.starsToday, 857);
 });
 
+test("parseTrending: a repo with no description keeps description null (language line not captured)", () => {
+  // Regression: lone-repo/no-desc has no description line, so its <language> line
+  // ("Python") sits right under the name. It must NOT be captured as description —
+  // that would render the programming language as the project's tagline on the
+  // GitHub poster via buildContextualPrompt's「原始简介」field.
+  const rows = parseTrending(TRENDING_FIXTURE);
+  const nd = rows.find((r) => r.repo === "lone-repo/no-desc");
+  assert.ok(nd, "lone-repo/no-desc parsed");
+  assert.equal(nd.description, null, "language line must not be misread as description");
+  assert.equal(nd.starsTotal, 1234, "total stars still parsed from the first bare number");
+  assert.equal(nd.starsToday, 89);
+});
+
 // --- source rendering ---
 
 test("renderSources: sanitizes injected titles before prompt rendering", () => {

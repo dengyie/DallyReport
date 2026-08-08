@@ -76,15 +76,27 @@ export const TRENDING_FIXTURE = [
   "Built by",
   "945 stars today",
   "Star",
+  "",
+  "lone-repo /",
+  "no-desc",
+  "Python", // ← no description: this <language> line must NOT be captured as description
+  "1,234",
+  "567",
+  "Built by",
+  "89 stars today",
+  "Star",
 ].join("\n");
 
 // Expected parsed + sorted (desc by starsToday) rows. ghostowner/no-today is
 // filtered out (no stars today). starsTotal must NOT pick up "2026" or "2" from
-// numsy-pkg's description. Order by starsToday desc: 1421, 1022, 945, 857, 555.
+// numsy-pkg's description. lone-repo/no-desc has NO description line, so its
+// <language> line ("Python") must stay out of description (null) — the P2 fix.
+// Order by starsToday desc: 1421, 1022, 945, 857, 555, 89.
 export const EXPECTED_FIXTURE_ROWS = [
   { repo: "virgiliojr94/book-to-skill", starsToday: 1421, starsTotal: 12709, description: "Turn any technical book PDF into a Claude Code skill." },
   { repo: "pascalorg/editor", starsToday: 1022, starsTotal: 19553, description: "Create and share 3D architectural projects." },
   { repo: "paperswithbacktest/awesome-systematic-trading", starsToday: 945, starsTotal: 10379, description: "Open-source systematic trading backtest library." },
   { repo: "affaan-m/ECC", starsToday: 857, starsTotal: 235547, description: "Some repo with no language line below" },
   { repo: "numsy-pkg/release-notes", starsToday: 555, starsTotal: 8401, description: "Changelog for the 2026 release of numsy, version 2." },
+  { repo: "lone-repo/no-desc", starsToday: 89, starsTotal: 1234, description: null },
 ];

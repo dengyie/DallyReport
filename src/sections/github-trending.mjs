@@ -54,12 +54,17 @@ export function parseTrending(text) {
       }
       // Capture the one-line project description, which sits right under the name
       // (before the language line, if any). It's the first non-structural line:
-      // not a bare number, not "Built by", not "N stars today", not an owner line.
-      // A repo with no description simply has no such line; rec stays description: null.
+      // not a bare number, not "Built by", not "N stars today", not an owner line,
+      // and — critically — must contain whitespace. A repo with no description
+      // puts its <language> line (a single token like "Python") right under the
+      // name; a real description is a sentence. Requiring /\s/ keeps the language
+      // from being mislabeled as the project's tagline on the poster. A repo with
+      // no description simply has no such line; rec stays description: null.
       if (rec.description == null && i + 2 < lines.length) {
         const cand = lines[i + 2];
         if (
           cand &&
+          /\s/.test(cand) &&
           !NUM_RE.test(cand) &&
           !BUILT_BY_RE.test(cand) &&
           !STARS_TODAY_RE.test(cand) &&
