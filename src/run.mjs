@@ -6,6 +6,7 @@
 // AI.png from vault prompts + reference images and embed them into their Markdown.
 // Poster generation is independently gated and never blocks the text sections.
 
+import path from "node:path";
 import { loadConfig, validateRuntimePaths, beijingDateFor, resolveAltChannel } from "./config.mjs";
 import { aiNewsSection } from "./sections/ai-news.mjs";
 import { githubTrendingSection } from "./sections/github-trending.mjs";
