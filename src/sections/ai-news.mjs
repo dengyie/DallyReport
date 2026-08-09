@@ -5,6 +5,7 @@ import { synthesizeFromSources, synthesizeWithWebSearch, renderSources } from ".
 import { fetchLinuxDoAiSources, mergeSourcesPreferLinuxDo } from "../linuxdo.mjs";
 import { fetchNodeSeekAiSources } from "../nodeseek.mjs";
 import { fetchV2exAiSources } from "../v2ex.mjs";
+import { dedupeAndNormalizeSources } from "../news-dedup.mjs";
 
 export function computeAiNewsStatus({
   searchOk,
@@ -160,11 +161,18 @@ export async function aiNewsSection(
     : result?.sources?.merged || [];
   // Community first (linux.do → nodeseek → v2ex) ahead of general extras) so
   // synthesis sees the same-day forum signal; de-dupe by URL.
-  const sources = mergeSourcesPreferLinuxDo(linuxdoSources, generalSources, {
+  const merged = mergeSourcesPreferLinuxDo(linuxdoSources, generalSources, {
     maxTotal: config.sourceMaxTotal ?? 18,
     linuxdoMaxTotal: config.linuxdoMaxSources,
     extraCommunitySources: [...(nodeseekSources || []), ...(v2exSources || [])],
   });
+  // Semantic de-dup + title normalization: fold same-event posts (e.g. the 8
+  // "quota reset" threads on a reset day) into one representative card with a
+  // clear, self-contained headline, so the model isn't handed 8 near-identical
+  // sources and doesn't have to guess they're one story. Deterministic, zero-LLM.
+  // The raw linux.do cards (linuxdoRaw) are untouched — the auxiliary file stays
+  // a verbatim archive.
+  const sources = dedupeAndNormalizeSources(merged);
   const linuxdoCount = (linuxdoSources || []).length;
   const nodeseekCount = (nodeseekSources || []).length;
   const v2exCount = (v2exSources || []).length;
