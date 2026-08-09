@@ -38,14 +38,54 @@ const CLUSTERS = [
     exclude: /密码|password/i,
     rewrite: () => "ChatGPT/Codex 额度重置",
   },
+  {
+    // 115 网盘 API 暂停服务 — two posts, same event.
+    key: "cloud-api-pause",
+    match: /115.*API.*暂停/i,
+    rewrite: () => "115 网盘 API 暂停服务",
+  },
+  {
+    // Apple removed the Qwen extension from its China site — two posts, same event.
+    // Real titles put the action between the two entities, either order:
+    // "苹果中国官网删除 Apple 智能接入阿里千问使用手册" (苹果→删除→千问) and
+    // "苹果貌似撤回了有关Apple智能的千问扩展内容" (苹果→撤回→千问). But the plain
+    // combination "苹果…千问" alone must NOT match — the earlier "iPhone 接入千问"
+    //合作 news is the opposite event (adding, not removing).
+    key: "apple-qwen-removal",
+    match: /苹果.*千问.*(?:删除|撤回|下架|移除)|苹果.*(?:删除|撤回|下架|移除).*千问/i,
+    rewrite: () => "苹果中国官网删除 Apple 智能接入阿里千问使用手册",
+  },
 ];
 
-// Among a cluster's members, keep the one with the richest snippet — the model
-// then sees the rewritten headline plus the most informative body behind it.
+// Score a snippet's "substance": real Chinese/English prose counts up; URLs and
+// Discourse chrome count down. The representative should carry the most informative
+// body, not merely the longest one — a long Cloudflare challenge URL or a
+// "Topic list, column headers..." chrome line is longer but useless (observed on
+// 2026-08-09: the longest reset-post snippet was a Turnstile URL, so the model got
+// almost no real body behind the rewritten headline).
+const CJK_RE = /[一-鿿]/gu;
+const LATIN_WORD_RE = /[A-Za-z][A-Za-z0-9'./'-]{4,}/g;
+const URL_RE = /https?:\/\/\S+/gi;
+const CHROME_RE =
+  /Topic list|column headers|sortable|Troubleshoot|cdn-cgi|challenges\.cloudflare|turnstile|select all|cancel selecting/i;
+
+function snippetSubstanceScore(snippet) {
+  const s = String(snippet || "");
+  if (!s.trim()) return -Infinity;
+  const noUrls = s.replace(URL_RE, " "); // URLs carry no prose — strip before counting
+  const cjk = (noUrls.match(CJK_RE) || []).length;
+  const latin = (noUrls.match(LATIN_WORD_RE) || []).length;
+  const chrome = CHROME_RE.test(s) ? 1 : 0;
+  return cjk + latin - chrome * 10;
+}
+
+// Among a cluster's members, keep the one with the most substantive snippet — the
+// model then sees the rewritten headline plus the most informative body behind it.
 function pickRepresentative(members) {
   return members.reduce((best, m) => {
-    const len = (m?.snippet || "").length;
-    return len > (best?.snippet || "").length ? m : best;
+    const score = snippetSubstanceScore(m?.snippet);
+    const bestScore = snippetSubstanceScore(best?.snippet);
+    return score > bestScore ? m : best;
   }, members[0]);
 }
 
