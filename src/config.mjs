@@ -211,7 +211,7 @@ export function loadConfig({ date = null } = {}) {
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    hnDailyLimit: int("HN_DAILY_LIMIT", 5),
+    hnDailyLimit: int("HN_DAILY_LIMIT", 8),
     kr36DailyEnabled: (() => {
       // 2026-08-11: 默认关闭。36kr 通过 Firecrawl 拿到的 URL 被重写为 feed 首页,
       // 所有条目 URL 相同导致去重合并。待找到稳定 provider 或 raw RSS 绕过 WAF 后再启用。
@@ -227,6 +227,19 @@ export function loadConfig({ date = null } = {}) {
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
     arxivDailyLimit: int("ARXIV_DAILY_LIMIT", 5),
+    // --- official vendor blog RSS sources (OpenAI / HF) ---
+    openaiDailyEnabled: (() => {
+      const raw = val("OPENAI_DAILY_ENABLED");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    openaiDailyLimit: int("OPENAI_DAILY_LIMIT", 4),
+    hfDailyEnabled: (() => {
+      const raw = val("HF_DAILY_ENABLED");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    hfDailyLimit: int("HF_DAILY_LIMIT", 4),
     // -- search model override (default: use GROK_MODEL = synthModel) ---
     // When set, grok-cli.mjs passes this model to grok-search search.js instead
     // of GROK_MODEL, allowing the search step to use a cheaper/faster model while

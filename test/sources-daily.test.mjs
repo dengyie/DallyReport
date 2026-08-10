@@ -196,10 +196,14 @@ test("fetchAllDailySources: combines sources, per-source failure isolated", asyn
     cacheDir: "/tmp/nonexistent-cache-dir-xyz",
     hnDailyEnabled: true,
     hnDailyLimit: 5,
-    kr36DailyEnabled: true,
+    kr36DailyEnabled: false,
     kr36DailyLimit: 5,
     arxivDailyEnabled: true,
     arxivDailyLimit: 5,
+    openaiDailyEnabled: true,
+    openaiDailyLimit: 4,
+    hfDailyEnabled: true,
+    hfDailyLimit: 4,
   };
   try {
     const out = await fetchAllDailySources(config);

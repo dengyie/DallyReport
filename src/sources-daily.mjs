@@ -12,24 +12,41 @@ import { runFetch } from "./grok-cli.mjs";
 // --- Hacker News (firebase API, zero-config) ---
 
 const HN_TOP = "https://hacker-news.firebaseio.com/v0/topstories.json";
+const HN_BEST = "https://hacker-news.firebaseio.com/v0/beststories.json";
 const HN_ITEM = (id) => `https://hacker-news.firebaseio.com/v0/item/${id}.json`;
 
 /**
  * Fetch today's top Hacker News stories, filter by AI relevance via keyword,
  * return same-day source cards. Uses firebase REST API — zero config, no auth.
+ * Merges topstories + beststories (dedup by id) for broader coverage.
  */
 export async function fetchHackerNewsDaily(config, { limit = 5 } = {}) {
   try {
-    const resp = await fetch(HN_TOP);
-    if (!resp.ok) return [];
-    const ids = await resp.json();
-    if (!Array.isArray(ids) || ids.length === 0) return [];
+    const [topResp, bestResp] = await Promise.all([
+      fetch(HN_TOP),
+      fetch(HN_BEST),
+    ]);
+    const ids = [];
+    for (const resp of [topResp, bestResp]) {
+      if (!resp.ok) continue;
+      const arr = await resp.json();
+      if (Array.isArray(arr)) ids.push(...arr);
+    }
+    if (ids.length === 0) return [];
+    // Dedup by id while preserving rank (top first, then best's unique ones).
+    const seen = new Set();
+    const unique = [];
+    for (const id of ids) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      unique.push(id);
+    }
 
     // Get today's Beijing start time in epoch ms
     const todayStart = beijingMidnightMs(config.date);
 
-    // Fetch item details in parallel, cap at first 50 (topstories can be 500)
-    const batch = ids.slice(0, 50);
+    // Fetch item details in parallel, cap at first 60 (top ~30 + best ~30)
+    const batch = unique.slice(0, 60);
     const items = await Promise.allSettled(
       batch.map((id) => fetch(HN_ITEM(id)).then((r) => (r.ok ? r.json() : null)))
     );
@@ -72,6 +89,13 @@ function isAiRelevant(title, url) {
 // --- 36kr RSS (zero-config, Chinese tech news) ---
 
 const KR_36_FEED = "https://36kr.com/feed";
+
+// --- Official vendor blogs (RSS, zero-config) ---
+// OpenAI News + Hugging Face Blog are first-party, same-day sources with proper
+// URLs and pubDates (unlike 36kr through Firecrawl). High signal, no WAF issues.
+
+const OPENAI_FEED = "https://openai.com/news/rss.xml";
+const HF_FEED = "https://huggingface.co/blog/feed.xml";
 
 /**
  * Fetch today's 36kr feed, filter by AI relevance, return same-day sources.
@@ -157,6 +181,91 @@ function extractTag(xml, tag) {
     .trim();
 }
 
+/**
+ * Parse RSS 2.0 items (with optional CDATA) into {title, url, pubDateMs}.
+ * Handles both <link> plain and <link> with atom:link. Never throws.
+ * HTML entities (&amp; &lt; &gt; &quot; &#39;) are decoded in titles.
+ */
+export function parseRssItems(xml, { maxChars = 20000 } = {}) {
+  if (!xml) return [];
+  const cap = xml.slice(0, maxChars);
+  const out = [];
+  const itemRe = /<item>([\s\S]*?)<\/item>/gi;
+  let m;
+  while ((m = itemRe.exec(cap)) !== null) {
+    const block = m[1];
+    const title = decodeEntities(extractTag(block, "title"));
+    const link = decodeEntities(extractTag(block, "link"));
+    const pubRaw = extractTag(block, "pubDate") || extractTag(block, "date");
+    if (!title || !link) continue;
+    const pubDateMs = pubRaw ? Date.parse(pubRaw) : NaN;
+    out.push({
+      title: title.slice(0, 300),
+      url: link,
+      pubDateMs: Number.isFinite(pubDateMs) ? pubDateMs : null,
+    });
+  }
+  return out;
+}
+
+/** Decode the common HTML entities found in RSS titles/links. */
+function decodeEntities(s) {
+  return String(s || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'");
+}
+
+/**
+ * Fetch an official vendor blog RSS (OpenAI / HF) filtered to same-day (Beijing)
+ * and AI-relevant, returned as standard source cards.
+ */
+export async function fetchOfficialBlogRss(url, config, { limit = 5, runFetch: doFetch } = {}) {
+  try {
+    const fetch = doFetch || runFetch;
+    const res = await fetch(url, config, {
+      maxChars: 60000,
+      provider: "direct",
+      cacheFile: config.cacheDir
+        ? `${config.cacheDir}/${config.date}-${url.includes("openai") ? "openai" : "hf"}-feed.txt`
+        : undefined,
+    });
+    const text = res?.text || "";
+    const items = parseRssItems(text);
+    if (!items.length) return [];
+
+    const todayStart = beijingMidnightMs(config.date);
+    const sources = [];
+    for (const item of items) {
+      if (item.pubDateMs != null && item.pubDateMs < todayStart) continue;
+      if (!isAiRelevant(item.title, item.url)) continue;
+      sources.push({
+        url: item.url,
+        title: item.title,
+        snippet: item.title, // blog RSS has no excerpt; title carries the signal
+        provider: url.includes("openai") ? "openai-blog" : "hf-blog",
+        score: 0,
+        publishedAt: item.pubDateMs ?? Date.now(),
+      });
+      if (sources.length >= limit) break;
+    }
+    return sources;
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchOpenaiDaily(config, opts = {}) {
+  return fetchOfficialBlogRss(OPENAI_FEED, config, { limit: opts.limit ?? 5, runFetch: opts.runFetch });
+}
+
+export async function fetchHfDaily(config, opts = {}) {
+  return fetchOfficialBlogRss(HF_FEED, config, { limit: opts.limit ?? 5, runFetch: opts.runFetch });
+}
+
 // --- arXiv cs.AI API (zero-config, same-day papers) ---
 
 const ARXIV_QUERY = "https://export.arxiv.org/api/query?search_query=cat:cs.AI&sortBy=submittedDate&sortOrder=descending&max_results=30";
@@ -210,6 +319,10 @@ export async function fetchArxivDaily(config, { limit = 5, runFetch: doFetch } =
         provider: "arxiv",
         score: 0,
         publishedAt: publishedAt || Date.now(),
+        // arXiv labels papers with their UTC submit day; on Beijing time those
+        // usually land on "yesterday". Grace 1 day so today's papers aren't
+        // silently filtered by the recency gate.
+        recencyGraceDays: 1,
       });
       if (sources.length >= limit) break;
     }
@@ -237,7 +350,7 @@ export function beijingMidnightMs(dateStr) {
  * Merged into ai-news-section's community sources slot.
  */
 export async function fetchAllDailySources(config) {
-  const [hn, kr36, arxiv] = await Promise.all([
+  const [hn, kr36, arxiv, openai, hf] = await Promise.all([
     config.hnDailyEnabled !== false
       ? fetchHackerNewsDaily(config).catch(() => [])
       : Promise.resolve([]),
@@ -247,6 +360,12 @@ export async function fetchAllDailySources(config) {
     config.arxivDailyEnabled !== false
       ? fetchArxivDaily(config).catch(() => [])
       : Promise.resolve([]),
+    config.openaiDailyEnabled !== false
+      ? fetchOpenaiDaily(config).catch(() => [])
+      : Promise.resolve([]),
+    config.hfDailyEnabled !== false
+      ? fetchHfDaily(config).catch(() => [])
+      : Promise.resolve([]),
   ]);
-  return [...hn, ...kr36, ...arxiv];
+  return [...hn, ...kr36, ...arxiv, ...openai, ...hf];
 }

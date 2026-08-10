@@ -204,20 +204,23 @@ function sourceEpochMs(src) {
 
 /**
  * filterByRecency: filter sources by publication date against today's Beijing date.
- * Sources with a usable timestamp (`publishedAt` epoch ms, or `created_at` ISO
- * string) are kept only if published >= today's Beijing midnight. Timestamp-less
- * sources (tavily/firecrawl) pass through as-is. Returns kept sources plus the
- * count of dropped (stale) cards for the report's material-window annotation.
- *
- * @param {Array<{url:string, publishedAt?:number, created_at?:string}>} sources
- * @param {string} dateStr  Beijing date "YYYY-MM-DD"
- * @returns {{ sources: Array, dropped: number }}
- */
+  * Sources with a usable timestamp (`publishedAt` epoch ms, or `created_at` ISO
+  * string) are kept only if published >= today's Beijing midnight. A per-source
+  * `recencyGraceDays` (e.g. 1 for arXiv papers, which are labeled with the UTC
+  * submit day and often land on "yesterday" in Beijing time) widens that window.
+  * Timestamp-less sources (tavily/firecrawl) pass through as-is. Returns kept
+  * sources plus the count of dropped (stale) cards for the report's material-window
+  * annotation.
+  *
+  * @param {Array<{url:string, publishedAt?:number, created_at?:string, recencyGraceDays?:number}>} sources
+  * @param {string} dateStr  Beijing date "YYYY-MM-DD"
+  * @returns {{ sources: Array, dropped: number }}
+  */
 export function filterByRecency(sources, dateStr) {
   // Validate dateStr: must be at least YYYY-MM-DD length. Invalid dates fall
   // through to pass-through (no filtering, no false drops from NaN comparisons).
   if (!dateStr || typeof dateStr !== "string" || dateStr.length < 10 || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-    return { sources: (sources || []), dropped: 0 };
+    return { sources: sources || [], dropped: 0 };
   }
   if (!sources || !sources.length) return { sources: sources || [], dropped: 0 };
   const [y, m, d] = dateStr.split("-").map(Number);
@@ -228,7 +231,9 @@ export function filterByRecency(sources, dateStr) {
   for (const src of sources) {
     const ts = sourceEpochMs(src);
     if (ts != null) {
-      if (ts >= todayStart) {
+      const grace = Number(src.recencyGraceDays) > 0 ? Number(src.recencyGraceDays) : 0;
+      const windowStart = todayStart - grace * 24 * 60 * 60 * 1000;
+      if (ts >= windowStart) {
         kept.push(src);
       } else {
         dropped++;
@@ -240,3 +245,4 @@ export function filterByRecency(sources, dateStr) {
   }
   return { sources: kept, dropped };
 }
+
