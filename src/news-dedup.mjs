@@ -67,7 +67,7 @@ const CJK_RE = /[一-鿿]/gu;
 const LATIN_WORD_RE = /[A-Za-z][A-Za-z0-9'./'-]{4,}/g;
 const URL_RE = /https?:\/\/\S+/gi;
 const CHROME_RE =
-  /Topic list|column headers|sortable|Troubleshoot|cdn-cgi|challenges\.cloudflare|turnstile|select all|cancel selecting/i;
+  /Topic list|column headers|sortable|Troubleshoot|cdn-cgi|challenges\.cloudflare|turnstile|select all|cancel selecting|linuxdo-attachments|\.(?:png|jpe?g|webp|gif)\b/i;
 
 function snippetSubstanceScore(snippet) {
   const s = String(snippet || "");

@@ -60,19 +60,22 @@ test("dedupeAndNormalizeSources: representative is the most INFORMATIVE snippet,
 });
 
 test("dedupeAndNormalizeSources: non-reset sources pass through untouched, in order", () => {
+  // NOTE: the Apple-Qwen title is intentionally NOT here — it is a real cluster
+  // now (single-member → rewritten to its own title), so using it here would test
+  // a cluster, not pass-through. The Apple fold is covered by its own test below.
   const sources = [
     card("OpenAI 收购 AI 演示文稿初创公司 NextSlide", "s1"),
     card("重置了重置了！", "s2"),
     card("宇树科技明天申购，发行价格为150.80元/股", "s3"),
     card("Codex重置了。", "s4"),
-    card("苹果中国官网删除 Apple 智能接入阿里千问使用手册", "s5"),
+    card("OpenAI 发布 GPT 新版本", "s5"),
   ];
   const out = dedupeAndNormalizeSources(sources);
   assert.equal(out.length, 4, "2 reset posts fold to 1, 3 non-reset stay");
   assert.equal(out[0].title, "OpenAI 收购 AI 演示文稿初创公司 NextSlide");
   assert.equal(out[1].title, "ChatGPT/Codex 额度重置", "representative sits at the first member's position");
   assert.equal(out[2].title, "宇树科技明天申购，发行价格为150.80元/股");
-  assert.equal(out[3].title, "苹果中国官网删除 Apple 智能接入阿里千问使用手册");
+  assert.equal(out[3].title, "OpenAI 发布 GPT 新版本");
 });
 
 test("dedupeAndNormalizeSources: a single reset post is still normalized", () => {
