@@ -190,7 +190,48 @@ export function loadConfig({ date = null } = {}) {
   const config = {
     grokSearchDir: val("GROK_SEARCH_DIR") || DEFAULT_GROK_SEARCH_DIR,
     obsidianDir: val("OBSIDIAN_DIR") || DEFAULT_OBSIDIAN_DIR,
-    days: int("GROK_DAYS", 2),
+    days: int("GROK_DAYS", 1),
+    // Report in strict-daily mode: when true, tavily/firecrawl sources without
+    // timestamps are still included, but the report header annotates the material
+    // window (today-only vs broader). Also enables the "来源不足" anti-hallucination
+    // prompt clause. Default: true.
+    reportStrictDaily: (() => {
+      const raw = val("REPORT_STRICT_DAILY");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    // --- daily hard sources (HN/36kr/arXiv, zero-config public APIs) ---
+    // These provide a stable baseline of ≥10 same-day sources so the model never
+    // has to hallucinate from memory on quiet days. Each has an independent
+    // enable/disable switch and a per-source limit.
+    // aggregateDailySources: total limit for combined daily sources (capped).
+    aggregateDailySourceLimit: int("AGGREGATE_DAILY_SOURCE_LIMIT", 15),
+    hnDailyEnabled: (() => {
+      const raw = val("HN_DAILY_ENABLED");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    hnDailyLimit: int("HN_DAILY_LIMIT", 5),
+    kr36DailyEnabled: (() => {
+      // 2026-08-11: 默认关闭。36kr 通过 Firecrawl 拿到的 URL 被重写为 feed 首页,
+      // 所有条目 URL 相同导致去重合并。待找到稳定 provider 或 raw RSS 绕过 WAF 后再启用。
+      if (true) return false; // TEMP: disabled pending URL stability
+      const raw = val("KR36_DAILY_ENABLED");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    kr36DailyLimit: int("KR36_DAILY_LIMIT", 5),
+    arxivDailyEnabled: (() => {
+      const raw = val("ARXIV_DAILY_ENABLED");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    arxivDailyLimit: int("ARXIV_DAILY_LIMIT", 5),
+    // -- search model override (default: use GROK_MODEL = synthModel) ---
+    // When set, grok-cli.mjs passes this model to grok-search search.js instead
+    // of GROK_MODEL, allowing the search step to use a cheaper/faster model while
+    // the synthesis writer uses the main model. Leave unset for identical behavior.
+    searchModel: val("GROK_SEARCH_MODEL") || null,
     extra: int("GROK_EXTRA", 10),
     fetchMaxChars: int("GROK_FETCH_MAX_CHARS", 80000),
     aiQueryTemplate: val("AI_QUERY") || "今天{date}最新的AI资讯和大模型动态",

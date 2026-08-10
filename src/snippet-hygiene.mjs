@@ -184,3 +184,59 @@ export function isInjectionOnlySource(source) {
   const titleClean = sanitizeSnippet(title);
   return !snip && !titleClean;
 }
+
+/**
+ * Extract an epoch-ms timestamp from a source card. Supports both numeric
+ * `publishedAt` (epoch ms) and string `created_at` (ISO 8601, as linux.do cards
+ * carry). Returns null when the card has no usable timestamp.
+ */
+function sourceEpochMs(src) {
+  if (src.publishedAt != null) {
+    const n = Number(src.publishedAt);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  if (src.created_at) {
+    const n = Date.parse(String(src.created_at));
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  return null;
+}
+
+/**
+ * filterByRecency: filter sources by publication date against today's Beijing date.
+ * Sources with a usable timestamp (`publishedAt` epoch ms, or `created_at` ISO
+ * string) are kept only if published >= today's Beijing midnight. Timestamp-less
+ * sources (tavily/firecrawl) pass through as-is. Returns kept sources plus the
+ * count of dropped (stale) cards for the report's material-window annotation.
+ *
+ * @param {Array<{url:string, publishedAt?:number, created_at?:string}>} sources
+ * @param {string} dateStr  Beijing date "YYYY-MM-DD"
+ * @returns {{ sources: Array, dropped: number }}
+ */
+export function filterByRecency(sources, dateStr) {
+  // Validate dateStr: must be at least YYYY-MM-DD length. Invalid dates fall
+  // through to pass-through (no filtering, no false drops from NaN comparisons).
+  if (!dateStr || typeof dateStr !== "string" || dateStr.length < 10 || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return { sources: (sources || []), dropped: 0 };
+  }
+  if (!sources || !sources.length) return { sources: sources || [], dropped: 0 };
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const todayStart = Date.UTC(y, m - 1, d, 0, 0, 0, 0) - 8 * 60 * 60 * 1000;
+
+  const kept = [];
+  let dropped = 0;
+  for (const src of sources) {
+    const ts = sourceEpochMs(src);
+    if (ts != null) {
+      if (ts >= todayStart) {
+        kept.push(src);
+      } else {
+        dropped++;
+      }
+    } else {
+      // No timestamp → pass through (freshness unknown, keep rather than drop)
+      kept.push(src);
+    }
+  }
+  return { sources: kept, dropped };
+}

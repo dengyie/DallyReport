@@ -6,6 +6,8 @@ import { fetchLinuxDoAiSources, mergeSourcesPreferLinuxDo } from "../linuxdo.mjs
 import { fetchNodeSeekAiSources } from "../nodeseek.mjs";
 import { fetchV2exAiSources } from "../v2ex.mjs";
 import { dedupeAndNormalizeSources } from "../news-dedup.mjs";
+import { fetchAllDailySources } from "../sources-daily.mjs";
+import { filterByRecency } from "../snippet-hygiene.mjs";
 
 export function computeAiNewsStatus({
   searchOk,
@@ -140,12 +142,16 @@ export async function aiNewsSection(
   const linuxdoPromise = fetchLinuxDoAiSources(config).catch(fallbackCommunity("linuxdoError"));
   const nodeseekPromise = fetchNodeSeekAiSources(config).catch(fallbackCommunity("nodeseekError"));
   const v2exPromise = fetchV2exAiSources(config).catch(fallbackCommunity("v2exError"));
+  // Daily hard sources (HN/36kr/arXiv) — zero-config public APIs that guarantee a
+  // same-day baseline so the writer never has to hallucinate on quiet days.
+  const dailySourcePromise = fetchAllDailySources(config).catch(fallbackCommunity("dailySourcesError"));
 
-  const [searchResult, linuxdoSources, nodeseekSources, v2exSources] = await Promise.all([
+  const [searchResult, linuxdoSources, nodeseekSources, v2exSources, dailySources] = await Promise.all([
     searchPromise,
     linuxdoPromise,
     nodeseekPromise,
     v2exPromise,
+    dailySourcePromise,
   ]);
   result = searchResult;
 
@@ -164,7 +170,7 @@ export async function aiNewsSection(
   const merged = mergeSourcesPreferLinuxDo(linuxdoSources, generalSources, {
     maxTotal: config.sourceMaxTotal ?? 18,
     linuxdoMaxTotal: config.linuxdoMaxSources,
-    extraCommunitySources: [...(nodeseekSources || []), ...(v2exSources || [])],
+    extraCommunitySources: [...(nodeseekSources || []), ...(v2exSources || []), ...(dailySources || [])],
   });
   // Semantic de-dup + title normalization: fold same-event posts (e.g. the 8
   // "quota reset" threads on a reset day) into one representative card with a
@@ -172,7 +178,11 @@ export async function aiNewsSection(
   // sources and doesn't have to guess they're one story. Deterministic, zero-LLM.
   // The raw linux.do cards (linuxdoRaw) are untouched — the auxiliary file stays
   // a verbatim archive.
-  const sources = dedupeAndNormalizeSources(merged);
+  const deduped = dedupeAndNormalizeSources(merged);
+  // Recency gate: sources carrying a publishedAt (HN/36kr/arXiv) older than today
+  // (Beijing) are dropped; timestamp-less sources (tavily/firecrawl) pass through.
+  // The dropped count is surfaced in the report header as a material-window note.
+  const { sources, dropped: recencyDropped } = filterByRecency(deduped, config.date);
   const linuxdoCount = (linuxdoSources || []).length;
   const nodeseekCount = (nodeseekSources || []).length;
   const v2exCount = (v2exSources || []).length;
@@ -274,10 +284,21 @@ export async function aiNewsSection(
     days_dropped: daysDropped,
   });
 
-  // No diagnostic header block is written into the note — the report should read as
-  // a clean, normal daily brief. Cred / search / synthesis issues surface only in the
-  // CLI summary returned below, never inside the shipped markdown.
-  const header = "";
+  // Material-window annotation (feature, not diagnostic): the report self-describes
+  // how many same-day vs older sources fed the synthesis, so a thin-material day is
+  // visible to the reader instead of silently blending old news. Uses neutral counts
+  // only — never names source platforms (de-pollution preserved for both).
+  const dailyCount = (dailySources || []).length;
+  const genericCount = Math.max(0, sources.length - dailyCount);
+  let header = "";
+  if (config.reportStrictDaily !== false) {
+    const windowParts = [`当日素材 ${dailyCount} 条`, `近几日来源 ${genericCount} 条`];
+    if (recencyDropped > 0) windowParts.push(`过期已过滤 ${recencyDropped} 条`);
+    header = `> **素材窗口**：${windowParts.join("；")}。\n\n`;
+    if (dailyCount < 10) {
+      header += `> ⚠️ **低素材提示**：当日硬源不足 10 条，正文以近期趋势为主，请注意时效。\n\n`;
+    }
+  }
 
   const body = [
     fm,
@@ -302,6 +323,8 @@ export async function aiNewsSection(
     synthAttemptedAndFailed,
     zeroCitation,
     sourceCount: sources.length,
+    recencyDropped,
+    dailySourceCount: dailyCount,
     linuxdoCount,
     nodeseekCount,
     v2exCount,

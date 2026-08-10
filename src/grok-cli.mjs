@@ -104,6 +104,7 @@ export async function runSearch(query, config, { days, extra } = {}) {
   const args = [];
   if (days && days > 0) args.push("--days", String(days));
   if (extra != null) args.push("--extra", String(extra));
+  if (config?.searchModel) args.push("--model", config.searchModel);
   args.push(query);
 
   const res = await runScript(scriptPath, args);
