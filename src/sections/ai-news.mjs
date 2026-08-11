@@ -300,11 +300,21 @@ export async function aiNewsSection(
     }
   }
 
-  // Append reference sources section at the bottom. Lists the cleaned sources
-  // (deduped, recency-filtered) that fed the synthesis, so readers can verify
-  // and follow up. Each line: `- [title](url)`. Capped at 30 to keep the note
-  // readable; sources are already ordered by relevance (linux.do first).
-  const refLines = sources.slice(0, 30).map((s) => {
+  // Append reference sources section at the bottom. Parses [N] markers from the
+  // body text to show only the sources actually cited by the model. When no [N]
+  // markers are found (fallback/degraded path), shows all sources (capped at 30).
+  const bodyTextOrDefault = bodyText || "";
+  const citedIndices = new Set();
+  const citeRe = /\[(\d+)\]/g;
+  let citeMatch;
+  while ((citeMatch = citeRe.exec(bodyTextOrDefault)) !== null) {
+    const idx = Number.parseInt(citeMatch[1], 10) - 1; // 1-indexed in text
+    if (idx >= 0 && idx < sources.length) citedIndices.add(idx);
+  }
+  const citedSources = citedIndices.size
+    ? [...citedIndices].sort((a, b) => a - b).map((i) => sources[i])
+    : sources;
+  const refLines = citedSources.slice(0, 30).map((s) => {
     // Escape markdown special chars in title so parens don't break the
     // markdown link syntax: `[title (with parens)](<url>)`.
     const title = (s.title || s.url || "来源")
