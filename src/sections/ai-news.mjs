@@ -296,7 +296,7 @@ export async function aiNewsSection(
     if (recencyDropped > 0) windowParts.push(`过期已过滤 ${recencyDropped} 条`);
     header = `> **素材窗口**：${windowParts.join("；")}。\n\n`;
     if (dailyCount < 8) {
-      header += `> ⚠️ **低素材提示**：当日硬源不足 10 条，正文以近期趋势为主，请注意时效。\n\n`;
+      header += `> ⚠️ **低素材提示**：当日硬源不足 8 条，正文以近期趋势为主，请注意时效。\n\n`;
     }
   }
 
@@ -305,7 +305,10 @@ export async function aiNewsSection(
   // and follow up. Each line: `- [title](url)`. Capped at 30 to keep the note
   // readable; sources are already ordered by relevance (linux.do first).
   const refLines = sources.slice(0, 30).map((s) => {
-    const title = (s.title || s.url || "来源").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+    // Escape markdown special chars in title so parens don't break the
+    // markdown link syntax: `[title (with parens)](<url>)`.
+    const title = (s.title || s.url || "来源")
+      .replace(/[\[\]()]/g, (c) => "\\" + c);
     const url = s.url || "";
     return url ? `- [${title}](<${url}>)` : `- ${title}`;
   });
