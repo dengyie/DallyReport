@@ -211,7 +211,7 @@ export function loadConfig({ date = null } = {}) {
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    hnDailyLimit: int("HN_DAILY_LIMIT", 8),
+    hnDailyLimit: int("HN_DAILY_LIMIT", 12),
     kr36DailyEnabled: (() => {
       // 2026-08-11: 默认关闭。36kr 通过 Firecrawl 拿到的 URL 被重写为 feed 首页,
       // 所有条目 URL 相同导致去重合并。待找到稳定 provider 或 raw RSS 绕过 WAF 后再启用。

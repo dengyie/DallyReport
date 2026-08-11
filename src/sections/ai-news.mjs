@@ -295,7 +295,7 @@ export async function aiNewsSection(
     const windowParts = [`当日素材 ${dailyCount} 条`, `近几日来源 ${genericCount} 条`];
     if (recencyDropped > 0) windowParts.push(`过期已过滤 ${recencyDropped} 条`);
     header = `> **素材窗口**：${windowParts.join("；")}。\n\n`;
-    if (dailyCount < 10) {
+    if (dailyCount < 8) {
       header += `> ⚠️ **低素材提示**：当日硬源不足 10 条，正文以近期趋势为主，请注意时效。\n\n`;
     }
   }

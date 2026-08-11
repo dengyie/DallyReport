@@ -15,6 +15,10 @@ const HN_TOP = "https://hacker-news.firebaseio.com/v0/topstories.json";
 const HN_BEST = "https://hacker-news.firebaseio.com/v0/beststories.json";
 const HN_ITEM = (id) => `https://hacker-news.firebaseio.com/v0/item/${id}.json`;
 
+// HN batch size: how many top + best IDs to fetch details for. Larger = more
+// AI-relevant hits, especially on quiet days. 100 = top 50 + best 50 deduped.
+const HN_BATCH = 100;
+
 /**
  * Fetch today's top Hacker News stories, filter by AI relevance via keyword,
  * return same-day source cards. Uses firebase REST API — zero config, no auth.
@@ -45,8 +49,8 @@ export async function fetchHackerNewsDaily(config, { limit = 5 } = {}) {
     // Get today's Beijing start time in epoch ms
     const todayStart = beijingMidnightMs(config.date);
 
-    // Fetch item details in parallel, cap at first 60 (top ~30 + best ~30)
-    const batch = unique.slice(0, 60);
+    // Fetch item details in parallel, cap at HN_BATCH (top 50 + best 50 deduped).
+    const batch = unique.slice(0, HN_BATCH);
     const items = await Promise.allSettled(
       batch.map((id) => fetch(HN_ITEM(id)).then((r) => (r.ok ? r.json() : null)))
     );
@@ -96,6 +100,8 @@ const KR_36_FEED = "https://36kr.com/feed";
 
 const OPENAI_FEED = "https://openai.com/news/rss.xml";
 const HF_FEED = "https://huggingface.co/blog/feed.xml";
+const GOOGLE_AI_FEED = "https://blog.google/technology/ai/rss";
+const GOOGLE_RESEARCH_FEED = "https://research.google/blog/rss";
 
 /**
  * Fetch today's 36kr feed, filter by AI relevance, return same-day sources.
@@ -246,9 +252,12 @@ export async function fetchOfficialBlogRss(url, config, { limit = 5, runFetch: d
         url: item.url,
         title: item.title,
         snippet: item.title, // blog RSS has no excerpt; title carries the signal
-        provider: url.includes("openai") ? "openai-blog" : "hf-blog",
+        provider: url.includes("openai") ? "openai-blog" : url.includes("huggingface") ? "hf-blog" : url.includes("google") ? "google-blog" : "vendor-blog",
         score: 0,
         publishedAt: item.pubDateMs ?? Date.now(),
+        // Official blogs don't publish daily; grace 1 day so yesterday's
+        // posts are still treated as "today" for the material window.
+        recencyGraceDays: 1,
       });
       if (sources.length >= limit) break;
     }
@@ -264,6 +273,14 @@ export async function fetchOpenaiDaily(config, opts = {}) {
 
 export async function fetchHfDaily(config, opts = {}) {
   return fetchOfficialBlogRss(HF_FEED, config, { limit: opts.limit ?? 5, runFetch: opts.runFetch });
+}
+
+export async function fetchGoogleAiDaily(config, opts = {}) {
+  return fetchOfficialBlogRss(GOOGLE_AI_FEED, config, { limit: opts.limit ?? 4, runFetch: opts.runFetch });
+}
+
+export async function fetchGoogleResearchDaily(config, opts = {}) {
+  return fetchOfficialBlogRss(GOOGLE_RESEARCH_FEED, config, { limit: opts.limit ?? 4, runFetch: opts.runFetch });
 }
 
 // --- arXiv cs.AI API (zero-config, same-day papers) ---
@@ -319,10 +336,11 @@ export async function fetchArxivDaily(config, { limit = 5, runFetch: doFetch } =
         provider: "arxiv",
         score: 0,
         publishedAt: publishedAt || Date.now(),
-        // arXiv labels papers with their UTC submit day; on Beijing time those
-        // usually land on "yesterday". Grace 1 day so today's papers aren't
-        // silently filtered by the recency gate.
-        recencyGraceDays: 1,
+        // arXiv labels papers with their UTC submit day; on Beijing time those usually
+        // land on "yesterday" or the day before. Grace 2 days so yesterday's +
+        // today's papers survive the recency gate (arxiv publishes in a burst
+        // late UTC; a strict same-day window would starve the paper source).
+        recencyGraceDays: 2,
       });
       if (sources.length >= limit) break;
     }
@@ -350,7 +368,7 @@ export function beijingMidnightMs(dateStr) {
  * Merged into ai-news-section's community sources slot.
  */
 export async function fetchAllDailySources(config) {
-  const [hn, kr36, arxiv, openai, hf] = await Promise.all([
+  const [hn, kr36, arxiv, openai, hf, googleAi, googleResearch] = await Promise.all([
     config.hnDailyEnabled !== false
       ? fetchHackerNewsDaily(config).catch(() => [])
       : Promise.resolve([]),
@@ -366,6 +384,12 @@ export async function fetchAllDailySources(config) {
     config.hfDailyEnabled !== false
       ? fetchHfDaily(config).catch(() => [])
       : Promise.resolve([]),
+    config.googleAiDailyEnabled !== false
+      ? fetchGoogleAiDaily(config).catch(() => [])
+      : Promise.resolve([]),
+    config.googleResearchDailyEnabled !== false
+      ? fetchGoogleResearchDaily(config).catch(() => [])
+      : Promise.resolve([]),
   ]);
-  return [...hn, ...kr36, ...arxiv, ...openai, ...hf];
+  return [...hn, ...kr36, ...arxiv, ...openai, ...hf, ...googleAi, ...googleResearch];
 }
