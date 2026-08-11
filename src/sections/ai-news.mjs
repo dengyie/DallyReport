@@ -300,6 +300,19 @@ export async function aiNewsSection(
     }
   }
 
+  // Append reference sources section at the bottom. Lists the cleaned sources
+  // (deduped, recency-filtered) that fed the synthesis, so readers can verify
+  // and follow up. Each line: `- [title](url)`. Capped at 30 to keep the note
+  // readable; sources are already ordered by relevance (linux.do first).
+  const refLines = sources.slice(0, 30).map((s) => {
+    const title = (s.title || s.url || "来源").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+    const url = s.url || "";
+    return url ? `- [${title}](<${url}>)` : `- ${title}`;
+  });
+  const refSection = refLines.length
+    ? `\n\n---\n\n### 参考来源\n\n${refLines.join("\n")}`
+    : "";
+
   const body = [
     fm,
     "",
@@ -307,6 +320,7 @@ export async function aiNewsSection(
     "",
     header,
     bodyText || "（模型未返回正文内容）",
+    refSection,
     "",
   ].join("\n");
 
