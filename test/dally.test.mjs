@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { parseTrending } from "../src/sections/github-trending.mjs";
+import { parseTrending, briefDescription } from "../src/sections/github-trending.mjs";
 import { renderSources, synthesizeFromSources, SYSTEM_PROMPT } from "../src/llm-synthesize.mjs";
 import { TRENDING_FIXTURE, EXPECTED_FIXTURE_ROWS } from "./fixtures/trending-sample.mjs";
 
@@ -71,6 +71,45 @@ test("parseTrending: a repo with no description keeps description null (language
   assert.equal(nd.description, null, "language line must not be misread as description");
   assert.equal(nd.starsTotal, 1234, "total stars still parsed from the first bare number");
   assert.equal(nd.starsToday, 89);
+});
+
+// --- briefDescription（详情表「简介」列） ---
+
+test("briefDescription: cuts at the first real sentence terminator", () => {
+  assert.equal(briefDescription("29 editorial diagram types for Claude Code."), "29 editorial diagram types for Claude Code.");
+  assert.equal(briefDescription("Make money. Make it fast."), "Make money.");
+});
+
+test("briefDescription: a version-number decimal or abbreviation is not a split point", () => {
+  assert.equal(
+    briefDescription("Supports Python 3.11 and Node.js for AI tooling."),
+    "Supports Python 3.11 and Node.js for AI tooling.",
+  );
+  assert.equal(briefDescription("Runs on Node.js and Bun."), "Runs on Node.js and Bun.");
+});
+
+test("briefDescription: collapses whitespace and trims", () => {
+  assert.equal(briefDescription("  A   very    spaced   tagline.  "), "A very spaced tagline.");
+});
+
+test("briefDescription: caps at 100 chars with an ellipsis", () => {
+  const out = briefDescription("X".repeat(200) + ".");
+  assert.equal(out.length, 100, "99 chars + ellipsis");
+  assert.ok(out.endsWith("…"), "ends with ellipsis");
+});
+
+test("briefDescription: escapes markdown-significant characters", () => {
+  assert.equal(
+    briefDescription("Uses *C++* and `ticks` [label] here."),
+    "Uses \\*C++\\* and \\`ticks\\` \\[label\\] here.",
+  );
+});
+
+test("briefDescription: empty / blank / null input yields empty string", () => {
+  assert.equal(briefDescription(""), "");
+  assert.equal(briefDescription("   "), "");
+  assert.equal(briefDescription(null), "");
+  assert.equal(briefDescription(undefined), "");
 });
 
 // --- source rendering ---

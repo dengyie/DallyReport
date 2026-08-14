@@ -5,17 +5,24 @@ import { frontMatter, table } from "../markdown.mjs";
 const TRENDING_URL = "https://github.com/trending?since=daily";
 const TOP_N = 15;
 
-// One concise line for the 简介 column: cut at the first sentence terminator,
-// then hard-cap length so the table stays compact (a trending description can be
-// a long paragraph). The repo's own English tagline is shown verbatim — the
-// poster already renders Chinese one-liners (image-gen), so the detail table
-// stays factual and needs no extra LLM call.
-function briefDescription(s) {
+// One concise line for the 简介 column: cut at the first *real* sentence
+// terminator, then hard-cap length so the table stays compact (a trending
+// description can be a long paragraph). A terminator only counts if it starts a
+// new sentence (next word uppercased / quoted) or ends the line — a decimal
+// point in a version ("3.11") or an abbreviation ("Node.js") is NOT a split
+// point. The repo's own English tagline is shown verbatim (the poster already
+// renders Chinese one-liners via image-gen); markdown-significant characters are
+// escaped so a tagline can never restructure the table cell.
+const TERMINATOR_RE = /^.*?[.!?。！？](?=\s+[A-Z0-9"'(（【]|$)/;
+const CELL_ESCAPE_RE = /([\\`*_[\]])/g;
+export function briefDescription(s) {
   if (!s) return "";
   const t = String(s).replace(/\s+/g, " ").trim();
   if (!t) return "";
-  const first = (t.match(/^[^.!?。！？]*[.!?。！？]/) || [null])[0] || t;
-  return first.length > 100 ? first.slice(0, 99) + "…" : first;
+  const m = t.match(TERMINATOR_RE);
+  const first = (m ? m[0] : t).trim();
+  const capped = first.length > 100 ? first.slice(0, 99) + "…" : first;
+  return capped.replace(CELL_ESCAPE_RE, "\\$1");
 }
 
 // Parses GitHub trending "direct" fetch text into structured rows.
