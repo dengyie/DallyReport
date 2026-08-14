@@ -5,6 +5,19 @@ import { frontMatter, table } from "../markdown.mjs";
 const TRENDING_URL = "https://github.com/trending?since=daily";
 const TOP_N = 15;
 
+// One concise line for the 简介 column: cut at the first sentence terminator,
+// then hard-cap length so the table stays compact (a trending description can be
+// a long paragraph). The repo's own English tagline is shown verbatim — the
+// poster already renders Chinese one-liners (image-gen), so the detail table
+// stays factual and needs no extra LLM call.
+function briefDescription(s) {
+  if (!s) return "";
+  const t = String(s).replace(/\s+/g, " ").trim();
+  if (!t) return "";
+  const first = (t.match(/^[^.!?。！？]*[.!?。！？]/) || [null])[0] || t;
+  return first.length > 100 ? first.slice(0, 99) + "…" : first;
+}
+
 // Parses GitHub trending "direct" fetch text into structured rows.
 // Block layout per repo (one token per line in the ``direct`` readable output):
 //   owner /
@@ -172,10 +185,11 @@ export async function githubTrendingSection(config) {
       : "> 未能从抓取结果解析出 star 增量数据，可能页面结构变化或抓取为空。";
   } else {
     mdTable = table(
-      ["排名", "仓库", "今日新增", "总 star"],
+      ["排名", "仓库（地址）", "简介", "今日新增", "总 star"],
       top.map((r, i) => [
         i + 1,
-        `[${r.repo}](https://github.com/${r.repo})`,
+        `[github.com/${r.repo}](https://github.com/${r.repo})`,
+        briefDescription(r.description) || "—",
         `+${r.starsToday}`,
         r.starsTotal != null ? r.starsTotal.toLocaleString() : "—",
       ]),
