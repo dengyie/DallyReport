@@ -1,0 +1,5 @@
+# 本目录为版本管理的系统副本；运行时产物写在 Obsidian 库 docs/daily/，不在本目录产生（防御性忽略）
+logs/
+*.log
+.cache/
+.DS_Store
