@@ -196,7 +196,7 @@ const claimWindow = c => {
   if (!cands.length) return 'unknown'
   return cands.every(x => x >= WIN_FROM && x <= WIN_TO) ? 'in' : 'out'
 }
-const TRANSIENT = /(422|429|5\d\d|524|timeout|timed out|model not found|upstream|gateway|cloudflare)/i
+const TRANSIENT = /(422|429|5\d\d|524|timeout|timed out|connection closed|model not found|upstream|gateway|cloudflare)/i
 const withDeadline = (p, ms) => new Promise(resolve => {
   let done = false
   const settle = v => { if (!done) { done = true; clearTimeout(to); resolve(v) } }
@@ -289,7 +289,11 @@ const harvestResults = []
 const HARVEST_BATCH = 3
 for (const batch of chunkArr(HARVEST_GROUPS, HARVEST_BATCH)) {
   const round = await parallel(batch.map(g => () =>
-    safeAgent(HARVEST_PROMPT(g), { label: 'harv:' + g.key, phase: 'Harvest', schema: HARVEST_SCHEMA, effort: 'low' }, 1)
+    // 8/16 复盘根因：harvest 不带 timeoutMs → 吃 AGENT_TIMEOUT_MS=360s，而 5 组共源并发下 3 个分组实测 384–800s
+    // 才完成（cn-media 442s / opensource 384s / en-media 800s）。withDeadline 在 360s 先让 safeAgent 返回 null →
+    // .then 里 failed=true → digest 整块标"抓取失败"，已完成的工作被静默丢弃 → 6 个媒体板 discover 拿到空摘要、
+    // 只剩 X 搜索兜底 → 8/9 板 degraded。死线放到 1800s：让已完成的 harvest 结果真正进 digest（慢但必须被用上）。
+    safeAgent(HARVEST_PROMPT(g), { label: 'harv:' + g.key, phase: 'Harvest', schema: HARVEST_SCHEMA, effort: 'low', timeoutMs: 1800000 }, 1)
       .then(r => ({ g, entries: (r && r.entries) || [], recent: (r && r.recent) || [], failed: !r || !!r.failed }))
   ))
   harvestResults.push(...round)
@@ -377,10 +381,22 @@ const DISCOVER_PROMPT = g => {
     'degraded 语义：仅当本（组/板块）的【主源/官方通道】整体一无所获（摘要 + X 搜索均返回零个可用 URL）时才置 true；个别补充源（GitHub trending、WebSearch、某一 X 搜索等）失败不算 degraded，正常返回即可。尽力用可用渠道，不要整任务失败。' +
     '\n\nStructured output only.'
 }
-const discoverResults = await pipeline(DISCOVER_GROUPS, g =>
-  safeAgent(DISCOVER_PROMPT(g), { label: 'disc:' + g.key, phase: 'Discover', schema: DISCOVER_SCHEMA, timeoutMs: g.key === 'labs' ? 600000 : AGENT_TIMEOUT_MS }, 1)
-    .then(r => r ? { group: g, boards: g.boards, urls: r.urls || [], noNews: r.noNews || [], nearWindow: r.nearWindow || [], majorOutOfWindow: r.majorOutOfWindow || [], degraded: !!r.degraded } : null)
-)
+// 8/16：discover 与 harvest 同款的批量串行（5→3+2 两波）+ 按实测放宽死线 + 瞬时错误重试一次。
+// 8/15 只给 labs 特殊 600s 并在单板冒烟里验证（334s 达标），全量 5 并发时网关争抢使每个 discover 都 3-6×变慢，
+// media-cn 实测 1967s、labs 1213s、opensource/media-en 各 ~770s，全部超死线被 withDeadline 丢弃 → 8/9 板块 degrade、23/23 unreached。
+// 修法：批量降并发（复用 harvest 的 3 并发批次，两波跑完），并把死线放到实测量级——慢但已完成的发现结果必须被用上，不许静默丢弃。
+// 8/16 二跑：批量已生效（两波严格串行），但 disc:media-en 实测 2336s 后 API Connection closed（瞬时错误）
+// → tries=1 无重试 → strategy/products/funding/policy 4 板尽失 + 40 分钟墙钟。discover 升 tries=2（TRANSIENT 已含
+// connection closed）：媒体合组是 9 板覆盖的关键，一个瞬时断连不配让 4 个板集体降级；代理现~10min，重试成本可接受。
+const discoverResults = []
+const DISCOVER_BATCH = 3
+for (const batch of chunkArr(DISCOVER_GROUPS, DISCOVER_BATCH)) {
+  const round = await parallel(batch.map(g => () =>
+    safeAgent(DISCOVER_PROMPT(g), { label: 'disc:' + g.key, phase: 'Discover', schema: DISCOVER_SCHEMA, timeoutMs: g.key === 'labs' ? 1800000 : 2400000 }, 2)
+      .then(r => r ? { group: g, boards: g.boards, urls: r.urls || [], noNews: r.noNews || [], nearWindow: r.nearWindow || [], majorOutOfWindow: r.majorOutOfWindow || [], degraded: !!r.degraded } : null)
+  ))
+  discoverResults.push(...round)
+}
 const discoverRows = discoverResults.filter(Boolean)
 log('Discover: ' + discoverRows.length + ' groups over ' + boards.length + ' boards, ' + discoverRows.reduce((n, d) => n + d.urls.length, 0) + ' raw URLs')
 
@@ -429,7 +445,7 @@ const FETCH_PROMPT = src =>
   '**URL:** ' + src.url + '\n**Title:** ' + src.title + '\n**Found via:** ' + src.board + ' / ' + src.found_via + '\n\n' +
   '## Task\n' +
   '1. 用 WebFetch 抓取页面。\n2. 判定来源质量：primary(官方/一手) / secondary(主流媒体报道) / blog / forum / unreliable。\n' +
-  '3. 提取 2-3 条与本板块日报问题相关、可核实、具体的声明（非空泛结论）；每条必须带原文引语 quote（截取关键一句，≤40 字）、重要性 central/supporting/tangential。\n' +
+  '3. 提取 2-3 条与本板块日报问题相关、可核实、具体的声明（非空泛结论）；每条必须带原文引语 quote（**逐字抄录支撑该声明的完整原句，≤220 字，且必须包含声明中的全部具体细节——日期/数字/机构名/对比结论**，只截 40 字短句会导致核查票无据可依而误否决）、重要性 central/supporting/tangential。\n' +
   '4. 注明页面/事件日期 publishDate（YYYY-MM-DD 或 MM-DD）；无日期则空。\n' +
   '5. 页面较长时只精读与日报相关且日期在窗口内的部分，其余快速略读；抓取失败/付费墙/无关页面 → 返回 claims:[] 且 sourceQuality:"unreliable"。\n\nStructured output only.'
 
@@ -495,7 +511,7 @@ const VERIFY_PROMPT = c =>
   '## 对抗性核查票 ' + '(voter)\n\n' +
   '请对下列声明持怀疑态度，尝试证伪。≥' + REFUTATIONS_REQUIRED + '/' + VOTES_PER_CLAIM + ' 票证伪即否决。\n\n' +
   '窗口：' + WINDOW_LABEL + '。\n\n## 声明\n' + '"' + c.claim + '"\n\n来源：' + c.sourceUrl + ' (' + c.sourceQuality + ')，页面日期：' + (c.publishDate || '未知') + '，条目标注日期：' + (c.date || '未知') + '\n引语："' + c.quote + '"\n\n## 清单\n' +
-  '1. 声明是否被引语真正支撑，还是过度引申？\n2. 时效：**窗口为 [' + (WFROM || DATE) + ', ' + (WTO || DATE) + ']**。事件/发布日期明显在窗口外（数天前/数周前/上月）→ refuted=true；页面日期在窗口内但内容陈述的是旧事件，按**事件实际发生日**判定，日期明确超窗仍 → refuted=true；无法判定日期则不因时效否决。\n3. 来源质量与声明强度是否匹配？（惊人声明需一手源）\n4. 是否营销话术/吹嘘/标题党/论坛猜测？（→ refuted=true）\n\n5. **禁止使用 WebSearch/WebFetch 等外部搜索工具**——本核查只依据上面给出的引语/来源/日期/声明做内部一致性判断，外部搜索会烧掉大量 token。\n\n默认 refuted=true，除非证据充分支撑。\n\nStructured output only. Evidence 简短具体（≤80 字）。'
+  '1. 引语是**逐字抄录的完整支撑句**（契约要求覆盖声明全部细节——日期/数字/机构/对比）。声明中的细节凡能在引语中逐字溯源即视为被支撑；仅当声明断言明显超出引语范围（引语只谈 X 却断言 Y）才算过度引申。引语不是全文≠证据不足，勿因引语未铺陈全背景而否决。\n2. 时效：**窗口为 [' + (WFROM || DATE) + ', ' + (WTO || DATE) + ']**。事件/发布日期明显在窗口外（数天前/数周前/上月）→ refuted=true；页面日期在窗口内但内容陈述的是旧事件，按**事件实际发生日**判定，日期明确超窗仍 → refuted=true；无法判定日期则不因时效否决。\n3. 来源质量与声明强度是否匹配？（惊人声明需一手源）\n4. 是否营销话术/吹嘘/标题党/论坛猜测？（→ refuted=true）\n\n5. **禁止使用 WebSearch/WebFetch 等外部搜索工具**——本核查只依据上面给出的引语/来源/日期/声明做内部一致性判断，外部搜索会烧掉大量 token。\n\n默认 refuted=true，除非证据充分支撑。\n\nStructured output only. Evidence 简短具体（≤80 字）。'
 
 const _voteBatch = (c, n, startIdx) => parallel(Array.from({ length: n }, (_, v) => () =>
   safeAgent(VERIFY_PROMPT(c), { label: 'v' + (startIdx + v) + ':' + (c.claim || '').slice(0, 30), phase: 'Verify', schema: VERDICT_SCHEMA, effort: 'low' }, 1)
@@ -548,10 +564,28 @@ const _mkMajor = (m, board) => ({
   // verifiedByVote:false —— [窗口外·重大] 未经过窗口内对抗投票，reportBody 统一渲染 Vote: —（未投票），不得冒充 3-0。
 })
 // 同一事实的关键词指纹（取公司/产品名）：发现代理上报与 KNOWN 种子若指同一事件只保留一份（取日期更具体者）。
-const _majorKey = name => { const t = String(name).toLowerCase(); if (/deepseek\s*v4|v4\s*(pro|flash)/.test(t)) return 'deepseek-v4'; if (/harness/.test(t)) return 'deepseek-harness'; if (/grok\s*4\.6|4\.6/.test(t) && /grok/.test(t)) return 'grok-4.6'; return String(name).toLowerCase().replace(/\s+/g, '') }
+const _majorKey = name => {
+  const t = String(name).toLowerCase()
+  if (/deepseek\s*v4|v4\s*(pro|flash)/.test(t)) return 'deepseek-v4'
+  if (/harness/.test(t)) return 'deepseek-harness'
+  if (/grok\s*4\.6|4\.6/.test(t) && /grok/.test(t)) return 'grok-4.6'
+  if (/muse\s*glimmer/.test(t)) return 'muse-glimmer'
+  if (/jeff\s*dean/.test(t)) return 'jeff-dean'
+  if (/hassabis/.test(t)) return 'hassabis'
+  if (/gemini/.test(t)) return 'gemini'
+  // 8/16 实测补漏：GPT-5.6 与 Fable 联手攻克悬置 25 年数学难题这一事件被两个发现组分别上报，
+  // 表述不同（"联手解决了一道悬了25年的数学难题" vs "联手攻克数学难题"）走不进兜底指纹 → 重复入稿。
+  if (/gpt-?5\.6/.test(t) && /fable/.test(t) && /数学|math/.test(t)) return 'gpt5.6-math'
+  // 兜底：剥离括号限定词（"Jeff Dean创业（DeepMind联合创始人）" 与 "Jeff Dean 创业公司" 指同一人）后按实体指纹合并
+  return String(name).toLowerCase().replace(/[（(].*?[)）]/g, '').replace(/\s+/g, '')
+}
 const _addMajor = (m, board) => {
   const k = _majorKey(m.name)
-  const ex = majorOutClaims.find(x => _majorKey(x.claim.split('：')[0]) === k)
+  // 8/16 实测 bug：上一版只看 claim.split('：')[0]，而媒体组上报的 Grok 4.6 claim 形如
+  // "xAI：Grok 4.6：Frontier-model release…"，split 首段是 "xAI" → 指纹 xai ≠ grok-4.6 → KNOWN 种子
+  // 又被 push 一份，JSON 里出现两条 Grok 4.6（最终 md 靠渲染层二次合并掩盖了它）。
+  // 修法：全 claim 与首段各测一次，实体规则对全 claim 也能命中（xAI：Grok 4.6 仍匹配 /grok 4\.6/）。
+  const ex = majorOutClaims.find(x => _majorKey(x.claim || '') === k || _majorKey(String(x.claim || '').split('：')[0]) === k)
   if (ex) {
     const exHasDay = /\d{4}-\d{2}-\d{2}/.test(ex.date || ''); const newHasDay = /\d{4}-\d{2}-\d{2}/.test(m.date || '')
     if (newHasDay && !exHasDay) { ex.date = m.date; ex.publishDate = m.date; ex.claim = m.name + '：' + m.note; ex.quote = m.note }
@@ -647,7 +681,8 @@ const REPORT_PROMPT =
   '3. 头条与执行摘要 execSummary(3-5句) 与 oneLiner **只能基于已核查或 [窗口外·重大] 条目**；未核查条目一律放入”待核实”小节，不得混入头条；被否决条目不得写入正文。[窗口外·重大] 条目可出现在正文和执行摘要中，但须如实标注标签。\n' +
   '4. caveats：注明弱来源、时间敏感、未核查项；openQuestions 2-4 个。\n5. 若存在窗口外参考（非重大超窗项），在日报末尾单列”## 📎 窗口外参考”一节如实引用。\n\nStructured output only.'
 
-const report = await safeAgent(REPORT_PROMPT, { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: 480000 }, 2)
+// 8/16：report 死线 480000→600000——8/16 全量实测合成 588s 撞 480s 死线被丢弃、换新代理重跑 111s（费用翻倍、墙钟+2min）。放到 600s 让正常推进的合成一次完成。
+const report = await safeAgent(REPORT_PROMPT, { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: 600000 }, 2)
 
 // ─── mdWriter agent writes the report Markdown (Write tool, verified reliable) ───
 // JSON 归档不再走 writer 代理：base64 转录会被 LLM 损坏（曾导致 control-char 非法 JSON + 每失败代理烧 260KB）。
