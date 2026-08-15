@@ -37,13 +37,13 @@ description: 生成 AI 每日日报（自动每天 08:40 由 launchd 触发，�
   "date": "YYYY-MM-DD",
   "window": { "from": "YYYY-MM-DD", "to": "YYYY-MM-DD" },
   "outDir": "/Users/mango/project/claude-project/obsidian/docs/daily",
-  "maxFetch": 20,
-  "maxVerify": 24,
-  "agentTimeoutMs": 480000
+  "maxFetch": 12,
+  "maxVerify": 12,
+  "agentTimeoutMs": 360000
 }
 ```
 
-可省略 `maxFetch`/`maxVerify`（默认 20/24）。`agentTimeoutMs` 可选（默认 480000，即 8 分钟；健康 discover 代理约需 6 分钟，余量给足防误杀；单代理超时后自动换新代理重试一次，防止深蹲网关卡死堵住整个阶段）。可选 `"boards": ["labs","strategy",...]` 限定板块子集（冒烟/单板调试用）。
+可省略 `maxFetch`/`maxVerify`（默认 12/12）。`agentTimeoutMs` 可选（默认 360000，即 6 分钟；超时视作失败，按阶段重试策略处理：harvest/discover/核查票不换新代理重跑，fetch/report/mdWriter 换一次——8/15 起不再对昂贵代理做全新重跑，避免网关抖动时失败成本翻倍）。可选 `"boards": ["labs","media-cn",...]` 限定板块子集（冒烟/单板调试用）。
 
 模型策略：本期全链路统一 deepseek-v4-flash（环境已配 `CLAUDE_CODE_SUBAGENT_MODEL`，无需在 args 指定）。勿覆盖模型。
 

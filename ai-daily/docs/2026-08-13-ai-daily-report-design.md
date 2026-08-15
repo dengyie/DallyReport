@@ -117,3 +117,15 @@ OpenAI、Google/DeepMind、Anthropic、**xAI**、NVIDIA、Meta、Amazon、Apple�
 - 周报聚合、跨日趋势、厂商动态追踪（每日对比昨日）；
 - 与 obsidian-doc-router 的命名/索引规则对接。
 > **8/14 午间补充（第七项：投票标注失真修复）**：2 板冒烟发现 `[窗口外·重大]` 条目被 `_mkMajor` 注入 `verdicts:[3×refuted:false]` + `vote:'3-0'`（8/14 凌晨补丁遗留），md 渲染成"3-0 对抗核查"——但 major-out 并未经窗口内投票。已修复：`verdicts:[]` + `vote:'—'` + `verifiedByVote:false`；`reportBody` 对 major-out 渲染 `Vote: —（未投票，多源公认行业里程碑）`，claims 归档 `vote:'—'` + `verifiedByVote:false`。语义：major-out 可入正文/头条（用户认可客观事实），但**不得冒充窗口内投票结果**。
+
+> **8/15 补充（第八项：结构性降本——9 板块 + 对抗核查语义不变）**：8/15 全量跑实测 **93 代理 / 2.06M token / ~2h / 20 个代理报错**，7/9 板块自检降级、23/23 厂商 unreached，产出仅 ~3 条窗口内新 claim。用户明确"快 1M token 找新闻得不偿失"。本轮按已批准计划做纯结构降本，**9 板块覆盖矩阵 + 对抗核查语义（≥2 否 kill、存活需 ≥2 票）不变**：
+>
+> 1. **Harvest 14 并发 → 5 分组串行**：14 个单 feed 代理合并为 5 个批代理（official/cn-media/en-media/opensource/academic），每条目带 `feed` 标签归栈；3 个一组串行执行；`feedMaxChars` 扁平化为 12000。缓解"14 并发打爆网关 → 524 风暴互为因果"。
+> 2. **Discover 9 代理 → 5 分组**：6 个媒体板合并为 media-cn（qbitai+36kr → strategy/funding/policy/safety/people）与 media-en（techcrunch+theverge+qbitai → strategy/products/funding/policy）；labs/opensource/academic 单板。`DISCOVER_GROUPS` 从 `boardKeysSel` 派生、URL 带 `board` 标签展平。X 搜索预算 labs≤5、media≤4、opensource/academic≤3；WebSearch 全流水 ≤4。
+> 3. **核查 3 票 → 自适应 2+1**：round0 并发 2 票——双否 kill、双放行存活、1-1 分歧补第 3 票；终判规则与现网逐字一致（survives ⇔ refuted<2 ∧ valid≥2）。全量跑 12 条核查：7 确认（3 条 2-1、4 条 2-0）+ 5 否决（3 条 0-2、2 条 1-2），2 票快路径实际生效、平均 ~2.3 票/条。
+> 4. **重试策略**：harvest/discover/核查票 `tries=1`（失败不换新代理重跑、费用不翻倍）；fetch/report/mdWriter `tries=2`；`AGENT_TIMEOUT_MS` 480000→360000。report/mdWriter 单独 `timeoutMs:480000`（终稿合成是最大代理，8/15 冒烟在 360s 死线两超导致 md 未写出——已修）。
+> 5. **预算 + effort**：`MAX_FETCH 20→12`、`MAX_VERIFY 24→12`（延续 8/14 速率优先取舍）；机械代理（harvest/fetch/票）`effort:'low'`。
+>
+> **实测（8/15 全量，9 板）**：93→**52 代理**（-44%）、2.06M→**1.156M token**（-44%）、~2h→**26.4min**（-82%）、20→**0 报错**。产出：7 条窗口内 claim 全过核查 + 6 条 [窗口外·重大] 注入（vote:'—'/verifiedByVote:false 语义不变）+ 5 条被否（如实排除）+ 0 未核查；md + 3 JSON 全部落盘。degraded 仅 2 项如实上报：fetch_budget_dropped:14、discovery_degraded:missing_labs。对照计划门禁（≤~55 代理 / ≤~0.9M / ≤45min）：代理与墙钟达标、token 1.156M 超软目标 28%（继续压需减 fetch/verify 条数，即正文章条变薄的显式取舍，本期保留 12/12）。
+>
+> **验证中发现并修复：disc:labs 结构性超时**——labs 发现代理要跑 23 家厂商花名册、14 次工具调用，实测 536s > 360s 死线；且超时不终止代理、仍在后台空烧 token。已修复：disc:labs 单独 `timeoutMs:600000`（把已完成的工作变成可用结果，旗舰板不再丢覆盖）+ 预算纪律强化（发现阶段禁止 WebFetch 连续深挖单公司官网，X 搜索 4-6 handle 批量一次覆盖）。定向 labs 验证跑（8/15，单板）：28 代理 / 596k token / 15min / 0 报错；disc:labs 600s 内完成，23 家厂商全部三态（OpenAI/Anthropic/xAI/DeepSeek 有动态，其余 19 家无动态，**0 unreached**），`degraded:[]`——旗舰板覆盖修复确认。
