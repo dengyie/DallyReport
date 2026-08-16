@@ -39,11 +39,13 @@ description: 生成 AI 每日日报（自动每天 08:40 由 launchd 触发，�
   "outDir": "/Users/mango/project/claude-project/obsidian/docs/daily",
   "maxFetch": 12,
   "maxVerify": 12,
-  "agentTimeoutMs": 360000
+  "agentTimeoutMs": 360000,
+  "probeTimeoutMs": 20000,
+  "totalLimitMs": 1800000
 }
 ```
 
-可省略 `maxFetch`/`maxVerify`（默认 12/12）。`agentTimeoutMs` 可选（默认 360000，即 6 分钟；超时视作失败，按阶段重试策略处理：harvest/discover/核查票不换新代理重跑，fetch/report/mdWriter 换一次——8/15 起不再对昂贵代理做全新重跑，避免网关抖动时失败成本翻倍）。可选 `"boards": ["labs","media-cn",...]` 限定板块子集（冒烟/单板调试用）。
+可省略 `maxFetch`/`maxVerify`（默认 12/12）。`agentTimeoutMs` 可选（默认 360000，即 6 分钟；超时视作失败，按阶段重试策略处理：harvest/discover/核查票不换新代理重跑，fetch 换一次，report/mdWriter 单次直出——8/15 起不再对昂贵代理做全新重跑，8/17 起 report/mdWriter 前由网关探针把关，失败即快速降级 raw archive，杜绝挂起空转拖满墙钟）。8/17 新增可选：`probeTimeoutMs`（默认 20000，Synthesize 前迷你探针超时）与 `totalLimitMs`（默认 1800000，主脚本总墙钟宽松兜底，超限跳过合成直接降级；仅当 performance.now() 可用时生效）。可选 `"boards": ["labs","media-cn",...]` 限定板块子集（冒烟/单板调试用）。
 
 模型策略：本期全链路统一 deepseek-v4-flash（环境已配 `CLAUDE_CODE_SUBAGENT_MODEL`，无需在 args 指定）。勿覆盖模型。
 

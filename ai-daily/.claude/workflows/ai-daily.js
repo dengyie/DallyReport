@@ -32,9 +32,13 @@ const MAX_VERIFY = typeof args.maxVerify === 'number' && args.maxVerify > 0 ? ar
 const MAX_URLS_PER_BOARD = 6
 // 单代理最大存活时长。deepseek 网关偶发"发了工具结果后模型再无回复"的静默卡死：
 // 没有此上限时一个卡死代理会永久挡住整个 parallel/pipeline 闸门（实测 >10min 无产出）。
-// 超时 → 视作 null → 按阶段重试策略处理（harvest/discover/核查票不换新代理，fetch/report/mdWriter 换一次）。
+// 超时 → 视作 null → 按阶段重试策略处理（harvest/discover/核查票不换新代理，fetch 换一次，report/mdWriter 单次直出）。
 // 默认 6 分钟（8/15 起）：不再对昂贵代理做全新重跑，仅对"网关拥堵拖慢完整体"的静默挂起兜底。
 const AGENT_TIMEOUT_MS = typeof args.agentTimeoutMs === 'number' && args.agentTimeoutMs > 0 ? args.agentTimeoutMs : 360000
+
+// 8/17 第十一项：Synthesize 前网关健康探针超时 + 主脚本总墙钟上限（宽松兜底，防任一阶段挂起拖满整轮）。
+const GATEWAY_PROBE_MS = typeof args.probeTimeoutMs === 'number' && args.probeTimeoutMs > 0 ? args.probeTimeoutMs : 20000
+const TOTAL_LIMIT_MS = typeof args.totalLimitMs === 'number' && args.totalLimitMs > 0 ? args.totalLimitMs : 1800000
 
 const DATE = typeof args.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(args.date) ? args.date : null
 const WFROM = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.from)) ? String(args.window.from) : null
@@ -200,7 +204,7 @@ const TRANSIENT = /(422|429|5\d\d|524|timeout|timed out|connection closed|model 
 const withDeadline = (p, ms) => new Promise(resolve => {
   let done = false
   const settle = v => { if (!done) { done = true; clearTimeout(to); resolve(v) } }
-  const to = setTimeout(() => { log('agent 超时 ' + Math.round(ms / 1000) + 's 无产出 → 视为失败（按阶段重试策略：harvest/disc/票不换新代理，fetch/report/writer 换一次）'); settle(null) }, ms)
+  const to = setTimeout(() => { log('agent 超时 ' + Math.round(ms / 1000) + 's 无产出 → 视为失败（按阶段重试策略：harvest/disc/票不换新代理，fetch 换一次，report/writer 单次直出）'); settle(null) }, ms)
   p.then(v => settle(v), () => settle(null))
 })
 const safeAgent = async (p, o, tries = 2) => {
@@ -216,6 +220,18 @@ const safeAgent = async (p, o, tries = 2) => {
     log('safeAgent retry ' + (i + 1) + ' ' + (o.label || '?') + ' (null agent)')
   }
   return null
+}
+// 8/17 第十一项：墙钟基准用 performance.now()（Workflow realm 内 Date.now()/new Date() 会抛错）。
+// resume 时 performance 重新起算 → 总时限判断仅作宽松兜底，非精确预算；performance 不可用时恒判放行（只走探针）。
+const now = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : 0)
+const RUN_START = now()
+const RUN_ELAPSED = () => now() - RUN_START
+const probeGateway = async label => {
+  const t0 = now()
+  const p = await withDeadline(agent('仅回复 OK。', { label: 'probe:' + label, effort: 'low', timeoutMs: GATEWAY_PROBE_MS }), GATEWAY_PROBE_MS)
+  const took = Math.round(now() - t0)
+  if (!p) { log('PROBE-FAIL ' + label + ' ' + took + 'ms 网关不可用 → 跳过合成（快速降级 raw archive）'); return false }
+  log('PROBE-OK ' + label + ' ' + took + 'ms'); return true
 }
 const chunkArr = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out }
 
@@ -658,6 +674,10 @@ for (const m of discoveredMisses.concat(gatedMisses)) if (m && m.name && !window
 
 // ─── Phase Synthesize + write artifacts ───
 phase('Synthesize')
+// 8/17 第十一项：report/mdWriter（上下文最重、最容易撞网关挂起）前先判总墙钟 + 网关探针；
+// 超总时限或网关不可用 → 跳过合成直接降级，杜绝挂起空转拖满墙钟。
+const synthAllowed = RUN_ELAPSED() <= TOTAL_LIMIT_MS ? await probeGateway('report') : false
+if (!synthAllowed) log('SYNTH-SKIP 总墙钟超限或网关探针失败 → 归 raw archive')
 const reportBody = (confirmed.length ? confirmed.map((c, i) =>
   '### ' + (c.isMajorOut ? '[窗口外·重大] ' : '') + '[' + i + '] ' + c.claim + '\nVote: ' + (c.isMajorOut ? '—（未投票，多源公认行业里程碑）' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount) + ' · Source: ' + c.sourceUrl + ' (' + c.sourceQuality + ') · Date: ' + (c.publishDate || c.date || '?') + '\nQuote: "' + c.quote + '"\n')
   .join('\n')
@@ -682,7 +702,8 @@ const REPORT_PROMPT =
   '4. caveats：注明弱来源、时间敏感、未核查项；openQuestions 2-4 个。\n5. 若存在窗口外参考（非重大超窗项），在日报末尾单列”## 📎 窗口外参考”一节如实引用。\n\nStructured output only.'
 
 // 8/16：report 死线 480000→600000——8/16 全量实测合成 588s 撞 480s 死线被丢弃、换新代理重跑 111s（费用翻倍、墙钟+2min）。放到 600s 让正常推进的合成一次完成。
-const report = await safeAgent(REPORT_PROMPT, { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: 600000 }, 2)
+// 8/17 第十一项：report 单次直出（tries=1）——网关已由探针把关，失败即快速降级 raw archive，不再换新代理重跑（重跑最大上下文代理 = 双倍费用 + 空转挂起翻倍）。
+const report = synthAllowed ? await safeAgent(REPORT_PROMPT, { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: 600000 }, 1) : null
 
 // ─── mdWriter agent writes the report Markdown (Write tool, verified reliable) ───
 // JSON 归档不再走 writer 代理：base64 转录会被 LLM 损坏（曾导致 control-char 非法 JSON + 每失败代理烧 260KB）。
@@ -702,7 +723,7 @@ if (report) {
     '格式要求：# 🤖 AI 日报 · ' + DATE + '\n> 覆盖 ' + WINDOW_LABEL + ' 窗口…\n## 📌 今日一句话\n## 📄 执行摘要\n对每个 board 一节：### <标题> 下逐条 item：**标题**（[核查状态如 3-0✓ 或 窗口外·重大] 可信度）— 2-3 句要点 — *来源: URL(s)*\n## ⚠️ 待核实（未核查条目集中在此，不得混入正文）\n## ⚠️ 未验证与局限\n## 📎 窗口外参考（若数据中有 windowMisses）\n## ❓ 开放问题\n## ✅ 覆盖自检（今天核了哪些厂商/板块，各板块动态数）\n\n数据：\n' + reportJson +
     '\n\n写完用 Bash 实测：wc -c 得字节数；若你产生过任何临时/中间文件（_decoded.bin 等）一并删除，只留目标 md。\n' +
     '返回 {"path":"' + mdPath + '","bytes":<实测字节数>}。Structured output only.',
-    { label: 'write-report', phase: 'Synthesize', schema: WRITE_RESULT_SCHEMA, timeoutMs: 480000 }, 2
+    { label: 'write-report', phase: 'Synthesize', schema: WRITE_RESULT_SCHEMA, timeoutMs: 480000 }, 1
   )
   if (mdWriter && mdWriter.path === mdPath && mdWriter.bytes > 0) artifacts.push(mdPath)
   else { writeFailures.push(DATE + '-ai日报.md'); log('WRITE-FAIL md bytes=' + (mdWriter && mdWriter.bytes)) }
