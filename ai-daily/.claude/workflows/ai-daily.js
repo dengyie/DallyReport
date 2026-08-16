@@ -490,16 +490,13 @@ if (totalClaims > 0) {
   }
   let remainV = MAX_VERIFY - assignedV
   const byResidual = boardKeysV.slice().sort((a, b) => (claimsByBoard.get(b).length - quota.get(b)) - (claimsByBoard.get(a).length - quota.get(a)))
+  // 欠配板块按残差降序逐板消化剩余额度，直到用尽或全部板块配额达 cap。
+  // 8/16 review：原紧接另有一段"第二轮"同序同分配循环——模拟 6 组分布验证其在上述循环耗尽 remainV 或全板
+  // canTake=0 后必无任何效果，属死代码，删除（行为不变）。
   for (const k of byResidual) {
     if (remainV <= 0) break
     const canTake = Math.min(claimsByBoard.get(k).length - quota.get(k), remainV)
     quota.set(k, quota.get(k) + canTake); remainV -= canTake
-  }
-  // 第二轮：把欠配板块让出的剩余额度，继续分配给超额（claim 多于配额）的板块，避免整个核查池浪费。
-  for (const k of byResidual) {
-    if (remainV <= 0) break
-    const canTake = Math.min(claimsByBoard.get(k).length - quota.get(k), remainV)
-    if (canTake > 0) { quota.set(k, quota.get(k) + canTake); remainV -= canTake }
   }
 }
 const rankedClaims = []
@@ -566,12 +563,15 @@ const _mkMajor = (m, board) => ({
 // 同一事实的关键词指纹（取公司/产品名）：发现代理上报与 KNOWN 种子若指同一事件只保留一份（取日期更具体者）。
 const _majorKey = name => {
   const t = String(name).toLowerCase()
-  if (/deepseek\s*v4|v4\s*(pro|flash)/.test(t)) return 'deepseek-v4'
+  // 8/16 review（第十项）：实体指纹顺序修正——hassabis 在 jeff-dean 之前。原因：原 /jeff\s*dean/ 先命中，
+  // "Hassabis plans departure alongside Jeff Dean" 这类同时含两人的事件被误并入 "Jeff Dean 创业" 条目
+  // （模拟证实英文哈萨比斯离职条目被静默吞没、无痕可查）；中文"哈萨比斯"也不匹配 /hassabis/ → 同事件多表述分裂。
+  if (/v4\s*(pro|flash)|(?:deepseek|深度求索)\s*v4/.test(t)) return 'deepseek-v4'
   if (/harness/.test(t)) return 'deepseek-harness'
   if (/grok\s*4\.6|4\.6/.test(t) && /grok/.test(t)) return 'grok-4.6'
   if (/muse\s*glimmer/.test(t)) return 'muse-glimmer'
-  if (/jeff\s*dean/.test(t)) return 'jeff-dean'
-  if (/hassabis/.test(t)) return 'hassabis'
+  if (/hassabis|哈萨比斯/.test(t)) return 'hassabis'
+  if (/jeff\s*dean|杰夫/.test(t)) return 'jeff-dean'
   if (/gemini/.test(t)) return 'gemini'
   // 8/16 实测补漏：GPT-5.6 与 Fable 联手攻克悬置 25 年数学难题这一事件被两个发现组分别上报，
   // 表述不同（"联手解决了一道悬了25年的数学难题" vs "联手攻克数学难题"）走不进兜底指纹 → 重复入稿。
@@ -649,7 +649,7 @@ log('RECONCILE-DIAG labsCov=' + !!labsCov + ' noNewsSet=' + noNewsSet.size + ' n
 const noDynamicCompanies = labsCov ? labsCov.companiesChecked.filter(c => c.state === 'no_dynamic').map(c => c.name) : []
 
 // ─── 窗口外参考聚合：发现代理自报的次要超窗项 + 门禁拦下的已确认项 ───
-	// 注：重大超窗事实（majorOutOfWindow + KNOWN_MAJOR_OUT）已注入正文，不在此列。
+// 注：重大超窗事实（majorOutOfWindow + KNOWN_MAJOR_OUT）已注入正文，不在此列。
 const discoveredMisses = []
 for (const d of discoverRows) for (const m of (d.nearWindow || [])) if (m && m.name) discoveredMisses.push(m)
 const gatedMisses = outOfWindow.map(c => ({ name: c.claim.slice(0, 36) + (c.claim.length > 36 ? '…' : ''), date: c.publishDate || c.date || null, note: '页面/标注日期在窗口外（' + (c.publishDate || c.date || '?') + '），不列入正文。来源：' + c.sourceUrl }))
