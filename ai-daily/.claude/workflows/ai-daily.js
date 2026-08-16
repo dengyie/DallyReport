@@ -679,7 +679,8 @@ phase('Synthesize')
 const synthAllowed = RUN_ELAPSED() <= TOTAL_LIMIT_MS ? await probeGateway('report') : false
 if (!synthAllowed) log('SYNTH-SKIP 总墙钟超限或网关探针失败 → 归 raw archive')
 const reportBody = (confirmed.length ? confirmed.map((c, i) =>
-  '### ' + (c.isMajorOut ? '[窗口外·重大] ' : '') + '[' + i + '] ' + c.claim + '\nVote: ' + (c.isMajorOut ? '—（未投票，多源公认行业里程碑）' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount) + ' · Source: ' + c.sourceUrl + ' (' + c.sourceQuality + ') · Date: ' + (c.publishDate || c.date || '?') + '\nQuote: "' + c.quote + '"\n')
+  // 8/17 第十二项：quote 截断 140 字降 report 输入体积——合成只需要点，引语全文由核查阶段保证；大幅压单请求 payload（挂起敏感度 + token）。
+  '### ' + (c.isMajorOut ? '[窗口外·重大] ' : '') + '[' + i + '] ' + c.claim + '\nVote: ' + (c.isMajorOut ? '—（未投票，多源公认行业里程碑）' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount) + ' · Source: ' + c.sourceUrl + ' (' + c.sourceQuality + ') · Date: ' + (c.publishDate || c.date || '?') + '\nQuote: "' + c.quote.slice(0, 140) + (c.quote.length > 140 ? '…' : '') + '"\n')
   .join('\n')
   : '(无已确认声明)')
 const refutedList = killed.map(c => '- "' + c.claim + '" — ' + c.sourceUrl)
@@ -697,7 +698,7 @@ const REPORT_PROMPT =
   (unverified.length ? '\n## 未验证声明（核查代理故障，只能进“待核实”小节）\n' + unverifiedList.join('\n') : '') +
   missBlock +
   '\n## 覆盖自检\n' + coverBlock + '\n\n## 要求\n' +
-  '1. 语义去重、合并——**跨板块重复内容只保留一处**（以更权威来源为准），其余删除；按板块组织成 sections（board/title/items）。\n2. 每条 item：title、summary(2-3句中文)、confidence(高/中/低 按多源与投票)、sources(URL数组)、vote。**title 前必须标注核查状态**：已核查 `[3-0✓]`、未核查 `[未核查]`、否决 `[否决✗]`、超窗重大 `[窗口外·重大]`。\n' +
+  '0. **禁止调用任何工具**（禁 WebFetch、WebSearch、Read、curl 及一切工具调用）——本输入已含上游核查的全部结论与逐字引语，你只需**纯推理合成**；一旦发起任何工具调用即视为本次合成失败。\n1. 语义去重、合并——**跨板块重复内容只保留一处**（以更权威来源为准），其余删除；按板块组织成 sections（board/title/items）。\n2. 每条 item：title、summary(2-3句中文)、confidence(高/中/低 按多源与投票)、sources(URL数组)、vote。**title 前必须标注核查状态**：已核查 `[3-0✓]`、未核查 `[未核查]`、否决 `[否决✗]`、超窗重大 `[窗口外·重大]`。\n' +
   '3. 头条与执行摘要 execSummary(3-5句) 与 oneLiner **只能基于已核查或 [窗口外·重大] 条目**；未核查条目一律放入”待核实”小节，不得混入头条；被否决条目不得写入正文。[窗口外·重大] 条目可出现在正文和执行摘要中，但须如实标注标签。\n' +
   '4. caveats：注明弱来源、时间敏感、未核查项；openQuestions 2-4 个。\n5. 若存在窗口外参考（非重大超窗项），在日报末尾单列”## 📎 窗口外参考”一节如实引用。\n\nStructured output only.'
 
@@ -720,6 +721,7 @@ if (report) {
   const mdPath = OUT + '/' + DATE + '-ai日报.md'
   const mdWriter = await safeAgent(
     '把下面的日报数据结构渲染成一份高质量中文 Markdown 日报，写入文件（用 Write 工具，绝对路径）：' + mdPath + '\n\n' +
+    '**只允许 Write 工具 + Bash（仅用于 wc -c 实测字节数与清理临时文件）**；禁止 WebFetch、WebSearch、Read、curl 等一切其他工具——数据已完整提供，渲染即最终交付。\n\n' +
     '格式要求：# 🤖 AI 日报 · ' + DATE + '\n> 覆盖 ' + WINDOW_LABEL + ' 窗口…\n## 📌 今日一句话\n## 📄 执行摘要\n对每个 board 一节：### <标题> 下逐条 item：**标题**（[核查状态如 3-0✓ 或 窗口外·重大] 可信度）— 2-3 句要点 — *来源: URL(s)*\n## ⚠️ 待核实（未核查条目集中在此，不得混入正文）\n## ⚠️ 未验证与局限\n## 📎 窗口外参考（若数据中有 windowMisses）\n## ❓ 开放问题\n## ✅ 覆盖自检（今天核了哪些厂商/板块，各板块动态数）\n\n数据：\n' + reportJson +
     '\n\n写完用 Bash 实测：wc -c 得字节数；若你产生过任何临时/中间文件（_decoded.bin 等）一并删除，只留目标 md。\n' +
     '返回 {"path":"' + mdPath + '","bytes":<实测字节数>}。Structured output only.',
