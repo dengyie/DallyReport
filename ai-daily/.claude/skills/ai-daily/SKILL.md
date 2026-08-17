@@ -41,11 +41,15 @@ description: 生成 AI 每日日报（自动每天 08:40 由 launchd 触发，�
   "maxVerify": 12,
   "agentTimeoutMs": 360000,
   "probeTimeoutMs": 20000,
-  "totalLimitMs": 1800000
+  "totalLimitMs": 1800000,
+  "harvestBudgetMs": 840000,
+  "discoverBudgetMs": 600000,
+  "fetchBudgetMs": 240000,
+  "verifyBudgetMs": 120000
 }
 ```
 
-可省略 `maxFetch`/`maxVerify`（默认 12/12）。`agentTimeoutMs` 可选（默认 360000，即 6 分钟；超时视作失败，按阶段重试策略处理：harvest/discover/核查票不换新代理重跑，fetch 换一次，report/mdWriter 单次直出——8/15 起不再对昂贵代理做全新重跑，8/17 起 report/mdWriter 前由网关探针把关，失败即快速降级 raw archive，杜绝挂起空转拖满墙钟）。8/17 新增可选：`probeTimeoutMs`（默认 20000，Synthesize 前迷你探针超时）与 `totalLimitMs`（默认 1800000，主脚本总墙钟宽松兜底，超限跳过合成直接降级；仅当 performance.now() 可用时生效）。可选 `"boards": ["labs","media-cn",...]` 限定板块子集（冒烟/单板调试用）。
+可省略 `maxFetch`/`maxVerify`（默认 12/12）。`agentTimeoutMs` 可选（默认 360000，即 6 分钟；超时视作失败，按阶段重试策略处理：harvest/discover/核查票不换新代理重跑，fetch 换一次，report/mdWriter 单次直出——8/15 起不再对昂贵代理做全新重跑，8/17 起 report/mdWriter 前由网关探针把关，失败即快速降级 raw archive，杜绝挂起空转拖满墙钟）。8/17 第十一项新增可选：`probeTimeoutMs`（默认 20000，Synthesize 前迷你探针超时）与 `totalLimitMs`（默认 1800000，主脚本总墙钟宽松兜底，超限跳过合成直接降级）。8/17 第十四项新增可选：`harvestBudgetMs`/`discoverBudgetMs`/`fetchBudgetMs`/`verifyBudgetMs`（默认 840000/600000/240000/120000，即各阶段累计墙钟死线，超限跳过该阶段快速降级；切片和 = 30min 与 totalLimitMs 对齐；时钟源为脚本内 setTimeout 链累加器——Workflow realm 无 `performance`/`Date.now`，仅此链在 `await` 期间持续推进，故 budgetGate 真实生效）。可选 `"boards": ["labs","strategy",...]` 限定**板块**子集（冒烟/单板调试用）。注意取值是**板块名**（labs/strategy/products/opensource/academic/funding/policy/safety/people），不是发现组名（如 `media-cn`/`media-en`/`opensource`/`academic` 是组名）——发现组按其覆盖的板块与 `boards` 求交集，若交集为空该组会被过滤掉。例：要激活 `media-cn` 组（覆盖 strategy/funding/policy/safety/people），传其中任一板块名（如 `["labs","strategy"]`），而非 `"media-cn"`。
 
 模型策略：本期全链路统一 deepseek-v4-flash（环境已配 `CLAUDE_CODE_SUBAGENT_MODEL`，无需在 args 指定）。勿覆盖模型。
 
@@ -56,7 +60,7 @@ description: 生成 AI 每日日报（自动每天 08:40 由 launchd 触发，�
   - 头条一句话：`headline`
   - 执行摘要：`summary`
   - 覆盖矩阵要点 + 确认无动态的厂商
-  - **降级标记 `degraded`**（如 discovery_degraded / verify_agent_errors / fetch_budget_dropped）——必须如实转达。
+  - **降级标记 `degraded`**（如 discovery_degraded / verify_agent_errors / fetch_budget_dropped / budget_skipped）——必须如实转达。
 - 若 Workflow 返回 `error` 或产物缺失：降级处理，产出一份"未核查日报"到 `docs/daily/<date>-ai日报.md`（标注降级原因），并保留已归档 JSON；如实向用户说明失败点。
 - 不要向用户重复贴全文大 JSON；贴 md 文件路径 + 摘要即可。
 

@@ -21,6 +21,9 @@ export const meta = {
 }
 
 // ─── Config ───
+// 8/17：Workflow harness 偶发把 args 以 JSON 字符串形式注入（而非对象），这里兼容解包，保证两种形式都能用。
+if (typeof args === 'string') { try { args = JSON.parse(args) } catch (e) { args = {} } }
+if (!args || typeof args !== 'object') args = {}
 const VOTES_PER_CLAIM = 3
 const REFUTATIONS_REQUIRED = 2
 // 8/14 优化（速率优先）：源预算整体下调——数据源更少 → 大头阶段（fetch/verify）代理数约 -50%。
@@ -39,6 +42,13 @@ const AGENT_TIMEOUT_MS = typeof args.agentTimeoutMs === 'number' && args.agentTi
 // 8/17 第十一项：Synthesize 前网关健康探针超时 + 主脚本总墙钟上限（宽松兜底，防任一阶段挂起拖满整轮）。
 const GATEWAY_PROBE_MS = typeof args.probeTimeoutMs === 'number' && args.probeTimeoutMs > 0 ? args.probeTimeoutMs : 20000
 const TOTAL_LIMIT_MS = typeof args.totalLimitMs === 'number' && args.totalLimitMs > 0 ? args.totalLimitMs : 1800000
+// 8/17 第十四项：墙钟治理升级——TOTAL_LIMIT_MS（仅 Synthesize 前查一次的事后闸门）拆成各阶段累计死线，
+// 每个阶段前 budgetGate 查墙钟，超限即跳过该阶段快速降级（病态运行不再拖满；健康跑远低于死线、永不触发）。
+// 切片和 = 14+10+4+2 = 30min 与 TOTAL_LIMIT_MS 对齐；分配序：Harvest/Discover 留足慢但有效的包络，Verify 牺牲序最低。
+const HARVEST_BUDGET_MS = typeof args.harvestBudgetMs === 'number' && args.harvestBudgetMs > 0 ? args.harvestBudgetMs : 840000
+const DISCOVER_BUDGET_MS = typeof args.discoverBudgetMs === 'number' && args.discoverBudgetMs > 0 ? args.discoverBudgetMs : 600000
+const FETCH_BUDGET_MS   = typeof args.fetchBudgetMs   === 'number' && args.fetchBudgetMs   > 0 ? args.fetchBudgetMs   : 240000
+const VERIFY_BUDGET_MS  = typeof args.verifyBudgetMs  === 'number' && args.verifyBudgetMs  > 0 ? args.verifyBudgetMs  : 120000
 
 const DATE = typeof args.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(args.date) ? args.date : null
 const WFROM = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.from)) ? String(args.window.from) : null
@@ -222,8 +232,14 @@ const safeAgent = async (p, o, tries = 2) => {
   return null
 }
 // 8/17 第十一项：墙钟基准用 performance.now()（Workflow realm 内 Date.now()/new Date() 会抛错）。
-// resume 时 performance 重新起算 → 总时限判断仅作宽松兜底，非精确预算；performance 不可用时恒判放行（只走探针）。
-const now = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : 0)
+// 8/17 第十四项：墙钟基准。Workflow realm 里 performance 不存在（实测 undefined）、Date.now()/new Date() 被静态拒绝（resume 确定性）。
+// 唯一可用时钟源 = setTimeout 链累加：脚本启动即开一条每 250ms 自递归的链累加 _wallMs，await 期间事件循环空闲时持续推进（实测 agent 跑 2.2s → 累加 2000ms，吻合）。
+// 精度 250ms 对分钟级墙钟预算足够；resume 时链重新起算（脚本从头跑），语义=重新计时，与本注释历史意图一致。
+const _TICK_MS = 250
+let _wallMs = 0
+const _tick = () => { _wallMs += _TICK_MS; setTimeout(_tick, _TICK_MS) }
+setTimeout(_tick, _TICK_MS)
+const now = () => _wallMs
 const RUN_START = now()
 const RUN_ELAPSED = () => now() - RUN_START
 const probeGateway = async label => {
@@ -232,6 +248,26 @@ const probeGateway = async label => {
   const took = Math.round(now() - t0)
   if (!p) { log('PROBE-FAIL ' + label + ' ' + took + 'ms 网关不可用 → 跳过合成（快速降级 raw archive）'); return false }
   log('PROBE-OK ' + label + ' ' + took + 'ms'); return true
+}
+// 8/17 第十四项：阶段墙钟闸门——某阶段前查 RUN_ELAPSED 是否已过该阶段累计死线；超限即记 budget_skipped + log，返回 ok:false。
+// roomMs = 死线减已耗，供批内 timeoutMs 收紧（in-flight 硬停）。performance 不可用时 now()=0 → 恒放行（软兜底失效但不误杀已完成工作）；resume 重新起算仅宽松兜底。
+const budgetSkipped = []
+// 累计死线（elapsed 从 RUN_START 起算）：各阶段切片相加，与计划"累计死线"列吻合（14/24/28/30min）。
+// 注意：HARVEST/DISCOVER/FETCH/VERIFY_BUDGET_MS 是"该阶段允许花多久"的切片（用户可单独调），
+// 死线必须累加——若误把切片当死线，Verify 切片 2min 会在健康跑（elapsed 早已 >2min）误判超时。
+const PHASE_DEADLINES = {
+  Harvest: HARVEST_BUDGET_MS,
+  Discover: HARVEST_BUDGET_MS + DISCOVER_BUDGET_MS,
+  Fetch: HARVEST_BUDGET_MS + DISCOVER_BUDGET_MS + FETCH_BUDGET_MS,
+  Verify: HARVEST_BUDGET_MS + DISCOVER_BUDGET_MS + FETCH_BUDGET_MS + VERIFY_BUDGET_MS,
+  Synthesize: TOTAL_LIMIT_MS
+}
+const budgetGate = stage => {
+  const e = RUN_ELAPSED()
+  const dl = PHASE_DEADLINES[stage]
+  const ok = e <= dl
+  if (!ok) { if (!budgetSkipped.includes(stage)) budgetSkipped.push(stage); log('BUDGET-SKIP ' + stage + ' elapsed=' + Math.round(e / 1000) + 's ≥ 死线 ' + Math.round(dl / 1000) + 's → 跳过该阶段快速降级') }
+  return { ok, roomMs: Math.max(0, dl - e) }
 }
 const chunkArr = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out }
 
@@ -303,13 +339,17 @@ const HARVEST_PROMPT = g =>
   '纪律：严格使用命令里给定的 --max-chars，禁止改大或去掉；禁止传递 --full-path（防止泄露完整文件路径）；禁止读取 .cache/grok-search/outputs/ 下的任何完整文件；每个 feed 只抓一次，不反复重抓；不要逐条打开链接。\n\nStructured output only.'
 const harvestResults = []
 const HARVEST_BATCH = 3
+const harvestGate = budgetGate('Harvest')
 for (const batch of chunkArr(HARVEST_GROUPS, HARVEST_BATCH)) {
+  if (!budgetGate('Harvest').ok) { log('BUDGET-BREAK Harvest 余批跳过，用已完成批次结果'); break }
+  const room = harvestGate.roomMs
   const round = await parallel(batch.map(g => () =>
     // 8/16 复盘根因：harvest 不带 timeoutMs → 吃 AGENT_TIMEOUT_MS=360s，而 5 组共源并发下 3 个分组实测 384–800s
     // 才完成（cn-media 442s / opensource 384s / en-media 800s）。withDeadline 在 360s 先让 safeAgent 返回 null →
     // .then 里 failed=true → digest 整块标"抓取失败"，已完成的工作被静默丢弃 → 6 个媒体板 discover 拿到空摘要、
     // 只剩 X 搜索兜底 → 8/9 板 degraded。死线放到 1800s：让已完成的 harvest 结果真正进 digest（慢但必须被用上）。
-    safeAgent(HARVEST_PROMPT(g), { label: 'harv:' + g.key, phase: 'Harvest', schema: HARVEST_SCHEMA, effort: 'low', timeoutMs: 1800000 }, 1)
+    // 8/17 第十四项：timeoutMs 收紧到阶段剩余预算（健康跑 room≫1800s 取 1800s 行为不变；病态跑 room 收缩提前死线）。
+    safeAgent(HARVEST_PROMPT(g), { label: 'harv:' + g.key, phase: 'Harvest', schema: HARVEST_SCHEMA, effort: 'low', timeoutMs: Math.max(60000, Math.min(1800000, room)) }, 1)
       .then(r => ({ g, entries: (r && r.entries) || [], recent: (r && r.recent) || [], failed: !r || !!r.failed }))
   ))
   harvestResults.push(...round)
@@ -401,15 +441,20 @@ const DISCOVER_PROMPT = g => {
 // 8/15 只给 labs 特殊 600s 并在单板冒烟里验证（334s 达标），全量 5 并发时网关争抢使每个 discover 都 3-6×变慢，
 // media-cn 实测 1967s、labs 1213s、opensource/media-en 各 ~770s，全部超死线被 withDeadline 丢弃 → 8/9 板块 degrade、23/23 unreached。
 // 修法：批量降并发（复用 harvest 的 3 并发批次，两波跑完），并把死线放到实测量级——慢但已完成的发现结果必须被用上，不许静默丢弃。
-// 8/16 二跑：批量已生效（两波严格串行），但 disc:media-en 实测 2336s 后 API Connection closed（瞬时错误）
-// → tries=1 无重试 → strategy/products/funding/policy 4 板尽失 + 40 分钟墙钟。discover 升 tries=2（TRANSIENT 已含
-// connection closed）：媒体合组是 9 板覆盖的关键，一个瞬时断连不配让 4 个板集体降级；代理现~10min，重试成本可接受。
+// 8/16 二打：批量已生效（两波严格串行），但 disc:media-en 实测 2336s 后 API Connection closed（瞬时错误）
+// → tries=1 无重试 → strategy/products/funding/policy 4 板尽失 + 40 分钟墙钟。当初升 tries=2 意在保护 9 板覆盖。
+// 8/17 第十四项复盘改回 tries=1：实测 tries=2 在网关差窗口下**没能**保护（8/17 media 两组重试后仍全废），反而烧 80min 死路；
+// 且 safeAgent 的 null 路径（withDeadline settle(null)）不查 TRANSIENT、无条件重试——删正则也拦不住重跑。tries=1 是唯一可靠杠杆，
+// 配合阶段墙钟预算（budgetGate）兜底：失败即如实降级（标 missing_*），时间省给探针/其他阶段。失败可见性由 DISCOVER-FAIL 日志补上。
 const discoverResults = []
 const DISCOVER_BATCH = 3
+const discoverGate = budgetGate('Discover')
 for (const batch of chunkArr(DISCOVER_GROUPS, DISCOVER_BATCH)) {
+  if (!budgetGate('Discover').ok) { log('BUDGET-BREAK Discover 余批跳过，用已完成批次结果'); break }
+  const room = discoverGate.roomMs
   const round = await parallel(batch.map(g => () =>
-    safeAgent(DISCOVER_PROMPT(g), { label: 'disc:' + g.key, phase: 'Discover', schema: DISCOVER_SCHEMA, timeoutMs: g.key === 'labs' ? 1800000 : 2400000 }, 2)
-      .then(r => r ? { group: g, boards: g.boards, urls: r.urls || [], noNews: r.noNews || [], nearWindow: r.nearWindow || [], majorOutOfWindow: r.majorOutOfWindow || [], degraded: !!r.degraded } : null)
+    safeAgent(DISCOVER_PROMPT(g), { label: 'disc:' + g.key, phase: 'Discover', schema: DISCOVER_SCHEMA, timeoutMs: Math.max(60000, Math.min(g.key === 'labs' ? 1800000 : 2400000, room)) }, 1)
+      .then(r => { if (!r) { log('DISCOVER-FAIL disc:' + g.key + ' → ' + g.boards.join('+') + ' 板降级（代理失败/超时，tries=1 不重跑）'); return null }; return { group: g, boards: g.boards, urls: r.urls || [], noNews: r.noNews || [], nearWindow: r.nearWindow || [], majorOutOfWindow: r.majorOutOfWindow || [], degraded: !!r.degraded } })
   ))
   discoverResults.push(...round)
 }
@@ -467,9 +512,12 @@ const FETCH_PROMPT = src =>
 
 const extracted = []
 const FETCH_BATCH = 6
+const fetchGate = budgetGate('Fetch')
 for (const batch of chunkArr(fetchTargets, FETCH_BATCH)) {
+  if (!budgetGate('Fetch').ok) { log('BUDGET-BREAK Fetch 余批跳过，用已完成批次结果'); break }
+  const room = fetchGate.roomMs
   const batchRes = await parallel(batch.map(src => () =>
-    safeAgent(FETCH_PROMPT(src), { label: 'fetch:' + hostOf(src.url), phase: 'Fetch', schema: EXTRACT_SCHEMA, effort: 'low' }, 2)
+    safeAgent(FETCH_PROMPT(src), { label: 'fetch:' + hostOf(src.url), phase: 'Fetch', schema: EXTRACT_SCHEMA, effort: 'low', timeoutMs: Math.max(60000, Math.min(AGENT_TIMEOUT_MS, room)) }, 2)
       .then(ext => {
         if (!ext) return null
         src.sourceQuality = ext.sourceQuality
@@ -526,15 +574,15 @@ const VERIFY_PROMPT = c =>
   '窗口：' + WINDOW_LABEL + '。\n\n## 声明\n' + '"' + c.claim + '"\n\n来源：' + c.sourceUrl + ' (' + c.sourceQuality + ')，页面日期：' + (c.publishDate || '未知') + '，条目标注日期：' + (c.date || '未知') + '\n引语："' + c.quote + '"\n\n## 清单\n' +
   '1. 引语是**逐字抄录的完整支撑句**（契约要求覆盖声明全部细节——日期/数字/机构/对比）。声明中的细节凡能在引语中逐字溯源即视为被支撑；仅当声明断言明显超出引语范围（引语只谈 X 却断言 Y）才算过度引申。引语不是全文≠证据不足，勿因引语未铺陈全背景而否决。\n2. 时效：**窗口为 [' + (WFROM || DATE) + ', ' + (WTO || DATE) + ']**。事件/发布日期明显在窗口外（数天前/数周前/上月）→ refuted=true；页面日期在窗口内但内容陈述的是旧事件，按**事件实际发生日**判定，日期明确超窗仍 → refuted=true；无法判定日期则不因时效否决。\n3. 来源质量与声明强度是否匹配？（惊人声明需一手源）\n4. 是否营销话术/吹嘘/标题党/论坛猜测？（→ refuted=true）\n\n5. **禁止使用 WebSearch/WebFetch 等外部搜索工具**——本核查只依据上面给出的引语/来源/日期/声明做内部一致性判断，外部搜索会烧掉大量 token。\n\n默认 refuted=true，除非证据充分支撑。\n\nStructured output only. Evidence 简短具体（≤80 字）。'
 
-const _voteBatch = (c, n, startIdx) => parallel(Array.from({ length: n }, (_, v) => () =>
-  safeAgent(VERIFY_PROMPT(c), { label: 'v' + (startIdx + v) + ':' + (c.claim || '').slice(0, 30), phase: 'Verify', schema: VERDICT_SCHEMA, effort: 'low' }, 1)
+const _voteBatch = (c, n, startIdx, timeoutMs) => parallel(Array.from({ length: n }, (_, v) => () =>
+  safeAgent(VERIFY_PROMPT(c), { label: 'v' + (startIdx + v) + ':' + (c.claim || '').slice(0, 30), phase: 'Verify', schema: VERDICT_SCHEMA, effort: 'low', timeoutMs }, 1)
 ))
 // 8/15 自适应 2+1（语义无损）：round0 并发 2 票。双否→kill（2 票）；双非否→存活（2 票）；分歧/缺票→补 1 票终判。
 // 终判规则与 3 票时代逐字一致：survives ⇔ valid≥2 且 refuted<2；isRefuted ⇔ refuted≥2。平均 2.0-2.3 票/claim。
-const voteClaim = async c => {
+const voteClaim = async (c, timeoutMs) => {
   const valid = []
   let agentFails = 0  // 真正的代理失败（null）数；与"够票早停"分开，避免把主动停算成 error
-  const round0 = await _voteBatch(c, Math.min(2, VOTES_PER_CLAIM), 0)
+  const round0 = await _voteBatch(c, Math.min(2, VOTES_PER_CLAIM), 0, timeoutMs)
   agentFails += round0.filter(x => !x).length
   valid.push(...round0.filter(Boolean))
   const ref0 = valid.filter(x => x.refuted).length
@@ -542,7 +590,7 @@ const voteClaim = async c => {
   // 非收敛（1-1 分歧，或两票里有失败缺位）→ 补 1 票；双否/双过都直接收束在 2 票。
   const need1 = VOTES_PER_CLAIM - valid.length
   if (need1 > 0 && !(ref0 >= REFUTATIONS_REQUIRED || ok0 >= REFUTATIONS_REQUIRED)) {
-    const round1 = await _voteBatch(c, Math.min(1, need1), valid.length)
+    const round1 = await _voteBatch(c, Math.min(1, need1), valid.length, timeoutMs)
     agentFails += round1.filter(x => !x).length
     valid.push(...round1.filter(Boolean))
   }
@@ -555,8 +603,11 @@ const voteClaim = async c => {
 }
 const voted = []
 const VERIFY_BATCH = 6
+const verifyGate = budgetGate('Verify')
 for (const batch of chunkArr(rankedClaims, VERIFY_BATCH)) {
-  const batchRes = await parallel(batch.map(c => () => voteClaim(c)))
+  if (!budgetGate('Verify').ok) { log('BUDGET-BREAK Verify 余批跳过，用已完成批次结果'); break }
+  const vtimeout = Math.max(60000, Math.min(AGENT_TIMEOUT_MS, verifyGate.roomMs))
+  const batchRes = await parallel(batch.map(c => () => voteClaim(c, vtimeout)))
   voted.push(...batchRes.filter(Boolean))
 }
 
@@ -704,7 +755,9 @@ const REPORT_PROMPT =
 
 // 8/16：report 死线 480000→600000——8/16 全量实测合成 588s 撞 480s 死线被丢弃、换新代理重跑 111s（费用翻倍、墙钟+2min）。放到 600s 让正常推进的合成一次完成。
 // 8/17 第十一项：report 单次直出（tries=1）——网关已由探针把关，失败即快速降级 raw archive，不再换新代理重跑（重跑最大上下文代理 = 双倍费用 + 空转挂起翻倍）。
-const report = synthAllowed ? await safeAgent(REPORT_PROMPT, { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: 600000 }, 1) : null
+// 8/17 第十四项：timeoutMs 收紧到总预算剩余（健康跑剩余≫600s 取 600s 行为不变；病态跑前段吃预算 → 合成死线提前，墙钟被总死线钉住）。
+const synthTimeout = Math.max(60000, Math.min(600000, TOTAL_LIMIT_MS - RUN_ELAPSED()))
+const report = synthAllowed ? await safeAgent(REPORT_PROMPT, { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: synthTimeout }, 1) : null
 
 // ─── mdWriter agent writes the report Markdown (Write tool, verified reliable) ───
 // JSON 归档不再走 writer 代理：base64 转录会被 LLM 损坏（曾导致 control-char 非法 JSON + 每失败代理烧 260KB）。
@@ -713,6 +766,7 @@ const degradedFlags = []
 if (toolError > 0) degradedFlags.push('verify_agent_errors:' + toolError)
 if (budgetDropped.length > 0) degradedFlags.push('fetch_budget_dropped:' + budgetDropped.length)
 if (discoverRows.some(d => d.degraded) || failedBoardKeys.size > 0) degradedFlags.push('discovery_degraded' + (failedBoardKeys.size ? ':missing_' + [...failedBoardKeys].join('+') : ''))
+if (budgetSkipped.length > 0) degradedFlags.push('budget_skipped:' + budgetSkipped.join('+'))
 let artifacts = []
 const writeFailures = []
 let reportErr = null
@@ -725,7 +779,7 @@ if (report) {
     '格式要求：# 🤖 AI 日报 · ' + DATE + '\n> 覆盖 ' + WINDOW_LABEL + ' 窗口…\n## 📌 今日一句话\n## 📄 执行摘要\n对每个 board 一节：### <标题> 下逐条 item：**标题**（[核查状态如 3-0✓ 或 窗口外·重大] 可信度）— 2-3 句要点 — *来源: URL(s)*\n## ⚠️ 待核实（未核查条目集中在此，不得混入正文）\n## ⚠️ 未验证与局限\n## 📎 窗口外参考（若数据中有 windowMisses）\n## ❓ 开放问题\n## ✅ 覆盖自检（今天核了哪些厂商/板块，各板块动态数）\n\n数据：\n' + reportJson +
     '\n\n写完用 Bash 实测：wc -c 得字节数；若你产生过任何临时/中间文件（_decoded.bin 等）一并删除，只留目标 md。\n' +
     '返回 {"path":"' + mdPath + '","bytes":<实测字节数>}。Structured output only.',
-    { label: 'write-report', phase: 'Synthesize', schema: WRITE_RESULT_SCHEMA, timeoutMs: 480000 }, 1
+    { label: 'write-report', phase: 'Synthesize', schema: WRITE_RESULT_SCHEMA, timeoutMs: Math.max(60000, Math.min(480000, TOTAL_LIMIT_MS - RUN_ELAPSED())) }, 1
   )
   if (mdWriter && mdWriter.path === mdPath && mdWriter.bytes > 0) artifacts.push(mdPath)
   else { writeFailures.push(DATE + '-ai日报.md'); log('WRITE-FAIL md bytes=' + (mdWriter && mdWriter.bytes)) }

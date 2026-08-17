@@ -180,3 +180,36 @@ OpenAI、Google/DeepMind、Anthropic、**xAI**、NVIDIA、Meta、Amazon、Apple�
 > **语义守住**：report 仍是 REPORT_SCHEMA 单一结构化 JSON 合成；降级分支/探针/总墙钟/`tries=1` 全保留；quote 截断仅影响合成输入，claims/meta 归档 JSON 仍逐字节含完整 quote。
 >
 > **冒烟实测（8/17 修复后，单板 opensource 回归冒烟，maxFetch/maxVerify=4/4）**：`node --check` 通过；真流水线 **17 代理 / 344,934 token / 24.8min（1 490 351ms）/ 0 代理报错**；核查链本轮更彻底（4 条窗口内声明 8 票全 2-0 通过、killed 0、unverified 0、confirmed 8 = 4 核查 + 4 [窗口外·重大] `vote:'—'`），journal 证探针 `probe:report` 仍返回 `"OK"`。**C1 生效证据**：本轮 report transcript **零工具调用、零条模型响应**——禁令消除了 B 型（无任何外网工具循环）。但 report 仍未产出 md（`md_written 0`、降级 raw archive、三 JSON 落盘）：**本轮实证「裸首调用挂起」（A 型）**——transcript 仅 1 条启动 prompt + 600s 后 `[Request interrupted by user]`（18:40:45+600s=18:50:45 精确吻合死线），**首个 API 请求阶段即被网关静默丢弃**（禁工具约束到不了首请求，C1 对 A 型无效）。**两种挂起形态认知确立**：B 型（工具结果回流后模型无回复，第一/十一项实证，C1 根除）与 A 型（首请求即不响应，本轮实证，C1 无效、C2 降输入仅压低触发面）；深夜网关（02:40-02:50 UTC+8）对 report 大请求整体高拒。**如实结论**：网关可用时 report 单次合成正常（第九项 gate 实证 197s）；差窗时 A/B 任一型都会吃满 600s 死线后降级，核查结论与三 JSON 不丢失、仅 md 渲染缺失。**下一观察项**：A 型根治需进一步精简 report 输入或将其拆为小段合成（每板 <10KB），属结构性重构、超出本次 C1+C2 范围，登记待办。
+>
+> **8/17 补充（第十四项：墙钟全程硬停 + discover 失败即降级——基于 8/17 全量失败 run 的系统性 review）**：
+>
+> **基线（8/17 全量 run 实测失败）**：**16 代理 / 530,876 token / 148.2 分钟 / 6 代理报错（全 "Connection closed mid-response"，deepseek 网关 `cpa.mangoqwq.com` 不稳）/ urls_discovered=0 / 仅 KNOWN_MAJOR_OUT 种子注入的 7 条 confirmed，无任何窗口内核查发现 / md 未产出**。根因调查（Explore×2 + Plan×1）确认两条结构性缺陷：
+> 1. **墙钟治理是"事后闸门"非"全程硬停"**：`TOTAL_LIMIT_MS`（30min）唯一检查点在 Synthesize 阶段开始后（第 721 行），Harvest/Discover/Fetch/Verify 四阶段**完全无墙钟检查**可无限拖时。Discover 单阶段最坏墙钟 = 串行两批 × 各批最慢 40min × tries=2 = **160min**，今天就撞满 → 直接解释 148min。
+> 2. **discover 失败处理把墙钟/token 烧在死路**：`safeAgent(..., 2)` 用**同 prompt 同 timeoutMs** 重跑一次再吃完整 40min，最坏 80min 浪费在同一条网关差窗口死路上。而 safeAgent 重试有两路径——**throw 路径查 TRANSIENT 正则，null 路径（withDeadline 的 settle(null)）不查正则、无条件重试**；网关 "connection closed" 多经 null 路径 → 绕开正则无条件重试 → **删正则根本拦不住**，唯一可靠杠杆是 `tries=1`。
+>
+> **关键发现（计划外，实施中暴露）**：
+> - **realm 无 `performance`**：第十一项设计的"performance 不可用时 now() 返回 0 软兜底"实测为**恒 0**（`typeof performance === 'undefined'`）→ TOTAL_LIMIT_MS 闸门此前**从未真正生效**（第十一项的兜底也形同虚设）。修复：`now()` 改用脚本内 **setTimeout 链累加器**（每 250ms 自递归累加 `_wallMs`，`await` 期间持续推进——realm 内 `Date.now()`/`new Date()` 静态拒绝、`setInterval` undefined，**仅此链可用**）。微测实证修复后 budgetGate 真实触发、`budget_skipped` 进 meta。此修复同期让第十一项 TOTAL_LIMIT_MS 闸门首次真正可用。
+> - **死线须累计非切片**：初版 `PHASE_DEADLINES` 误把切片（HARVEST/DISCOVER/FETCH/VERIFY_BUDGET_MS）当死线 → Verify 死线=2min，健康跑到 Verify 时 elapsed 早已 >2min → **健康跑误报 `budget_skipped:Verify`**（冒烟#1 实证）。修复为累计死线（Harvest 14 / Discover 24 / Fetch 28 / Verify 30min，和 = TOTAL_LIMIT_MS）。切片仍是"该阶段允许花多久"的用户可调输入（args 键），死线是内部累加状态——二者不可混用。
+>
+> **改动（6 处，覆盖/核查/降级语义不动）**：
+> 1. **A 配置**：新增 4 阶段预算常量（默认 840000/600000/240000/120000ms = 14/10/4/2min 切片），照 `totalLimitMs` 写法可经 args（`harvestBudgetMs` 等）覆盖。
+> 2. **B `budgetGate(stage)`**：返回 `{ok, roomMs}`，`ok = RUN_ELAPSED() <= PHASE_DEADLINES[stage]`；超限记 `budgetSkipped`（带 dedupe）+ log `BUDGET-SKIP`。`PHASE_DEADLINES` 用累计死线（见上）。
+> 3. **C 四阶段 START 检 + 批间 BREAK 检**：各阶段循环前 START（超限跳过整阶段、结果集留空）、每批迭代首行 BREAK（超限 `break`、用已完成批次结果）。已完成批结果堆在各自数组带下去——"用已完成工作 + 余下快降级"，与既有"不许静默丢弃已完成工作"原则一致。Synthesize 不动（第 721 行绝对闸门）。
+> 4. **D 批内 timeoutMs 收紧**：各 safeAgent 的 `timeoutMs = Math.max(60000, Math.min(<原默认>, roomMs))`，room 取各阶段 START 时的 gate 快照（循环外取，**偏保守**：第二批起 roomMs 为旧值偏大 → 收紧略松，但 BREAK 检每批重判兜底，止损不漏——此取舍如实记录，未逐批重算 room 以免增复杂度）。report/mdWriter 用 `Math.max(60000, Math.min(600000/480000, TOTAL_LIMIT_MS - RUN_ELAPSED()))`。下限 60s 防逼空。
+> 5. **E discover `tries 2→1` + DISCOVER-FAIL 日志**：失败即降级不重跑；`.then(r => { if (!r) log('DISCOVER-FAIL disc:'+g.key+' → '+g.boards.join('+')+' 板降级') })` 让"媒体组失败 → N 板降级"以可 grep 日志现形（safeAgent 固有 fail 日志无板映射）。
+> 6. **F `budget_skipped` 降级标记**：`if (budgetSkipped.length) degradedFlags.push('budget_skipped:'+budgetSkipped.join('+'))`——该机制若触发必须如实上报，不留静默。
+>
+> **降级级联安全性（设计内验证，无新抛错点）**：Harvest 跳过 → digest 空 → discover prompt 只剩 X 搜索兜底；Discover 跳过 → boardURLs 空 → Fetch 循环不执行 → 全板 `failedBoardKeys` → meta `missing_*` 如实，KNOWN 种子仍注入；Verify 跳过 → confirm 仅 major-out 注入，md 靠覆盖自检如实呈现。三者全走既有空结果降级路径。
+>
+> **冒烟实测（8/17 修复后，冒烟#2 boards:[labs,strategy] 默认预算）**：`node --check` 通过；真流水线 **19 代理 / 385,020 token / 21.4min（1 284 000ms）/ 3 个 Connection-closed（agents_error 未计，全部 attempt:1）**。**四项验证目标全过**：(a) 默认预算健康跑**不触发 budget_skipped**（degraded 仅 discovery_degraded:missing_labs + write_failed）；(b) **disc tries=1** —— journal 每个 disc 代理恰好 attempt:1，无 `safeAgent retry... disc:` 重试记录（null 路径无条件重试仅靠 tries=1 拦得住）；(c) **DISCOVER-FAIL 可见** —— media-cn 失效时 `DISCOVER-FAIL disc:media-cn → 5 板降级` 一行现形，23 家 labs 公司 unreached/no_discover_agent 如实入 meta missing；(d) 3 JSON + md 落盘（md 被 report A 型挂起吃满 600s 后降级，与 item-14 无关）。**关键实证**：健康跑 ~21.4min 完全不触发阶段预算（Verify 2min 切片死线 bug 修复前会误触发——本冒烟证累计死线语义正确）；真实核查链产出 confirmed 8（Stripe-OpenRouter 收购、Zuckerberg×2 等 3 条投票确认）＋ kill 1（SpaceX-Cursor $60B 证伪 0-2）＋ major-out 4。
+>
+> **全量实测（8/17 重跑，9 全板默认预算）**：**50 代理 / 1,083,686 token / 30.8min（1 847 780ms）/ 0 代理报错（agents_error=0）**。**墙钟断言：未完全达标——30.8min 超 30min 硬上限 ~48s**（详见下）。**degraded 如实**：`["fetch_budget_dropped:14","discovery_degraded","write_failed:2026-08-17-ai日报.md"]`——无 `budget_skipped`（四阶段 START/BREAK 均未触发），降级皆既有机制。**md 产出：失败**——合成阶段 `SYNTH-SKIP 总墙钟超限或网关探针失败 → 归 raw archive`，mdWriter 未运行（md_written 0），已由编排器据归档合成降级 md；3 JSON 逐字节落盘（confirmed 19=7 窗口内核查+12 major-out `/ killed 5 / unverified 0`）。**各阶段实测耗时（自首个代理 queued 起算）**：
+> | 阶段 | 切片预算 | 实测 | 累计实测 | 累计死线 | 判定 |
+> |---|---|---|---|---|---|
+> | Harvest | 14min | 5.2min | 5.2min | 14min | ✓ |
+> | Discover | 10min | 9.2min | 14.4min | 24min | ✓ |
+> | Fetch | 4min | 7.3min | 21.7min | 28min | ✓（切片超、累计达标）|
+> | Verify | 2min | 9.1min | **30.8min** | 30min | ✗ 累计超 ~48s |
+> | Synthesize | — | 未运行 | 30.8min | 30min（绝对） | ✗ SYNTH-SKIP |
+>
+> **超时根因（如实记录）**：Verify 阶段点格的 D 收紧 `timeoutMs` 用的是**阶段 START 时快照 room（≈8.3min → 逐票 240s 上限）**，12 条声明 ×2 票 + 2-1 分歧补票共三波 27 票，波次叠加实际吃掉 9.1min > room；累计死线 30min 在第二波 + 分歧补票中途被跨过（verify 末票 lastProgressAt 1786951986436，elapsed≈30.8min）。**批间 BREAK 只拦批起点、拦不住批内在飞代理**——与 plan D "未逐批重算 room、BREAK 每批重判兜底"的明确取舍一致，代价即本次 48s 越线。**对比 8/17 失败 run**：148.2min/16 代理/530,876 token/6 报错/0 discovery → **30.8min/50 代理/1,083,686 token/0 报错/真实发现**（窗口内核查 7 存活：PlayWorld×2、GLM-5.3、Acrab 融资、郎咸朋访谈、Grok 诉讼-Jane Doe、Intern-S2；kill 5 含 NVIDIA-SSI 50 亿/至知 SWD/Qwen3.8-27B 日期矛盾等）——**墙钟 5 倍压缩、发现从 0→7、报错清零**；不足是墙钟略越线 + md 未直出。**待观察项（登记不越界处理）**：①Verify 批内在飞票未受累计死线硬停（<10min 级超限），可否逐波重算 room 或对在飞票挂 deadline 硬停；②Fetch 切片 4min 偏紧（实测 7.3min），可上调至 8min 并在 Discover/Verify 平移。**节流注记**：本次 50 代理中 27 票为核查 ×19k token/票 ~513k token，是整个管线最重环节——若预算吃紧可先降 maxVerify。
