@@ -44,11 +44,16 @@ const GATEWAY_PROBE_MS = typeof args.probeTimeoutMs === 'number' && args.probeTi
 const TOTAL_LIMIT_MS = typeof args.totalLimitMs === 'number' && args.totalLimitMs > 0 ? args.totalLimitMs : 1800000
 // 8/17 第十四项：墙钟治理升级——TOTAL_LIMIT_MS（仅 Synthesize 前查一次的事后闸门）拆成各阶段累计死线，
 // 每个阶段前 budgetGate 查墙钟，超限即跳过该阶段快速降级（病态运行不再拖满；健康跑远低于死线、永不触发）。
-// 切片和 = 14+10+4+2 = 30min 与 TOTAL_LIMIT_MS 对齐；分配序：Harvest/Discover 留足慢但有效的包络，Verify 牺牲序最低。
-const HARVEST_BUDGET_MS = typeof args.harvestBudgetMs === 'number' && args.harvestBudgetMs > 0 ? args.harvestBudgetMs : 840000
-const DISCOVER_BUDGET_MS = typeof args.discoverBudgetMs === 'number' && args.discoverBudgetMs > 0 ? args.discoverBudgetMs : 600000
-const FETCH_BUDGET_MS   = typeof args.fetchBudgetMs   === 'number' && args.fetchBudgetMs   > 0 ? args.fetchBudgetMs   : 240000
-const VERIFY_BUDGET_MS  = typeof args.verifyBudgetMs  === 'number' && args.verifyBudgetMs  > 0 ? args.verifyBudgetMs  : 120000
+// 切片和 = 8+9+8+5 = 30min 与 TOTAL_LIMIT_MS 对齐；分配序：Harvest/Discover 留足慢但有效的包络，Verify 牺牲序最低。
+// 8/17 全量实测（Harvest 5.2 / Discover 9.2 / Fetch 7.3 / Verify 9.1min）证明 30min 盘子装不下 50 代理健康包络（合计 30.8min）：
+// 修复后健康跑尾部 Verify 被逐波重算硬停（尾部核查票如实降 unverified），墙钟由 Verify 死线缓冲严格钉在 ≤ TOTAL_LIMIT_MS。
+const HARVEST_BUDGET_MS = typeof args.harvestBudgetMs === 'number' && args.harvestBudgetMs > 0 ? args.harvestBudgetMs : 480000
+const DISCOVER_BUDGET_MS = typeof args.discoverBudgetMs === 'number' && args.discoverBudgetMs > 0 ? args.discoverBudgetMs : 540000
+const FETCH_BUDGET_MS   = typeof args.fetchBudgetMs   === 'number' && args.fetchBudgetMs   > 0 ? args.fetchBudgetMs   : 480000
+const VERIFY_BUDGET_MS  = typeof args.verifyBudgetMs  === 'number' && args.verifyBudgetMs  > 0 ? args.verifyBudgetMs  : 300000
+// 8/17 全量修复（观察项①）：Verify 最后一批在飞票带 60s timeoutMs 下限（D 的 min(60s) 防逼空），
+// 累计死线预留该缓冲（从 Verify 切片和后扣除），批内在飞票拖满下限也越不过 Synthesize 总闸门。
+const VERIFY_INFLIGHT_BUFFER_MS = typeof args.verifyInflightBufferMs === 'number' && args.verifyInflightBufferMs > 0 ? args.verifyInflightBufferMs : 60000
 
 const DATE = typeof args.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(args.date) ? args.date : null
 const WFROM = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.from)) ? String(args.window.from) : null
@@ -252,14 +257,16 @@ const probeGateway = async label => {
 // 8/17 第十四项：阶段墙钟闸门——某阶段前查 RUN_ELAPSED 是否已过该阶段累计死线；超限即记 budget_skipped + log，返回 ok:false。
 // roomMs = 死线减已耗，供批内 timeoutMs 收紧（in-flight 硬停）。performance 不可用时 now()=0 → 恒放行（软兜底失效但不误杀已完成工作）；resume 重新起算仅宽松兜底。
 const budgetSkipped = []
-// 累计死线（elapsed 从 RUN_START 起算）：各阶段切片相加，与计划"累计死线"列吻合（14/24/28/30min）。
+// 累计死线（elapsed 从 RUN_START 起算）：各阶段切片相加，与计划"累计死线"列吻合（8/17/25/29min）。
 // 注意：HARVEST/DISCOVER/FETCH/VERIFY_BUDGET_MS 是"该阶段允许花多久"的切片（用户可单独调），
-// 死线必须累加——若误把切片当死线，Verify 切片 2min 会在健康跑（elapsed 早已 >2min）误判超时。
+// 死线必须累加——若误把切片当死线，Verify 切片 5min 会在健康跑（elapsed 早已 >5min）误判超时。
+// Verify 累计死线在切片和后另减 VERIFY_INFLIGHT_BUFFER_MS：最后一批在飞票带 60s timeoutMs 下限（防逼空），
+// 预留该缓冲使批内在飞票拖满下限也越不过 Synthesize 的总闸门 → 墙钟严格 ≤ TOTAL_LIMIT_MS。
 const PHASE_DEADLINES = {
   Harvest: HARVEST_BUDGET_MS,
   Discover: HARVEST_BUDGET_MS + DISCOVER_BUDGET_MS,
   Fetch: HARVEST_BUDGET_MS + DISCOVER_BUDGET_MS + FETCH_BUDGET_MS,
-  Verify: HARVEST_BUDGET_MS + DISCOVER_BUDGET_MS + FETCH_BUDGET_MS + VERIFY_BUDGET_MS,
+  Verify: HARVEST_BUDGET_MS + DISCOVER_BUDGET_MS + FETCH_BUDGET_MS + VERIFY_BUDGET_MS - VERIFY_INFLIGHT_BUFFER_MS,
   Synthesize: TOTAL_LIMIT_MS
 }
 const budgetGate = stage => {
@@ -603,10 +610,13 @@ const voteClaim = async (c, timeoutMs) => {
 }
 const voted = []
 const VERIFY_BATCH = 6
-const verifyGate = budgetGate('Verify')
+// 8/17 全量修复（观察项①）：room 由阶段 START 一次性快照改为每批重算——批内在飞票拖满 60s 下限后，
+// 下一批的 budgetGate 用当前剩余 room 判定，越线即 BUDGET-BREAK 不再启动新票；配合 PHASE_DEADLINES.Verify 的
+// 60s 缓冲（VERIFY_INFLIGHT_BUFFER_MS），批内在飞票拖满下限也越不过 Synthesize 总闸门 → 墙钟严格 ≤ TOTAL_LIMIT_MS。
 for (const batch of chunkArr(rankedClaims, VERIFY_BATCH)) {
-  if (!budgetGate('Verify').ok) { log('BUDGET-BREAK Verify 余批跳过，用已完成批次结果'); break }
-  const vtimeout = Math.max(60000, Math.min(AGENT_TIMEOUT_MS, verifyGate.roomMs))
+  const gate = budgetGate('Verify')
+  if (!gate.ok) { log('BUDGET-BREAK Verify 余批跳过，用已完成批次结果'); break }
+  const vtimeout = Math.max(60000, Math.min(AGENT_TIMEOUT_MS, gate.roomMs))
   const batchRes = await parallel(batch.map(c => () => voteClaim(c, vtimeout)))
   voted.push(...batchRes.filter(Boolean))
 }
@@ -616,7 +626,7 @@ const confirmed = [...confirmedVerify]  // copy：后续 major-out 注入不许�
 const outOfWindow = voted.filter(c => c.survives && claimWindow(c) === 'out')
 const killed = voted.filter(c => c.isRefuted)
 const unverified = voted.filter(c => !c.survives && !c.isRefuted)
-const toolError = voted.filter(c => c.erroredCount >= 2).length
+const toolError = voted.filter(c => c.erroredCount >= 1).length  // 8/17 全量修复（观察项③）：阈值 2→1，单票错误不再被成品抹掉
 log('Verify done: ' + voted.length + ' → ' + confirmedVerify.length + ' verified, ' + killed.length + ' refuted, ' + unverified.length + ' unverified')
 
 // ─── 重大超窗事实注入：行业里程碑级公认客观事件，即使不在窗口也需出现在正文 ───
@@ -789,10 +799,10 @@ if (report) {
 }
 
 const claimsJson = JSON.stringify({ date: DATE, window: WINDOW_LABEL,
-  confirmed: confirmed.map(c => ({ claim: c.claim, quote: c.quote, source: c.sourceUrl, sourceQuality: c.sourceQuality, date: c.publishDate || c.date, window: c.isMajorOut ? 'major-out' : claimWindow(c), vote: c.isMajorOut ? '—' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, verifiedByVote: !c.isMajorOut, confidence: (c.verdicts.filter(v => !v.refuted)[0] || {}).confidence || (c.isMajorOut ? 'high' : 'low') })),
-  refuted: killed.map(c => ({ claim: c.claim, source: c.sourceUrl, vote: (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount })),
+  confirmed: confirmed.map(c => ({ claim: c.claim, quote: c.quote, source: c.sourceUrl, sourceQuality: c.sourceQuality, date: c.publishDate || c.date, window: c.isMajorOut ? 'major-out' : claimWindow(c), vote: c.isMajorOut ? '—' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, verifiedByVote: !c.isMajorOut, erroredCount: c.erroredCount || 0, confidence: (c.verdicts.filter(v => !v.refuted)[0] || {}).confidence || (c.isMajorOut ? 'high' : 'low') })),
+  refuted: killed.map(c => ({ claim: c.claim, source: c.sourceUrl, vote: (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, erroredCount: c.erroredCount || 0 })),
   unverified: unverified.map(c => ({ claim: c.claim, source: c.sourceUrl })),
-  outOfWindow: outOfWindow.map(c => ({ claim: c.claim, source: c.sourceUrl, date: c.publishDate || c.date, vote: (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount })) }, null, 1)
+  outOfWindow: outOfWindow.map(c => ({ claim: c.claim, source: c.sourceUrl, date: c.publishDate || c.date, vote: (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, erroredCount: c.erroredCount || 0 })) }, null, 1)
 // JSON 归档不再走 writer 代理（base64 转录会被 LLM 损坏，曾导致 control-char 非法 JSON + 每失败代理烧 260KB）。
 // 改为：workflow 把 payload 原样返回 → 主会话用 Write 逐字节落盘（见下方 payloads 字段）。
 const claimsPath = OUT + '/' + DATE + '.verified-claims.json'
