@@ -1,0 +1,93 @@
+// ai-daily 花名册与静态配置 — 与 workflow 内逐字节一致。真源；加厂商/改种子只改此文件。
+
+// ─── Deterministic coverage: 9 boards × roster ───
+export const BOARDS = [
+  { key: 'labs', title: '头部实验室·新模型', focus: '旗舰实验室本周新模型、新版本、重大模型能力发布（必须逐家核）', degradeNotes: 'X/Grok、OpenAI 等官方 X 通道优先；WebSearch 不可用时以官方渠道覆盖为主。',
+    companies: [
+      { name: 'OpenAI',        x: 'OpenAI' },
+      { name: 'Google DeepMind', x: 'GoogleDeepMind', feed: 'https://research.google/blog/rss/' },
+      { name: 'Anthropic',     x: 'AnthropicAI',      feed: 'https://www.anthropic.com/news' },
+      { name: 'xAI',           x: 'xai',              feed: 'https://x.ai/news' },
+      { name: 'NVIDIA',        x: 'NVIDIA_AI',        feed: 'https://blogs.nvidia.com/feed/' },
+      { name: 'Meta AI',       x: 'AIatMeta',         feed: 'https://ai.meta.com/blog/' },
+      { name: 'Amazon AWS',    x: 'AWSNewsBlog' },
+      { name: 'Apple',         x: 'Apple' },
+      { name: 'Microsoft',     x: 'MSFTResearch' },
+      { name: 'Mistral',       x: 'MistralAI' },
+      { name: 'Cohere',        x: 'CohereAI' },
+      { name: 'DeepSeek',      x: 'deepseek_ai' },
+      { name: 'Alibaba Qwen',  x: 'Alibaba_Qwen' },
+      { name: 'Moonshot Kimi', x: 'MoonshotAI' },
+      { name: 'MiniMax',       x: 'MiniMax_AI' },
+      { name: 'Baidu',         x: 'BaiduResearch' },
+      { name: 'Tencent',       x: 'Tencent_AI_Lab' },
+      { name: 'ByteDance',     x: 'ByteDance' },
+      { name: 'Zhipu GLM',     x: 'zhipu_ai' },
+      { name: 'StepFun',       x: 'StepFun' },
+      { name: 'Kuaishou',      x: 'Kuaishou' },
+      { name: 'Midjourney',    x: 'midjourney' },
+      { name: 'Stability AI',  x: 'StabilityAI' },
+    ] },
+  { key: 'strategy', title: '重磅头条·战略', focus: '重大战略/资本/基础设施新闻：大额融资平台、星际之门类项目、并购、行业地位变动', feeds: ['https://www.qbitai.com/', 'https://techcrunch.com/category/artificial-intelligence/'] },
+  { key: 'products', title: '产品与硬件', focus: '消费级 AI 产品、AI 硬件、设备发布、机器人、新品落地', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.theverge.com/ai-artificial-intelligence/', 'https://www.qbitai.com/'] },
+  { key: 'opensource', title: '开源与工具链', focus: '开源权重发布、HF 趋势、GitHub 趋势、Agent 框架与工具', feeds: ['https://huggingface.co/blog/feed.xml', 'https://huggingface.co/papers'], xHandles: ['huggingface', 'OpenSourceModels'] },
+  { key: 'academic', title: '学术研究', focus: 'arXiv 新提交、HF Daily Papers 榜单、研究突破', feeds: ['https://arxiv.org/list/cs.AI/recent', 'https://arxiv.org/list/cs.CL/recent', 'https://huggingface.co/papers'] },
+  { key: 'funding', title: '融资并购', focus: '融资轮次、估值、并购、投资动态', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://36kr.com/', 'https://www.qbitai.com/'] },
+  { key: 'policy', title: '政策监管', focus: '政府/监管/法院/标准组织对 AI 的动作', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.qbitai.com/'] },
+  { key: 'safety', title: '安全与伦理', focus: '对齐、安全、滥用、水印、系统卡、攻击事件', feeds: ['https://www.qbitai.com/', 'https://techcrunch.com/category/artificial-intelligence/'] },
+  { key: 'people', title: '人才流动', focus: '重要人物离职/跳槽/创业/任命', feeds: ['https://www.qbitai.com/', 'https://techcrunch.com/category/artificial-intelligence/'] },
+]
+
+export const OFFICIAL_FEEDS = [
+  { url: 'https://openai.com/news/rss.xml', label: 'OpenAI News' },
+  { url: 'https://www.anthropic.com/news', label: 'Anthropic News' },
+  { url: 'https://x.ai/news', label: 'xAI News' },
+  { url: 'https://research.google/blog/rss/', label: 'Google Research Blog' },
+  { url: 'https://blogs.nvidia.com/feed/', label: 'NVIDIA Blog' },
+  { url: 'https://ai.meta.com/blog/', label: 'Meta AI Blog' },
+]
+
+// 种子"重大超窗事实"（行业里程碑级公认事件，即使不在窗口也应出现在正文，标注 [窗口外·重大]）：
+// 发现代理通过 majorOutOfWindow 字段上报更多此类事实。
+export const KNOWN_MAJOR_OUT = [
+  { name: 'DeepSeek V4 Pro / V4 Flash 开源', date: '2026-07-31', note: 'MIT 协议开源，参数规模全球最大开源模型之一，社区广泛采用。' },
+  { name: 'DeepSeek Harness 团队组建', date: '2026-07', note: 'DeepSeek 组建 Harness 团队，构建对标 Claude Code 的 agent 包装层（Model+Harness=Agent），桌面 agent 开发中。' },
+  { name: 'Grok 4.6 发布', date: '2026-07下旬', note: 'xAI 发布 Grok 4.6 旗舰模型，客观事实（发布日期以 xAI 官方为准，此处为近似）。' },
+]
+
+// labs 花名册跨板块校正别名表：发现代理可能过报 no_news，已确认声明/来源标题命中别名即翻转 has_dynamic。
+export const LABS_ALIASES = [
+  ['OpenAI', ['OpenAI']], ['Google DeepMind', ['Google', 'DeepMind']], ['Anthropic', ['Anthropic', 'Claude']],
+  ['xAI', ['xAI', 'Grok']], ['NVIDIA', ['NVIDIA', '英伟达']], ['Meta AI', ['Meta', 'Facebook']],
+  ['Amazon AWS', ['AWS', 'Amazon Web Services']], ['Apple', ['Apple']], ['Microsoft', ['Microsoft', '微软']],
+  ['Mistral', ['Mistral']], ['Cohere', ['Cohere']], ['DeepSeek', ['DeepSeek', '深度求索']],
+  ['Alibaba Qwen', ['Qwen', '通义']], ['Moonshot Kimi', ['Kimi', '月之暗面']], ['MiniMax', ['MiniMax']],
+  ['Baidu', ['Baidu', '百度']], ['Tencent', ['Tencent', '腾讯', '混元']], ['ByteDance', ['ByteDance', '字节', '豆包']],
+  ['Zhipu GLM', ['GLM', '智谱']], ['StepFun', ['StepFun', '阶跃']], ['Kuaishou', ['Kuaishou', '快手']],
+  ['Midjourney', ['Midjourney', 'MJ']], ['Stability AI', ['Stability', 'StabilityAI', 'Stable Diffusion']],
+]
+
+// 批量 Harvest 分组（8/15 第九项优化）：14 个独立 feed 并行代理 → 5 个分组代理。
+export const GROUPS_RAW = [
+  { key: 'official', label: '官方实验室（OpenAI/Anthropic/xAI/Google/NVIDIA/Meta）', test: u => OFFICIAL_FEEDS.some(f => normURL(f.url) === normURL(u)) },
+  { key: 'cn-media', label: '中文媒体（量子位/36氪）', test: u => /qbitai|36kr/i.test(u) },
+  { key: 'en-media', label: '英文媒体（TechCrunch/The Verge）', test: u => /techcrunch|theverge/i.test(u) },
+  { key: 'opensource', label: '开源/模型仓库（HuggingFace）', test: u => /huggingface/i.test(u) },
+  { key: 'academic', label: '学术（arXiv）', test: u => /arxiv/i.test(u) },
+]
+
+// 分组发现（8/15 第九项优化）：labs / opensource / academic 单板专代理；6 个媒体/垂类板合并为
+// media-cn 与 media-en 两组。
+export const DISCOVER_GROUPS_ALL = [
+  { key: 'labs', label: '头部实验室', boards: ['labs'], xBudget: 5 },
+  { key: 'opensource', label: '开源与工具链', boards: ['opensource'], xBudget: 3 },
+  { key: 'academic', label: '学术研究', boards: ['academic'], xBudget: 3 },
+  { key: 'media-cn', label: '中文媒体（量子位/36氪）', boards: ['strategy', 'funding', 'policy', 'safety', 'people'],
+    feeds: ['https://www.qbitai.com/', 'https://36kr.com/'], xBudget: 4 },
+  { key: 'media-en', label: '英文媒体（TechCrunch/The Verge/qbitai）', boards: ['strategy', 'products', 'funding', 'policy'],
+    feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.theverge.com/ai-artificial-intelligence/', 'https://www.qbitai.com/'], xBudget: 4 },
+]
+
+// normURL 在 date-utils.mjs；boards.mjs 的 GROUPS_RAW.test 闭包需要它，这里前向声明由 build.mjs inline 时保证顺序。
+// 直接 import 供 node 环境用；build.mjs inline 时剥掉 import 行（workflow 内 normURL 已在上文定义）。
+import { normURL } from './date-utils.mjs'
