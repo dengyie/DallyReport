@@ -44,11 +44,17 @@ const GATEWAY_PROBE_MS = typeof args.probeTimeoutMs === 'number' && args.probeTi
 const TOTAL_LIMIT_MS = typeof args.totalLimitMs === 'number' && args.totalLimitMs > 0 ? args.totalLimitMs : 1800000
 // 8/17 第十四项：墙钟治理升级——TOTAL_LIMIT_MS（仅 Synthesize 前查一次的事后闸门）拆成各阶段累计死线，
 // 每个阶段前 budgetGate 查墙钟，超限即跳过该阶段快速降级（病态运行不再拖满；健康跑远低于死线、永不触发）。
-// 切片和 = 8+9+8+5 = 30min 与 TOTAL_LIMIT_MS 对齐；分配序：Harvest/Discover 留足慢但有效的包络，Verify 牺牲序最低。
+// 切片和 = 9+8+8+5 = 30min 与 TOTAL_LIMIT_MS 对齐（8/19 第十五项调序：Harvest 增到 9、Discover 减到 8，
+// 依据见 HARVEST_BUDGET_MS 前的注释——discover 换 Tavily 兜底提速，harvest 保留 442-800s 慢但有效的 crops）；
+// 分配序：Harvest/Discover 留足慢但有效的包络，Verify 牺牲序最低。
 // 8/17 全量实测（Harvest 5.2 / Discover 9.2 / Fetch 7.3 / Verify 9.1min）证明 30min 盘子装不下 50 代理健康包络（合计 30.8min）：
 // 修复后健康跑尾部 Verify 被逐波重算硬停（尾部核查票如实降 unverified），墙钟由 Verify 死线缓冲严格钉在 ≤ TOTAL_LIMIT_MS。
-const HARVEST_BUDGET_MS = typeof args.harvestBudgetMs === 'number' && args.harvestBudgetMs > 0 ? args.harvestBudgetMs : 480000
-const DISCOVER_BUDGET_MS = typeof args.discoverBudgetMs === 'number' && args.discoverBudgetMs > 0 ? args.discoverBudgetMs : 540000
+// 8/19 第十五项优化：Harvest/Discover 预算对调（480→540 / 540→480），零净盘子 30min 不变。
+// 依据：8/18 重跑实测 harvest:crops 442-800s 在 480s 死线上被砍（opensource 38min 后超时、cn-media/en-media crops），
+// 而 8/17 全量实测 harvest 健康包络 5.2min。Discover 因 8/19 的 --extra 4 改用 Tavily 快速兜底（~2-5s/查询，
+// 对比 --no-extra 打 stateless 代理 ~30-60s/查询），健康 discover 显著提速 → 可让出 60s 给 Harvest，保住慢但有效的 crops。
+const HARVEST_BUDGET_MS = typeof args.harvestBudgetMs === 'number' && args.harvestBudgetMs > 0 ? args.harvestBudgetMs : 540000
+const DISCOVER_BUDGET_MS = typeof args.discoverBudgetMs === 'number' && args.discoverBudgetMs > 0 ? args.discoverBudgetMs : 480000
 const FETCH_BUDGET_MS   = typeof args.fetchBudgetMs   === 'number' && args.fetchBudgetMs   > 0 ? args.fetchBudgetMs   : 480000
 const VERIFY_BUDGET_MS  = typeof args.verifyBudgetMs  === 'number' && args.verifyBudgetMs  > 0 ? args.verifyBudgetMs  : 300000
 // 8/17 全量修复（观察项①）：Verify 最后一批在飞票带 60s timeoutMs 下限（D 的 min(60s) 防逼空），

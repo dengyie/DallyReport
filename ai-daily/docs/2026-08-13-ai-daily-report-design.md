@@ -213,3 +213,24 @@ OpenAI、Google/DeepMind、Anthropic、**xAI**、NVIDIA、Meta、Amazon、Apple�
 > | Synthesize | — | 未运行 | 30.8min | 30min（绝对） | ✗ SYNTH-SKIP |
 >
 > **超时根因（如实记录）**：Verify 阶段点格的 D 收紧 `timeoutMs` 用的是**阶段 START 时快照 room（≈8.3min → 逐票 240s 上限）**，12 条声明 ×2 票 + 2-1 分歧补票共三波 27 票，波次叠加实际吃掉 9.1min > room；累计死线 30min 在第二波 + 分歧补票中途被跨过（verify 末票 lastProgressAt 1786951986436，elapsed≈30.8min）。**批间 BREAK 只拦批起点、拦不住批内在飞代理**——与 plan D "未逐批重算 room、BREAK 每批重判兜底"的明确取舍一致，代价即本次 48s 越线。**对比 8/17 失败 run**：148.2min/16 代理/530,876 token/6 报错/0 discovery → **30.8min/50 代理/1,083,686 token/0 报错/真实发现**（窗口内核查 7 存活：PlayWorld×2、GLM-5.3、Acrab 融资、郎咸朋访谈、Grok 诉讼-Jane Doe、Intern-S2；kill 5 含 NVIDIA-SSI 50 亿/至知 SWD/Qwen3.8-27B 日期矛盾等）——**墙钟 5 倍压缩、发现从 0→7、报错清零**；不足是墙钟略越线 + md 未直出。**待观察项已全部修复（8/17 完全修复落地）**：① Verify 死线预留 60s 在飞票缓冲（`VERIFY_INFLIGHT_BUFFER_MS`=60000，`verifyInflightBufferMs` 可覆盖）+ room 由阶段 START 一次性快照改为**每批重算**（越线即 BUDGET-BREAK 不再启动新票）→ 墙钟严格 ≤ TOTAL_LIMIT_MS（静态断言：健康包络 5.2/9.2/7.3/9.1 下墙钟 ≈29min，尾部 ~1.8min 核查降 unverified）；② Fetch 切片 4→8min，整体重分配 **Harvest 8 / Discover 9 / Fetch 8 / Verify 5**（累计死线 8/17/25/29，切片和=30min 不变）——30min 盘子装不下 50 代理健康包络（实测合计 30.8min），健康跑尾部 Verify 由逐波重算硬停并**如实降 unverified**，这是"保持 30min 承诺"的必然取舍；③ confirmed/refuted/outOfWindow JSON 均补 `erroredCount`（单票错误在成品可见），meta `verify_agent_errors` 阈值 2→1（任有一票错误即上报）——JaneDoe 类单票丢弃现于 JSON `erroredCount:1` 现形。**节流注记**：本次 50 代理中 27 票为核查 ×19k token/票 ~513k token，是整个管线最重环节——若预算吃紧可先降 maxVerify。
+>
+> **8/19 补充（第十五项：grok-search 数据源根因修复 + discover `--extra 4` + 预算 9/8/8/5 对调）**：8/18 重跑（`wf_f1896391-602`，11 代理/19min/0 URLs）逐代理转录解剖，把 8/17"发现面塌方"的根因钉死：
+>
+> **根因（三层证据，全部实测）**：
+> 1. **代理 `cpa.mangoqwq.com` 是 stateless 回显假体**——手动 POST 3 种工具形状（web_search / x_search / both）到 `/v1/responses`：全部 HTTP 200，但输出是纯 `message`+`output_text`（`annotations: []`），无 `function_call`/`web_search_call`/搜索结果卡片；文本是模型旧知识（"截至 2025 年 1 月"）。**该代理改不了**。
+> 2. **search.js `--no-extra` 依赖该假体供卡**——discover prompt 用 `--no-extra` → `extraOptions.limit=0` → 假体返回空内容（GROK_RESPONSES_EMPTY）→ `publicResult` 现有逻辑 `limit<=0 || !extra` → **throw GROK_FAILED** → discover 代理拿到 `{error}` 无任何 URL 卡 → 5 个发现代理全空手（opensource 试了 `--extra 6` 得 partial_success 2 卡，academic/CN/EN 全撞 throw）。
+> 3. **harvest 480s 死线太紧**——cn-media/en-media/opensource 实测 442-800s 全部超时 crops，仅 official 成功 → 4/5 discover 组拿到空 digest → 只剩 X 搜索兜底 → 死磕 → 0 URLs。
+>
+> **改动（grok-search 逻辑真源 + ai-daily 两处，覆盖/核查/降级语义不动）**：
+> 1. **grok-search `scripts/lib/grok-responses.js`**：`parseGrokResponses` 新增 `usable` 标志 = 有文本 && 有 URL 卡片；`searchGrokResponses` 对"有文本但 0 卡片"抛 `GROK_RESPONSES_NO_SOURCES`（区别于空应答 `GROK_RESPONSES_EMPTY`）。
+> 2. **grok-search `scripts/search.js`**：`publicResult` 新增 `noUsable` 判定——代理 stateless 回显/空应答时，即使 `--no-extra` 也**降级不 throw** → 返回合法 JSON + `degraded:true` + `GROK_NO_USABLE`。真正的网络/5xx 错误仍 throw（边界不误伤，负例实测：坏 endpoint 仍 `GROK_FAILED` exit 1）。
+> 3. **ai-daily `prompts.mjs` discover prompt**：`--no-extra` → `--extra 4`——走 Tavily 快速兜底（实测 `degraded_success` + 1-4 条 Tavily 卡），不再依赖假体供卡；并明确"只看 str 非空卡片（sources.grok 优先、其次 extra/merged）"。
+> 4. **ai-daily 预算对调**：Harvest 480→540s / Discover 540→480s（累计死线改 9/17/25/29，切片和仍 30min）——8/18 实证 harvest crops 442-800s 需要更多头度，discover 换 Tavily 兜底后健康跑提速可让出 1min；SKILL.md args 文档同步。
+>
+> **验证（全绿）**：
+> - grok-search 11 文件测试套件 exit 0（新增 stateless-回显 fixture：`usable:false`）
+> - ai-daily 30/30 测试 + `node --check` + 重 build 产物确认两处改动注入
+> - 安装位 `.claude/skills/grok-search` 与 `.mirasim/skills/grok-search` 三文件字节同步（md5 一致）
+> - 实测 discover 精确调用形状 `--extra 4 --responses-x-search` → `status:degraded_success` + `degraded:true` + Tavily 卡 1-4 条（OpenAI 融资 1220 亿美元卡）；`--no-extra` 不再 throw（`degraded:true` exit 0）；坏 endpoint 仍 throw（边界不误伤）
+>
+> **对 8/17 病灶的疗效**：搜索失败不再 throw 拖死代理（#99）+ 空摘要快速降级（#98 已落地）双层缓解 8/18"5 discover 全挂 + 160min 墙钟"病态；discover 有 Tavily 保底后即使假体仍空也有 URL 卡可交，`missing_*` 覆盖面收窄到真实缺源场景。
