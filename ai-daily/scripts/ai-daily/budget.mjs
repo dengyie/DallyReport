@@ -1,8 +1,8 @@
 // ai-daily 阶段墙钟预算 — 第十四项语义的可测试化。
 // 切片(BUDGET_MS)是用户输入、累计死线(PHASE_DEADLINES)是内部状态，混用即 bug（见 memory ai-daily-budget-deadline-semantics）。
 
-// 累计死线：各阶段切片相加；Verify 在切片和后另减 verifyInflightBuffer（给最后一批在飞票 60s timeoutMs 下限留位），
-// 保证批内在飞票拖满下限也越不过 Synthesize 总闸门 → 墙钟严格 ≤ totalLimit。
+// 累计死线：各阶段切片相加；Verify 在切片和后另减 verifyInflightBuffer（为最后一批在飞票固定 AGENT_TIMEOUT_MS 留空间），
+// 墙钟仅为软目标——极端尾批可超 totalLimit 约 300s，由 synthAllowed 绝对闸门 + render-md 降级兜底。
 export const computePhaseDeadlines = ({ harvest, discover, fetch, verify, verifyInflightBuffer, totalLimit }) => ({
   Harvest: harvest,
   Discover: harvest + discover,
