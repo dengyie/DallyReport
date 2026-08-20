@@ -499,12 +499,12 @@ const verifyPrompt = (c, ctx) =>
   '1. 引语是**逐字抄录的完整支撑句**（契约要求覆盖声明全部细节——日期/数字/机构/对比）。声明中的细节凡能在引语中逐字溯源即视为被支撑；仅当声明断言明显超出引语范围（引语只谈 X 却断言 Y）才算过度引申。引语不是全文≠证据不足，勿因引语未铺陈全背景而否决。\n2. 时效：**窗口为 [' + (ctx.WFROM || ctx.DATE) + ', ' + (ctx.WTO || ctx.DATE) + ']**。事件/发布日期明显在窗口外（数天前/数周前/上月）→ refuted=true；页面日期在窗口内但内容陈述的是旧事件，按**事件实际发生日**判定，日期明确超窗仍 → refuted=true；无法判定日期则不因时效否决。\n3. 来源质量与声明强度是否匹配？（惊人声明需一手源）\n4. 是否营销话术/吹嘘/标题党/论坛猜测？（→ refuted=true）\n\n5. **禁止使用 WebSearch/WebFetch 等外部搜索工具**——本核查只依据上面给出的引语/来源/日期/声明做内部一致性判断，外部搜索会烧掉大量 token。\n\n默认 refuted=true，除非证据充分支撑。\n\nStructured output only. Evidence 简短具体（≤80 字）。'
 
 // reportPrompt 需要编排层预拼的 reportBody/refutedList/unverifiedList/missBlock/coverBlock 与统计数，经 ctx 传入。
- ctx =>
+const reportPrompt = ctx =>
   "## 日报终稿 —— 新闻编辑简报\n\n窗口：" + ctx.WINDOW_LABEL + "。下面是一篇 AI 日报的原始素材：" + ctx.confirmedVerifyCount + " 条已核查声明（对抗式 2+1 票验证），" + ctx.majorOutCount + " 条行业公认重大事实（[窗口外·重大]，超窗未投票但可入正文）。\n\n" +
   "你的任务：把它们写成一篇**真正可读的中文 AI 日报**。\n\n" +
   "## 原始素材\n" + ctx.reportBody + "\n" +
   (ctx.killedCount ? "\n## 被否决声明（不写入正文）\n" + ctx.refutedList : "") +
-  (ctx.unverifiedCount ? "\n## 未验证声明（核查代理故障，只能进"待核实"小节）\n" + ctx.unverifiedList : "") +
+  (ctx.unverifiedCount ? "\n## 未验证声明（核查代理故障，只能进“待核实”小节）\n" + ctx.unverifiedList : "") +
   ctx.missBlock +
   "\n## 覆盖自检\n" + ctx.coverBlock + "\n\n## 编辑要求\n" +
   "0. **禁止调用任何工具**（禁 WebFetch、WebSearch、Read、curl 及一切工具调用）——只做纯推理合成；一旦发起工具调用即视为失败。\n\n" +
