@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { renderMarkdown, renderDegradedMarkdown } from '../render-md.mjs'
+import { computeBoardStates } from '../boards.mjs'
 
 const baseReport = {
   oneLiner: '今日 AI 行业一句话。',
@@ -53,6 +54,34 @@ test('完整版：windowMisses 存在时出窗口外参考节，否则不出', (
 test('完整版：degraded 标记进头行', () => {
   const md = renderMarkdown({ date: 'd', window: 'w', report: baseReport, coverage: [], windowMisses: [], degraded: ['fetch_budget_dropped:2', 'budget_skipped:Verify'] })
   assert.ok(md.includes('`fetch_budget_dropped:2`、`budget_skipped:Verify`'))
+})
+
+test('端到端：computeBoardStates 产出 → renderMarkdown 如实输出共享板降级', () => {
+  // 8/21 实况：media-cn 失败，media-en 兜底 strategy/funding/policy
+  const rows = [
+    { group: { key: 'labs' }, degraded: true },
+    { group: { key: 'opensource' }, degraded: false },
+    { group: { key: 'academic' }, degraded: false },
+    { group: { key: 'media-en' }, degraded: false },
+  ]
+  const keys = ['labs', 'strategy', 'products', 'opensource', 'academic', 'funding', 'policy', 'safety', 'people']
+  const states = computeBoardStates(rows, keys)
+  const coverage = keys.map(board => ({
+    board, title: board, claims: 0, urls: 0, degraded: states.get(board).degraded,
+  }))
+  const md = renderMarkdown({ date: 'd', window: 'w', report: baseReport, coverage, windowMisses: [], degraded: [] })
+  // 逐板行断言（render 输出 '- **<board>**：N claims / N sources [degraded]'）
+  const line = b => md.split('\n').find(l => l.includes('- **' + b + '**')) || ''
+  // 失败组覆盖的板（含 media-en 兜底的）都应有 [degraded]
+  for (const b of ['strategy', 'funding', 'policy', 'safety', 'people']) {
+    assert.ok(line(b).includes('`[degraded]`'), `板 ${b} 应标 [degraded]，行：${line(b)}`)
+  }
+  // media-en 正常覆盖的板不标（labs 自报通道降级例外保留）
+  for (const b of ['products', 'opensource', 'academic']) {
+    assert.ok(!line(b).includes('`[degraded]`'), `板 ${b} 不应标 [degraded]，行：${line(b)}`)
+  }
+  // labs（自报通道降级）保留
+  assert.ok(line('labs').includes('`[degraded]`'), 'labs 通道降级保留')
 })
 
 test('降级版：标注降级原因 + 窗口内/major-out/refuted 分节', () => {

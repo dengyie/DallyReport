@@ -415,17 +415,24 @@ for (const s of sources) { s.claims.forEach(c => boardClaimCount.set(c.board, (b
 // labs 板块的公司三态由发现代理回报的 noNews 派生（其余公司视为"有动态或已达"）。
 const noNewsSet = new Set()
 for (const d of discoverRows) (d.noNews || []).forEach(k => noNewsSet.add(k))
-// 分组发现失败判据：板块归属的发现组整体无返回才标 fail（组内个别板无内容不惩罚组内其他板）。
-const failedBoardKeys = new Set(boards.map(b => b.key).filter(k => !discoverRows.some(d => d.boards.includes(k))))
-const coverage = boards.map(b => ({
-  board: b.key, title: b.title,
-  claims: boardClaimCount.get(b.key) || 0,
-  urls: sources.filter(s => s.board === b.key).length,
-  companiesChecked: b.companies ? b.companies.map(c => failedBoardKeys.has(b.key)
-    ? { name: c.name, state: 'unreached', evidence: 'no_discover_agent' }
-    : { name: c.name, state: noNewsSet.has(c.name) ? 'no_news' : 'has_dynamic', evidence: 'labs' }) : null,
-  degraded: discoverRows.some(d => d.boards.includes(b.key) && d.degraded) || failedBoardKeys.has(b.key),
-}))
+// 分组发现失败判据（8/22 修复）：一个板只要「任一归属组失败（无返回）或返回的组自报 degraded」即 marked DE。
+// 由 boards.mjs 的 computeBoardStates 统一计算——策略/融资/政策/安全/人 同属 media-en/media-cn 覆盖，同一失败组
+// 不再只把独占板标红（safety/people），而是全部标记，避免"同组共享板静默 0 claims"（8/21 bug）。
+const boardStates = computeBoardStates(discoverRows, boards.map(b => b.key))
+const missingBoardKeys = [...boardStates].filter(([, s]) => s.missing).map(([k]) => k)
+const coverage = boards.map(b => {
+  const st = boardStates.get(b.key) || { degraded: false, missing: false }
+  return {
+    board: b.key, title: b.title,
+    claims: boardClaimCount.get(b.key) || 0,
+    urls: sources.filter(s => s.board === b.key).length,
+    // 公司三态：板被按组标 fail（missing 且通常无 discover）→ 全 unreached；否则按 noNews 派生。
+    companiesChecked: b.companies ? b.companies.map(c => st.missing
+      ? { name: c.name, state: 'unreached', evidence: 'no_discover_agent' }
+      : { name: c.name, state: noNewsSet.has(c.name) ? 'no_news' : 'has_dynamic', evidence: 'labs' }) : null,
+    degraded: st.degraded,   // 板级降级（任一组失败 或 有返回但自报降级 → 通道降级保留）
+  }
+})
 
 // ─── labs 花名册跨板块校正：发现代理可能过报 no_news。
 // 任一已确认窗口内声明/来源标题命中公司别名 → 翻转为 has_dynamic（report_match）───
@@ -486,7 +493,8 @@ const report = synthAllowed ? await safeAgent(reportPrompt({
 const degradedFlags = []
 if (toolError > 0) degradedFlags.push('verify_agent_errors:' + toolError)
 if (budgetDropped.length > 0) degradedFlags.push('fetch_budget_dropped:' + budgetDropped.length)
-if (discoverRows.some(d => d.degraded) || failedBoardKeys.size > 0) degradedFlags.push('discovery_degraded' + (failedBoardKeys.size ? ':missing_' + [...failedBoardKeys].join('+') : ''))
+if (missingBoardKeys.length > 0) degradedFlags.push('discovery_degraded:missing_' + missingBoardKeys.join('+'))
+else if (discoverRows.some(d => d.degraded)) degradedFlags.push('discovery_degraded')
 if (budgetSkipped.length > 0) degradedFlags.push('budget_skipped:' + budgetSkipped.join('+'))
 const reportErr = report ? null : 'report agent failed; reverting to raw archive'
 if (reportErr) degradedFlags.push('report_failed')

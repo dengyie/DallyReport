@@ -300,7 +300,44 @@ const DISCOVER_GROUPS_ALL = [
     feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.theverge.com/ai-artificial-intelligence/', 'https://www.qbitai.com/'], xBudget: 4 },
 ]
 
-// normURL 在 date-utils.mjs；boards.mjs 的 GROUPS_RAW.test 闭包需要它，这里前向声明由 build.mjs inline 时保证顺序。
+// ─── 板级降级判定（按板归属组统一，8/22 修复）───
+// 背景 bug（8/21 全量实测）：media-cn 组失败（disc:media-cn null → DISCOVER-FAIL）时，
+//   只有 media-cn 独占的 safety/people 被判 failed（missing_*），而同样被 media-cn 覆盖、
+//   但有 media-en 兜底的 strategy/funding/policy 既不被标 missing 也不被标 [degraded]——同一失败组共享板全静默。
+// 修复：板 degraded = 任一归属组失败（无返回）或 返回的组自报 degraded；
+//       板 missing   = 所有归属组全部无返回（无任何发现覆盖）。
+//   media-cn 失败 → strategy/funding/policy/safety/people 全 degraded；missing 只留 safety/people。
+
+// 板 → 归属组 key 集（从 DISCOVER_GROUPS_ALL 反向建立；单板组/独立组也是一组）
+const groupKeyByBoard = new Map()
+for (const g of DISCOVER_GROUPS_ALL) for (const b of g.boards) {
+  if (!groupKeyByBoard.has(b)) groupKeyByBoard.set(b, new Set())
+  groupKeyByBoard.get(b).add(g.key)
+}
+
+/**
+ * 计算每个选中板的降级状态（纯函数，供覆盖自检/降级上报）。
+ * @param {Array<{group:{key:string}, degraded?:boolean}>} rows 发现组返回行（safeAgent.then 产物；失败组无行）
+ * @param {string[]} boardKeys 参与判定的板块 key 列表（通常 = boards.map(b=>b.key)，冒烟可子集）
+ * @returns {Map<string,{degraded:boolean, missing:boolean}>}
+ */
+const computeBoardStates = (rows, boardKeys) => {
+  const returnedGroups = new Set((rows || []).map(r => r?.group?.key).filter(Boolean))
+  const degradedGroups = new Set((rows || []).filter(r => r?.degraded).map(r => r.group.key))
+  const m = new Map()
+  for (const key of boardKeys) {
+    const groups = groupKeyByBoard.get(key) || new Set()
+    const anyReturned = [...groups].some(g => returnedGroups.has(g))
+    const anyFailedGroup = [...groups].some(g => !returnedGroups.has(g))
+    const anyDegradedGroup = [...groups].some(g => degradedGroups.has(g))
+    const missing = groups.size > 0 && !anyReturned            // 所有归属组全部失败
+    const degraded = anyFailedGroup || anyDegradedGroup          // 任一组失败 或 任一返回组自降级
+    m.set(key, { degraded, missing })
+  }
+  return m
+}
+
+// normURL 在 date-utils.mjs；boards.mjs 的 GROUPS_RAW.test 闭包需要它，这里前向声明由 build.mjs 整时保证顺序。
 // 直接 import 供 node 环境用；build.mjs inline 时剥掉 import 行（workflow 内 normURL 已在上文定义）。
 // ─── inline: dedup ───
 // ai-daily 指纹去重 + 轮询公平分配 — 三个历史 bug 在此固化（测试锁定）。
@@ -912,17 +949,24 @@ for (const s of sources) { s.claims.forEach(c => boardClaimCount.set(c.board, (b
 // labs 板块的公司三态由发现代理回报的 noNews 派生（其余公司视为"有动态或已达"）。
 const noNewsSet = new Set()
 for (const d of discoverRows) (d.noNews || []).forEach(k => noNewsSet.add(k))
-// 分组发现失败判据：板块归属的发现组整体无返回才标 fail（组内个别板无内容不惩罚组内其他板）。
-const failedBoardKeys = new Set(boards.map(b => b.key).filter(k => !discoverRows.some(d => d.boards.includes(k))))
-const coverage = boards.map(b => ({
-  board: b.key, title: b.title,
-  claims: boardClaimCount.get(b.key) || 0,
-  urls: sources.filter(s => s.board === b.key).length,
-  companiesChecked: b.companies ? b.companies.map(c => failedBoardKeys.has(b.key)
-    ? { name: c.name, state: 'unreached', evidence: 'no_discover_agent' }
-    : { name: c.name, state: noNewsSet.has(c.name) ? 'no_news' : 'has_dynamic', evidence: 'labs' }) : null,
-  degraded: discoverRows.some(d => d.boards.includes(b.key) && d.degraded) || failedBoardKeys.has(b.key),
-}))
+// 分组发现失败判据（8/22 修复）：一个板只要「任一归属组失败（无返回）或返回的组自报 degraded」即 marked DE。
+// 由 boards.mjs 的 computeBoardStates 统一计算——策略/融资/政策/安全/人 同属 media-en/media-cn 覆盖，同一失败组
+// 不再只把独占板标红（safety/people），而是全部标记，避免"同组共享板静默 0 claims"（8/21 bug）。
+const boardStates = computeBoardStates(discoverRows, boards.map(b => b.key))
+const missingBoardKeys = [...boardStates].filter(([, s]) => s.missing).map(([k]) => k)
+const coverage = boards.map(b => {
+  const st = boardStates.get(b.key) || { degraded: false, missing: false }
+  return {
+    board: b.key, title: b.title,
+    claims: boardClaimCount.get(b.key) || 0,
+    urls: sources.filter(s => s.board === b.key).length,
+    // 公司三态：板被按组标 fail（missing 且通常无 discover）→ 全 unreached；否则按 noNews 派生。
+    companiesChecked: b.companies ? b.companies.map(c => st.missing
+      ? { name: c.name, state: 'unreached', evidence: 'no_discover_agent' }
+      : { name: c.name, state: noNewsSet.has(c.name) ? 'no_news' : 'has_dynamic', evidence: 'labs' }) : null,
+    degraded: st.degraded,   // 板级降级（任一组失败 或 有返回但自报降级 → 通道降级保留）
+  }
+})
 
 // ─── labs 花名册跨板块校正：发现代理可能过报 no_news。
 // 任一已确认窗口内声明/来源标题命中公司别名 → 翻转为 has_dynamic（report_match）───
@@ -983,7 +1027,8 @@ const report = synthAllowed ? await safeAgent(reportPrompt({
 const degradedFlags = []
 if (toolError > 0) degradedFlags.push('verify_agent_errors:' + toolError)
 if (budgetDropped.length > 0) degradedFlags.push('fetch_budget_dropped:' + budgetDropped.length)
-if (discoverRows.some(d => d.degraded) || failedBoardKeys.size > 0) degradedFlags.push('discovery_degraded' + (failedBoardKeys.size ? ':missing_' + [...failedBoardKeys].join('+') : ''))
+if (missingBoardKeys.length > 0) degradedFlags.push('discovery_degraded:missing_' + missingBoardKeys.join('+'))
+else if (discoverRows.some(d => d.degraded)) degradedFlags.push('discovery_degraded')
 if (budgetSkipped.length > 0) degradedFlags.push('budget_skipped:' + budgetSkipped.join('+'))
 const reportErr = report ? null : 'report agent failed; reverting to raw archive'
 if (reportErr) degradedFlags.push('report_failed')

@@ -87,6 +87,43 @@ export const DISCOVER_GROUPS_ALL = [
     feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.theverge.com/ai-artificial-intelligence/', 'https://www.qbitai.com/'], xBudget: 4 },
 ]
 
-// normURL 在 date-utils.mjs；boards.mjs 的 GROUPS_RAW.test 闭包需要它，这里前向声明由 build.mjs inline 时保证顺序。
+// ─── 板级降级判定（按板归属组统一，8/22 修复）───
+// 背景 bug（8/21 全量实测）：media-cn 组失败（disc:media-cn null → DISCOVER-FAIL）时，
+//   只有 media-cn 独占的 safety/people 被判 failed（missing_*），而同样被 media-cn 覆盖、
+//   但有 media-en 兜底的 strategy/funding/policy 既不被标 missing 也不被标 [degraded]——同一失败组共享板全静默。
+// 修复：板 degraded = 任一归属组失败（无返回）或 返回的组自报 degraded；
+//       板 missing   = 所有归属组全部无返回（无任何发现覆盖）。
+//   media-cn 失败 → strategy/funding/policy/safety/people 全 degraded；missing 只留 safety/people。
+
+// 板 → 归属组 key 集（从 DISCOVER_GROUPS_ALL 反向建立；单板组/独立组也是一组）
+const groupKeyByBoard = new Map()
+for (const g of DISCOVER_GROUPS_ALL) for (const b of g.boards) {
+  if (!groupKeyByBoard.has(b)) groupKeyByBoard.set(b, new Set())
+  groupKeyByBoard.get(b).add(g.key)
+}
+
+/**
+ * 计算每个选中板的降级状态（纯函数，供覆盖自检/降级上报）。
+ * @param {Array<{group:{key:string}, degraded?:boolean}>} rows 发现组返回行（safeAgent.then 产物；失败组无行）
+ * @param {string[]} boardKeys 参与判定的板块 key 列表（通常 = boards.map(b=>b.key)，冒烟可子集）
+ * @returns {Map<string,{degraded:boolean, missing:boolean}>}
+ */
+export const computeBoardStates = (rows, boardKeys) => {
+  const returnedGroups = new Set((rows || []).map(r => r?.group?.key).filter(Boolean))
+  const degradedGroups = new Set((rows || []).filter(r => r?.degraded).map(r => r.group.key))
+  const m = new Map()
+  for (const key of boardKeys) {
+    const groups = groupKeyByBoard.get(key) || new Set()
+    const anyReturned = [...groups].some(g => returnedGroups.has(g))
+    const anyFailedGroup = [...groups].some(g => !returnedGroups.has(g))
+    const anyDegradedGroup = [...groups].some(g => degradedGroups.has(g))
+    const missing = groups.size > 0 && !anyReturned            // 所有归属组全部失败
+    const degraded = anyFailedGroup || anyDegradedGroup          // 任一组失败 或 任一返回组自降级
+    m.set(key, { degraded, missing })
+  }
+  return m
+}
+
+// normURL 在 date-utils.mjs；boards.mjs 的 GROUPS_RAW.test 闭包需要它，这里前向声明由 build.mjs 整时保证顺序。
 // 直接 import 供 node 环境用；build.mjs inline 时剥掉 import 行（workflow 内 normURL 已在上文定义）。
 import { normURL } from './date-utils.mjs'
