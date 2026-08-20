@@ -29,4 +29,26 @@ export const makeClaimWindow = (WIN_FROM, WIN_TO) => c => {
   return cands.every(x => x >= WIN_FROM && x <= WIN_TO) ? 'in' : 'out'
 }
 
+// 日历天数差（reportDay − seedDay；正=seed 早于 report）。YYYYMMDD 数值→天数。
+// 纯算术、无 Date.now()/new Date()——Workflow realm 安全（realm 禁 Date）。
+export const daysBetween = (seedDayNum, reportDayNum) => {
+  const isLeap = y => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0
+  const dom = (y, m) => [31, isLeap(y) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1]
+  const dayNum = (y, m, d) => { let n = 0; for (let Y = 1970; Y < y; Y++) n += isLeap(Y) ? 366 : 365; for (let M = 1; M < m; M++) n += dom(y, M); return n + d }
+  const p = n => ({ y: Math.floor(n / 10000), m: Math.floor(n / 100) % 100, d: n % 100 })
+  const a = p(seedDayNum), b = p(reportDayNum)
+  return dayNum(b.y, b.m, b.d) - dayNum(a.y, a.m, a.d)
+}
+
+// age gate：种子距 report 超 maxAgeDays，或日期不可解析（normalizeDate→null）→ 剔除。
+// fail-open：reportDateNum == null（未知）返回原数组，不因 gate 清空 major-out 节。
+export const filterSeedsByAge = (seeds, reportDayNum, maxAgeDays) => {
+  if (reportDayNum == null) return seeds
+  return seeds.filter(s => {
+    const day = normalizeDate(s.date)
+    if (day == null) return false            // 无日期 → 超期剔除（调用方 SEED-AGE 日志可见）
+    return daysBetween(day, reportDayNum) <= maxAgeDays
+  })
+}
+
 export const chunkArr = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out }

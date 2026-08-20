@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeDate, makeClaimWindow, normURL, hostOf, chunkArr, pad2 } from '../date-utils.mjs'
+import { normalizeDate, makeClaimWindow, normURL, hostOf, chunkArr, pad2, daysBetween, filterSeedsByAge } from '../date-utils.mjs'
 
 test('normalizeDate ISO 与变体', () => {
   assert.equal(normalizeDate('2026-08-17'), 20260817)
@@ -62,4 +62,27 @@ test('chunkArr 分批', () => {
 test('pad2', () => {
   assert.equal(pad2(7), '07')
   assert.equal(pad2(12), '12')
+})
+
+test('daysBetween：基础差/同日/闰年/非闰年/跨年/负差', () => {
+  assert.equal(daysBetween(20260731, 20260820), 20)
+  assert.equal(daysBetween(20260820, 20260820), 0)
+  assert.equal(daysBetween(20200229, 20200301), 1)              // 闰年 2020
+  assert.equal(daysBetween(20200228, 20200301), 2)
+  assert.equal(daysBetween(20210228, 20210301), 1)              // 非闰年 2021
+  assert.equal(daysBetween(20210227, 20210301), 2)
+  assert.equal(daysBetween(20251231, 20260101), 1)              // 跨年
+  assert.equal(daysBetween(20260821, 20260820), -1)             // seed 在 report 之后
+})
+
+test('filterSeedsByAge：≤阈保留/超阈滤除/无日期滤除/fail-open 全保留', () => {
+  const seeds = [
+    { name: 'fresh', date: '2026-08-19' },   // 距 20260820 = 1
+    { name: 'at-21', date: '2026-07-30' },   // 距 21（含）
+    { name: 'over-1', date: '2026-07-29' },  // 距 22
+    { name: 'none', date: '' },              // normalizeDate→null
+  ]
+  assert.deepEqual(filterSeedsByAge(seeds, 20260820, 21).map(s => s.name), ['fresh', 'at-21'])
+  assert.deepEqual(filterSeedsByAge(seeds, null, 21).map(s => s.name), seeds.map(s => s.name)) // fail-open
+  assert.equal(seeds.length, 4)  // 不改原数组
 })

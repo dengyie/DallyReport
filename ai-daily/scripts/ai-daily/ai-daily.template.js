@@ -400,7 +400,12 @@ const majorOutClaims = []
 const _addMajor = makeAddMajor(majorOutClaims)
 for (const d of discoverRows) for (const m of (d.majorOutOfWindow || [])) if (m && m.name) _addMajor(m, d.boards[0])
 // 种子 KNOWN_MAJOR_OUT 作为保底（未被发现代理上报的补上）
-for (const m of KNOWN_MAJOR_OUT) _addMajor(m, 'labs')
+const REPORT_DAY = normalizeDate(DATE)
+const MAX_SEED_AGE_DAYS = 21
+const freshSeeds = filterSeedsByAge(KNOWN_MAJOR_OUT, REPORT_DAY, MAX_SEED_AGE_DAYS)
+const agedOut = KNOWN_MAJOR_OUT.length - freshSeeds.length
+for (const m of freshSeeds) _addMajor(m, 'labs')
+log('SEED-AGE: 注入 ' + freshSeeds.length + ' / ' + KNOWN_MAJOR_OUT.length + ' 种子（' + agedOut + ' 超期退役，阈值 ' + MAX_SEED_AGE_DAYS + 'd）' + (REPORT_DAY == null ? ' · REPORT_DAY unknown → fail-open 全注入' : ''))
 confirmed.push(...majorOutClaims)
 log('majorOut: ' + majorOutClaims.length + ' industry milestones injected into confirmed')
 

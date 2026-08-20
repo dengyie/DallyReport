@@ -113,6 +113,28 @@ const makeClaimWindow = (WIN_FROM, WIN_TO) => c => {
   return cands.every(x => x >= WIN_FROM && x <= WIN_TO) ? 'in' : 'out'
 }
 
+// 日历天数差（reportDay − seedDay；正=seed 早于 report）。YYYYMMDD 数值→天数。
+// 纯算术、无 Date.now()/new Date()——Workflow realm 安全（realm 禁 Date）。
+const daysBetween = (seedDayNum, reportDayNum) => {
+  const isLeap = y => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0
+  const dom = (y, m) => [31, isLeap(y) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1]
+  const dayNum = (y, m, d) => { let n = 0; for (let Y = 1970; Y < y; Y++) n += isLeap(Y) ? 366 : 365; for (let M = 1; M < m; M++) n += dom(y, M); return n + d }
+  const p = n => ({ y: Math.floor(n / 10000), m: Math.floor(n / 100) % 100, d: n % 100 })
+  const a = p(seedDayNum), b = p(reportDayNum)
+  return dayNum(b.y, b.m, b.d) - dayNum(a.y, a.m, a.d)
+}
+
+// age gate：种子距 report 超 maxAgeDays，或日期不可解析（normalizeDate→null）→ 剔除。
+// fail-open：reportDateNum == null（未知）返回原数组，不因 gate 清空 major-out 节。
+const filterSeedsByAge = (seeds, reportDayNum, maxAgeDays) => {
+  if (reportDayNum == null) return seeds
+  return seeds.filter(s => {
+    const day = normalizeDate(s.date)
+    if (day == null) return false            // 无日期 → 超期剔除（调用方 SEED-AGE 日志可见）
+    return daysBetween(day, reportDayNum) <= maxAgeDays
+  })
+}
+
 const chunkArr = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out }
 // ─── inline: schemas ───
 // ai-daily schemas — 与 workflow 内逐字节一致（WRITE_RESULT_SCHEMA 已随 mdWriter 代理删除）。
@@ -242,8 +264,8 @@ const OFFICIAL_FEEDS = [
 // 发现代理通过 majorOutOfWindow 字段上报更多此类事实。
 const KNOWN_MAJOR_OUT = [
   { name: 'DeepSeek V4 Pro / V4 Flash 开源', date: '2026-07-31', note: 'MIT 协议开源，参数规模全球最大开源模型之一，社区广泛采用。' },
-  { name: 'DeepSeek Harness 团队组建', date: '2026-07', note: 'DeepSeek 组建 Harness 团队，构建对标 Claude Code 的 agent 包装层（Model+Harness=Agent），桌面 agent 开发中。' },
-  { name: 'Grok 4.6 发布', date: '2026-07下旬', note: 'xAI 发布 Grok 4.6 旗舰模型，客观事实（发布日期以 xAI 官方为准，此处为近似）。' },
+  { name: 'DeepSeek Harness 团队组建', date: '2026-07-01', note: 'DeepSeek 组建 Harness 团队，构建对标 Claude Code 的 agent 包装层（Model+Harness=Agent），桌面 agent 开发中。' },
+  { name: 'Grok 4.6 发布', date: '2026-07-21', note: 'xAI 发布 Grok 4.6 旗舰模型，客观事实（发布日期以 xAI 官方为准，此处为近似）。' },
 ]
 
 // labs 花名册跨板块校正别名表：发现代理可能过报 no_news，已确认声明/来源标题命中别名即翻转 has_dynamic。
@@ -876,7 +898,12 @@ const majorOutClaims = []
 const _addMajor = makeAddMajor(majorOutClaims)
 for (const d of discoverRows) for (const m of (d.majorOutOfWindow || [])) if (m && m.name) _addMajor(m, d.boards[0])
 // 种子 KNOWN_MAJOR_OUT 作为保底（未被发现代理上报的补上）
-for (const m of KNOWN_MAJOR_OUT) _addMajor(m, 'labs')
+const REPORT_DAY = normalizeDate(DATE)
+const MAX_SEED_AGE_DAYS = 21
+const freshSeeds = filterSeedsByAge(KNOWN_MAJOR_OUT, REPORT_DAY, MAX_SEED_AGE_DAYS)
+const agedOut = KNOWN_MAJOR_OUT.length - freshSeeds.length
+for (const m of freshSeeds) _addMajor(m, 'labs')
+log('SEED-AGE: 注入 ' + freshSeeds.length + ' / ' + KNOWN_MAJOR_OUT.length + ' 种子（' + agedOut + ' 超期退役，阈值 ' + MAX_SEED_AGE_DAYS + 'd）' + (REPORT_DAY == null ? ' · REPORT_DAY unknown → fail-open 全注入' : ''))
 confirmed.push(...majorOutClaims)
 log('majorOut: ' + majorOutClaims.length + ' industry milestones injected into confirmed')
 
