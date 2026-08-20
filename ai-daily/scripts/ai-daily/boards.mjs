@@ -50,9 +50,7 @@ export const OFFICIAL_FEEDS = [
 // 种子"重大超窗事实"（行业里程碑级公认事件，即使不在窗口也应出现在正文，标注 [窗口外·重大]）：
 // 发现代理通过 majorOutOfWindow 字段上报更多此类事实。
 export const KNOWN_MAJOR_OUT = [
-  { name: 'DeepSeek V4 Pro / V4 Flash 开源', date: '2026-07-31', note: 'MIT 协议开源，参数规模全球最大开源模型之一，社区广泛采用。' },
-  { name: 'DeepSeek Harness 团队组建', date: '2026-07-01', note: 'DeepSeek 组建 Harness 团队，构建对标 Claude Code 的 agent 包装层（Model+Harness=Agent），桌面 agent 开发中。' },
-  { name: 'Grok 4.6 发布', date: '2026-07-21', note: 'xAI 发布 Grok 4.6 旗舰模型，客观事实（发布日期以 xAI 官方为准，此处为近似）。' },
+  { name: 'OpenAI 预告 Astra 旗舰模型（解决 10 个长期开放数学难题）', date: '2026-08-02', note: 'OpenAI 公开预告下一个旗舰模型 Astra，宣称已解决 10 个长期开放数学难题，具体发布日期待官方确认（来源：多家媒体 2026-08-02，日期为预告日）。' },
 ]
 
 // labs 花名册跨板块校正别名表：发现代理可能过报 no_news，已确认声明/来源标题命中别名即翻转 has_dynamic。
