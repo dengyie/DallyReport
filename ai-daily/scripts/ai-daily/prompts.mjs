@@ -60,13 +60,24 @@ export const verifyPrompt = (c, ctx) =>
   '1. 引语是**逐字抄录的完整支撑句**（契约要求覆盖声明全部细节——日期/数字/机构/对比）。声明中的细节凡能在引语中逐字溯源即视为被支撑；仅当声明断言明显超出引语范围（引语只谈 X 却断言 Y）才算过度引申。引语不是全文≠证据不足，勿因引语未铺陈全背景而否决。\n2. 时效：**窗口为 [' + (ctx.WFROM || ctx.DATE) + ', ' + (ctx.WTO || ctx.DATE) + ']**。事件/发布日期明显在窗口外（数天前/数周前/上月）→ refuted=true；页面日期在窗口内但内容陈述的是旧事件，按**事件实际发生日**判定，日期明确超窗仍 → refuted=true；无法判定日期则不因时效否决。\n3. 来源质量与声明强度是否匹配？（惊人声明需一手源）\n4. 是否营销话术/吹嘘/标题党/论坛猜测？（→ refuted=true）\n\n5. **禁止使用 WebSearch/WebFetch 等外部搜索工具**——本核查只依据上面给出的引语/来源/日期/声明做内部一致性判断，外部搜索会烧掉大量 token。\n\n默认 refuted=true，除非证据充分支撑。\n\nStructured output only. Evidence 简短具体（≤80 字）。'
 
 // reportPrompt 需要编排层预拼的 reportBody/refutedList/unverifiedList/missBlock/coverBlock 与统计数，经 ctx 传入。
-export const reportPrompt = ctx =>
-  '## 日报终稿合成\n\n窗口：' + ctx.WINDOW_LABEL + '。生成中文 AI 日报。' + ctx.confirmedVerifyCount + ' 条声明通过对抗核查（首查双票、分歧升补 1 票，≥' + ctx.REFUTATIONS_REQUIRED + ' 票否决即 kill，语义不变），另有 ' + ctx.majorOutCount + ' 条行业公认重大事实（[窗口外·重大]，非窗口内、未经投票，但可入正文）。\n\n' +
-  '## 已确认声明\n' + ctx.reportBody + '\n' +
-  (ctx.killedCount ? '\n## 被否决声明（供透明参考，不得写入正文）\n' + ctx.refutedList : '') +
-  (ctx.unverifiedCount ? '\n## 未验证声明（核查代理故障，只能进“待核实”小节）\n' + ctx.unverifiedList : '') +
+ ctx =>
+  "## 日报终稿 —— 新闻编辑简报\n\n窗口：" + ctx.WINDOW_LABEL + "。下面是一篇 AI 日报的原始素材：" + ctx.confirmedVerifyCount + " 条已核查声明（对抗式 2+1 票验证），" + ctx.majorOutCount + " 条行业公认重大事实（[窗口外·重大]，超窗未投票但可入正文）。\n\n" +
+  "你的任务：把它们写成一篇**真正可读的中文 AI 日报**。\n\n" +
+  "## 原始素材\n" + ctx.reportBody + "\n" +
+  (ctx.killedCount ? "\n## 被否决声明（不写入正文）\n" + ctx.refutedList : "") +
+  (ctx.unverifiedCount ? "\n## 未验证声明（核查代理故障，只能进"待核实"小节）\n" + ctx.unverifiedList : "") +
   ctx.missBlock +
-  '\n## 覆盖自检\n' + ctx.coverBlock + '\n\n## 要求\n' +
-  '0. **禁止调用任何工具**（禁 WebFetch、WebSearch、Read、curl 及一切工具调用）——本输入已含上游核查的全部结论与逐字引语，你只需**纯推理合成**；一旦发起任何工具调用即视为本次合成失败。\n1. 语义去重、合并——**跨板块重复内容只保留一处**（以更权威来源为准），其余删除；按板块组织成 sections（board/title/items）。\n2. 每条 item：title、summary(2-3句中文)、confidence(高/中/低 按多源与投票)、sources(URL数组)、vote。**title 前必须标注核查状态**：已核查 `[3-0✓]`、未核查 `[未核查]`、否决 `[否决✗]`、超窗重大 `[窗口外·重大]`。\n' +
-  '3. 头条与执行摘要 execSummary(3-5句) 与 oneLiner **只能基于已核查或 [窗口外·重大] 条目**；未核查条目一律放入”待核实”小节，不得混入头条；被否决条目不得写入正文。[窗口外·重大] 条目可出现在正文和执行摘要中，但须如实标注标签。\n' +
-  '4. caveats：注明弱来源、时间敏感、未核查项；openQuestions 2-4 个。\n5. 若存在窗口外参考（非重大超窗项），在日报末尾单列”## 📎 窗口外参考”一节如实引用。\n\nStructured output only.'
+  "\n## 覆盖自检\n" + ctx.coverBlock + "\n\n## 编辑要求\n" +
+  "0. **禁止调用任何工具**（禁 WebFetch、WebSearch、Read、curl 及一切工具调用）——只做纯推理合成；一旦发起工具调用即视为失败。\n\n" +
+  "1. **先筛选，再写稿**：通读全部素材，选出今天**真正值得报道的 2-3 条头条**（正式发布/官宣/大额融资/监管裁决/里程碑）。其余素材按板块归类，不重要的（小更新/营销话术/旧闻重复）**直接 discard 不进正文**。宁缺毋滥。\n\n" +
+  "2. **oneLiner（今日一句话）**：用一句话概括今天 AI 行业最重要的事——像新闻快讯标题，不是笼统总结。\n\n" +
+  "3. **execSummary（执行摘要）**：3-5 句，按重要性排序，写成一个连贯段落（不是分点列项）。每句对应一条重要新闻，写清楚谁做了什么+结果。\n\n" +
+  "4. **sections / items**：\n" +
+  "   - title：**新闻式标题**（≤25字，主语+动词+结果/数字，例：Stripe $7.5B 收购 OpenRouter）。**不要前置 [窗口外·重大]/[2-0✓] 等标签**，不要长从句，不要括号解释。\n" +
+  "   - summary：**一段新闻正文**（2-3 句），写清楚发生了什么、为什么重要，不是重复 title。\n" +
+  "   - status：核查状态，取值为 已核查 2-0 / 已核查 2-1 / [窗口外·重大] / 未核查 / 已否决（render 会在标题后加徽标）\n" +
+  "   - 多个 sources 时只保留最权威的 1-2 个 URL。\n\n" +
+  "5. **板块组织**：不要机械按来源分板。如果某板块今天无重要新闻，该板块可以不出现在正文（但保留 coverage 自检）。重磅新闻放在最靠前的板块下。\n\n" +
+  "6. **caveats**：注明弱来源/厂商口径/时间敏感。openQuestions 2-4 个。\n\n" +
+  "7. 如果素材大部分是超窗重大项（major-out）而窗口内几乎为空，则 oneLiner 和 execSummary 如实反映这一情况，优先报道 major-out 中最重要的 1-2 条。\n\n" +
+  "Structured output only. 输出格式：{ sections, oneLiner, execSummary, caveats, openQuestions } 其中 sections 为 [{ board, title, items: [{ title, summary, confidence, sources, vote, status }] }]"

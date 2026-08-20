@@ -9,6 +9,8 @@ const baseReport = {
   sections: [
     { board: 'labs', title: '头部实验室·新模型', items: [
       { title: '[3-0✓] xAI 发布 Grok 4.6', summary: '要点两句。', confidence: 'high', sources: ['https://x.ai/news'], vote: '3-0✓' },
+      // 新 prompt 契约：精简陈述式 title（去前置状态标签，status 单独字段）
+      { title: 'Stripe $7.5B 收购 OpenRouter', summary: '支付巨头切入 AI 路由。', confidence: 'medium', sources: ['https://t.co'], vote: '2-1', status: '已核查 2-1' },
     ]},
     { board: 'strategy', title: '重磅头条·战略', items: [
       { title: '[窗口外·重大] DeepSeek V4 开源', summary: 'MIT 开源。', confidence: 'high', sources: ['(多源公认)'], vote: '—' },
@@ -35,6 +37,15 @@ test('完整版：标题/一句话/摘要/分节/局限/开放问题/覆盖自�
   assert.ok(md.includes('## ❓ 开放问题'))
   assert.ok(md.includes('## ✅ 覆盖自检'))
   assert.ok(md.includes('`[degraded]`'))  // strategy degraded 标注
+})
+
+test('完整版：精简陈述式 title 契约——前置状态标签不强制、status 字段可共存，render 原样展示', () => {
+  const md = renderMarkdown({ date: '2026-08-18', window: 'w', report: baseReport, coverage: baseCoverage, windowMisses: [], degraded: [] })
+  // 新契约 title 不带前置 [xxx] 标签，以此为标题行直接出现
+  assert.ok(md.includes('Stripe $7.5B 收购 OpenRouter'), '精简 title 原样呈现')
+  // 旧式 title 仍兼容（不为兼容而吞信息）
+  assert.ok(md.includes('[3-0✓] xAI 发布 Grok 4.6'), '旧式 title 仍兼容保留')
+  assert.ok(md.includes('可信度 中'), '新 title 附可信度')
 })
 
 test('完整版：major-out 条目 vote — 原样呈现（不冒充投票）', () => {
@@ -84,7 +95,7 @@ test('端到端：computeBoardStates 产出 → renderMarkdown 如实输出共�
   assert.ok(line('labs').includes('`[degraded]`'), 'labs 通道降级保留')
 })
 
-test('降级版：标注降级原因 + 窗口内/major-out/refuted 分节', () => {
+test('降级版：标注降级原因 + 窗口内新闻/major-out/refuted 分节', () => {
   const md = renderDegradedMarkdown({
     date: '2026-08-18', window: '2026-08-16 ~ 2026-08-18',
     confirmed: [
@@ -95,12 +106,12 @@ test('降级版：标注降级原因 + 窗口内/major-out/refuted 分节', () =
     coverage: baseCoverage, windowMisses: [], degraded: ['report_failed'],
     noNewsCompanies: ['OpenAI', 'NVIDIA'], reportError: 'report agent failed; reverting to raw archive',
   })
-  assert.ok(md.includes('降级合成版'))
+  assert.ok(md.includes('降级快讯'))
   assert.ok(md.includes('report agent failed'))
-  assert.ok(md.includes('## 窗口内已核查（1 条'))
-  assert.ok(md.includes('✓ 投票 2-0'))
-  assert.ok(md.includes('[窗口外·重大] 行业里程碑注入（1 条'))
-  assert.ok(md.includes('~~被否决声明B~~ → 否决 0-2'))
+  assert.ok(md.includes('### 窗口内新闻（1 条'))
+  assert.ok(md.includes('`✓2-0`'))
+  assert.ok(md.includes('### 窗口外·行业里程碑（1 条'))
+  assert.ok(md.includes('~~被否决声明B~~ → 否决 `0-2`'))
   assert.ok(md.includes('无动态：OpenAI、NVIDIA'))
   assert.ok(md.includes('`report_failed`'))
 })
@@ -111,11 +122,11 @@ test('降级版：erroredCount>0 可见（观察项③在降级路径也不丢�
     confirmed: [{ claim: 'A', window: 'in', vote: '2-0', verifiedByVote: true, source: 'https://x/a', date: '2026-08-17', erroredCount: 1 }],
     refuted: [], coverage: [], windowMisses: [], degraded: [], noNewsCompanies: [],
   })
-  assert.ok(md.includes('⚠️1 票错误'))
+  assert.ok(md.includes('⚠️1 票异常'))
 })
 
 test('降级版：空数据不崩（边界）', () => {
   const md = renderDegradedMarkdown({ date: 'd', window: 'w', confirmed: [], refuted: [], coverage: [], windowMisses: [], degraded: [], noNewsCompanies: [] })
-  assert.ok(md.includes('窗口内已核查（0 条'))
+  assert.ok(md.includes('窗口内新闻（0 条'))
   assert.ok(md.includes('| 板块 | 标题 |'))
 })
