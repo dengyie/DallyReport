@@ -89,6 +89,7 @@ const WEB_BUDGET_PER = 2
 /* @inline: boards */
 /* @inline: dedup */
 /* @inline: budget */
+/* @inline: fallback */
 /* @inline: prompts */
 /* @inline: render-md */
 
@@ -304,25 +305,31 @@ for (const d of discoverRows) for (const u of d.urls) {
 // harvest 阶段已成功抓到 feed entries（arXiv API + direct 走通），这些 entries 本就是高置信候选。
 // 兜底：disc 失败的组，直接从 digestByKey 取窗口内 entries 补进 boardURLMap，不重跑代理（省墙钟、不烧 token）。
 // 仅对失败的组补，且只取非窗口外（claimWindow !== 'out'，含 in 与无日期 unknown——后者交 verify 把关）、有 url 的 entries。found_via 标 "harvest-fallback" 供核查溯源。
+//
+// 8/22 第二十项 CRITICAL-1 修复：合组（media-cn/media-en，g.boards.length>1）失败时，旧版把 board 置 null
+// → 下游 if(!u.board) continue 把兜底 entry 全丢弃，兜底对合组完全失效（恰是历史高发场景）。
+// 修复：board 按 digest feed.boards（feedMap 已按板订阅集记录）与 g.boards 求交派生，交集中每个板都补进
+// boardURLMap——allocateFetchBudget 跨板按 normURL 去重，同 URL 补多板只 fetch 一次，不重复抓取。
+// 空交集（冒烟子集 BOARDS_SELECTED：feed 订阅板被过滤掉）时跳过该 entry，不灌到首板制造错误归属。
+// 同时记 recoveredBoards：兜底救回的板在 computeBoardStates 里从 missing 降为 degraded（HIGH-2：兜底救回内容
+// 但「通道失败」如实降级保留，不再误标 missing/unreached 让 coverage 自检读成「该板 0 claim 无覆盖」）。
+//
+// 兜底构造逻辑抽为纯函数 buildFallback（fallback.mjs，build.mjs inline 在此），消除"测试复刻修复逻辑"的 forward-test
+// 缺陷——测试直调 buildFallback 断言真实行为，而非 grep 模板源码。
 const succeedGroupKeys = new Set(discoverRows.map(d => d.group.key))
 const failedGroups = DISCOVER_GROUPS.filter(g => !succeedGroupKeys.has(g.key))
+const recoveredBoards = new Set()
 if (failedGroups.length) {
-  const fallbackByUrl = []
+  // 预算每失败组的 srcUrls（合组走 g.feeds 硬编码源；单板组从 boards 订阅源派生，含 labs 官方源），挂到 g.srcUrls。
   for (const g of failedGroups) {
     const bds = g.boards.map(k => boards.find(b => b.key === k)).filter(Boolean)
-    const srcUrls = g.feeds ? g.feeds : bds.flatMap(b => (b.feeds || []).concat((b.companies || []).filter(c => c.feed).map(c => c.feed)).concat(b.key === 'labs' ? OFFICIAL_FEEDS.map(f => f.url) : []))
-    for (const su of [...new Set(srcUrls.map(normURL))]) {
-      const h = digestByKey.get(su)
-      if (!h || h.failed) continue
-      for (const e of (h.entries || [])) {
-        if (e && e.url && claimWindow({ date: e.date }) !== 'out') fallbackByUrl.push({ url: e.url, title: e.title || e.url, date: e.date, board: g.boards.length === 1 ? g.boards[0] : null, found_via: 'harvest-fallback' })
-      }
-    }
+    g.srcUrls = g.feeds ? g.feeds : bds.flatMap(b => (b.feeds || []).concat((b.companies || []).filter(c => c.feed).map(c => c.feed)).concat(b.key === 'labs' ? OFFICIAL_FEEDS.map(f => f.url) : []))
   }
+  const { fallbackByUrl, recoveredBoards: rb } = buildFallback(digestByKey, failedGroups, claimWindow, normURL)
+  for (const b of rb) recoveredBoards.add(b)
   if (fallbackByUrl.length) {
-    log('DISCOVER-FALLBACK ' + failedGroups.map(g => g.key).join('+') + ' → ' + fallbackByUrl.length + ' 条 harvest entries 补进（disc 失败兜底）')
+    log('DISCOVER-FALLBACK ' + failedGroups.map(g => g.key).join('+') + ' → ' + fallbackByUrl.length + ' 条 harvest entries 补进 ' + recoveredBoards.size + ' 板（disc 失败兜底；CRITICAL-1：合组 board 按 feed.boards∩g.boards 派生）')
     for (const u of fallbackByUrl) {
-      if (!u.board) continue
       if (!boardURLMap.has(u.board)) boardURLMap.set(u.board, [])
       boardURLMap.get(u.board).push(u)
     }
@@ -461,7 +468,7 @@ for (const d of discoverRows) (d.noNews || []).forEach(k => noNewsSet.add(k))
 // 分组发现失败判据（8/22 修复）：一个板只要「任一归属组失败（无返回）或返回的组自报 degraded」即 marked DE。
 // 由 boards.mjs 的 computeBoardStates 统一计算——策略/融资/政策/安全/人 同属 media-en/media-cn 覆盖，同一失败组
 // 不再只把独占板标红（safety/people），而是全部标记，避免"同组共享板静默 0 claims"（8/21 bug）。
-const boardStates = computeBoardStates(discoverRows, boards.map(b => b.key))
+const boardStates = computeBoardStates(discoverRows, boards.map(b => b.key), recoveredBoards)
 const missingBoardKeys = [...boardStates].filter(([, s]) => s.missing).map(([k]) => k)
 const coverage = boards.map(b => {
   const st = boardStates.get(b.key) || { degraded: false, missing: false }
@@ -470,10 +477,12 @@ const coverage = boards.map(b => {
     claims: boardClaimCount.get(b.key) || 0,
     urls: sources.filter(s => s.board === b.key).length,
     // 公司三态：板被按组标 fail（missing 且通常无 discover）→ 全 unreached；否则按 noNews 派生。
+    // 兜底救回的板（recovered）不标 missing → 不全 unreached，按 noNews 派生（与有返回一致）。
     companiesChecked: b.companies ? b.companies.map(c => st.missing
       ? { name: c.name, state: 'unreached', evidence: 'no_discover_agent' }
       : { name: c.name, state: noNewsSet.has(c.name) ? 'no_news' : 'has_dynamic', evidence: 'labs' }) : null,
     degraded: st.degraded,   // 板级降级（任一组失败 或 有返回但自报降级 → 通道降级保留）
+    recovered: !!st.recovered,  // 兜底救回（disc 失败但 harvest entries 补进）— 供覆盖自检/降级溯源
   }
 })
 
@@ -520,7 +529,7 @@ const reportBody = (confirmed.length ? confirmed.map((c, i) =>
   : '(无已确认声明)')
 const refutedList = killed.map(c => '- "' + c.claim + '" — ' + c.sourceUrl)
 const unverifiedList = unverified.map(c => '- "' + c.claim + '" — ' + c.sourceUrl)
-const coverBlock = coverage.map(c => '- ' + c.title + ': ' + c.claims + ' claims / ' + c.urls + ' sources' + (c.degraded ? ' [degraded]' : '') + (c.companiesChecked
+const coverBlock = coverage.map(c => '- ' + c.title + ': ' + c.claims + ' claims / ' + c.urls + ' sources' + (c.recovered ? ' [recovered]' : (c.degraded ? ' [degraded]' : '')) + (c.companiesChecked
   ? ' ; 公司覆盖(' + c.companiesChecked.length + '家): 有动态[' + c.companiesChecked.filter(x => x.state === 'has_dynamic').map(x => x.name).join('、') + '] 未发现动态[' + c.companiesChecked.filter(x => x.state === 'no_dynamic').map(x => x.name).join('、') + ']' + (c.companiesChecked.some(x => x.state === 'unreached') ? ' 未达[' + c.companiesChecked.filter(x => x.state === 'unreached').map(x => x.name).join('、') + ']' : '')
   : '')).join('\n')
 const missLines = windowMisses.map(w => '- ' + w.name + '（' + (w.date || '日期未知') + '）：' + w.note).join('\n')
@@ -538,6 +547,7 @@ if (toolError > 0) degradedFlags.push('verify_agent_errors:' + toolError)
 if (budgetDropped.length > 0) degradedFlags.push('fetch_budget_dropped:' + budgetDropped.length)
 if (missingBoardKeys.length > 0) degradedFlags.push('discovery_degraded:missing_' + missingBoardKeys.join('+'))
 else if (discoverRows.some(d => d.degraded)) degradedFlags.push('discovery_degraded')
+if (recoveredBoards.size > 0) degradedFlags.push('discovery_recovered:' + [...recoveredBoards].join('+'))
 if (budgetSkipped.length > 0) degradedFlags.push('budget_skipped:' + budgetSkipped.join('+'))
 const reportErr = report ? null : 'report agent failed; reverting to raw archive'
 if (reportErr) degradedFlags.push('report_failed')

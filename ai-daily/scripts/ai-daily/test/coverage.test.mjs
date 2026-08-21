@@ -82,3 +82,38 @@ test('子集板（冒烟）只输出传入子集', () => {
   assert.equal(st.get('strategy').missing, true, 'strategy 子集里 media-cn 失败 → missing')
   assert.equal(st.get('opensource').missing, false, 'opensource 正常')
 })
+
+// ─── 第二十项 HIGH-2：兜底救回的板不再标 missing，保留 degraded 通道降级 + recovered 溯源 ───
+// 8/22 修复：disc 失败但兜底已从 harvest entries 补 URL 的板，computeBoardStates 收到 recoveredKeys 后：
+//   missing:false（有覆盖，不再显示 unreached/无覆盖）、degraded:true（通道失败如实保留）、recovered:true（溯源）。
+test('兜底救回的板：missing 降为 false，degraded 保留 true，标 recovered', () => {
+  // 8/21 实况：media-cn 失败，safety/people 独占失败
+  const rows = rows821()
+  // 假设兜底救回了 safety（harvest 的 qbitai entry 补进 safety）
+  const st = computeBoardStates(rows, ALL_KEYS, ['safety'])
+  assert.equal(st.get('safety').missing, false, 'safety 被兜底救回 → 不再 missing')
+  assert.equal(st.get('safety').degraded, true, 'safety 通道仍失败 → degraded 保留')
+  assert.equal(st.get('safety').recovered, true, 'safety 标 recovered 供溯源')
+  // 未救回的独占板 people 仍 missing（兜底没补到）
+  assert.equal(st.get('people').missing, true, 'people 未被兜底救回 → 仍 missing')
+  assert.equal(st.get('people').recovered, undefined, 'people 无 recovered 标记')
+})
+
+test('recoveredKeys 为空时行为与无参数一致（向后兼容）', () => {
+  const rows = rows821()
+  const withoutArg = computeBoardStates(rows, ALL_KEYS)
+  const withEmpty = computeBoardStates(rows, ALL_KEYS, [])
+  for (const k of ALL_KEYS) {
+    assert.equal(withEmpty.get(k).missing, withoutArg.get(k).missing, k + ' missing 一致')
+    assert.equal(withEmpty.get(k).degraded, withoutArg.get(k).degraded, k + ' degraded 一致')
+    assert.equal(withEmpty.get(k).recovered, undefined, k + ' 无 recovered（无兜底）')
+  }
+})
+
+test('recovered 不影响完全成功的板（无失败组）', () => {
+  const rows = [grp('labs'), grp('opensource'), grp('academic'), grp('media-cn'), grp('media-en')]
+  const st = computeBoardStates(rows, ALL_KEYS, ['labs'])  // labs 本就成功，误传 recovered 不应打标记
+  assert.equal(st.get('labs').degraded, false, 'labs 成功 → 不 degraded')
+  assert.equal(st.get('labs').missing, false, 'labs 成功 → 不 missing')
+  assert.equal(st.get('labs').recovered, undefined, 'labs 无失败组 → recovered 不打标（仅在失败/降级路径上才标）')
+})

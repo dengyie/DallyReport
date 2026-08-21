@@ -106,20 +106,27 @@ for (const g of DISCOVER_GROUPS_ALL) for (const b of g.boards) {
  * 计算每个选中板的降级状态（纯函数，供覆盖自检/降级上报）。
  * @param {Array<{group:{key:string}, degraded?:boolean}>} rows 发现组返回行（safeAgent.then 产物；失败组无行）
  * @param {string[]} boardKeys 参与判定的板块 key 列表（通常 = boards.map(b=>b.key)，冒烟可子集）
- * @returns {Map<string,{degraded:boolean, missing:boolean}>}
+ * @param {Iterable<string>} [recoveredKeys] 兜底救回的板（disc 失败但 harvest entries 已补进 boardURLMap，8/22 第二十项）
+ * @returns {Map<string,{degraded:boolean, missing:boolean, recovered?:boolean}>}
  */
-export const computeBoardStates = (rows, boardKeys) => {
+export const computeBoardStates = (rows, boardKeys, recoveredKeys) => {
   const returnedGroups = new Set((rows || []).map(r => r?.group?.key).filter(Boolean))
   const degradedGroups = new Set((rows || []).filter(r => r?.degraded).map(r => r.group.key))
+  const recoveredSet = recoveredKeys ? new Set(recoveredKeys) : new Set()
   const m = new Map()
   for (const key of boardKeys) {
     const groups = groupKeyByBoard.get(key) || new Set()
     const anyReturned = [...groups].some(g => returnedGroups.has(g))
     const anyFailedGroup = [...groups].some(g => !returnedGroups.has(g))
     const anyDegradedGroup = [...groups].some(g => degradedGroups.has(g))
-    const missing = groups.size > 0 && !anyReturned            // 所有归属组全部失败
-    const degraded = anyFailedGroup || anyDegradedGroup          // 任一组失败 或 任一返回组自降级
-    m.set(key, { degraded, missing })
+    const inRecovery = recoveredSet.has(key)
+    // recovered 仅当该板确属失败/降级路径（有失败组 或 返回组自降级）才标——成功板误传 recoveredKeys 不打标记。
+    const recovered = inRecovery && (anyFailedGroup || anyDegradedGroup)
+    // missing = 所有归属组全部失败 且 未被兜底救回（兜底补了 URL 即有覆盖，不再标 missing/unreached）。
+    // degraded = 任一组失败 或 返回组自降级；兜底救回仍属「通道失败」→ 保留 degraded 供如实降级上报。
+    const missing = groups.size > 0 && !anyReturned && !inRecovery
+    const degraded = anyFailedGroup || anyDegradedGroup
+    m.set(key, { degraded, missing, ...(recovered ? { recovered: true } : {}) })
   }
   return m
 }

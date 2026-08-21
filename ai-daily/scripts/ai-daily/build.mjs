@@ -5,6 +5,7 @@
 // 用法：node scripts/ai-daily/build.mjs [--out <path>] [--check-only]
 // 护栏：①剥 export/import 后 inline；②产物 node --check；③占位符零残留断言。任一失败不出产物。
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -14,7 +15,7 @@ const TEMPLATE = path.join(HERE, 'ai-daily.template.js')
 const DEFAULT_OUT = path.resolve(HERE, '../../.claude/workflows/ai-daily.js')
 
 // inline 顺序即依赖序：date-utils 的 normURL 被 boards 的 GROUPS_RAW 闭包引用，必须在 boards 前。
-const MODULES = ['date-utils', 'schemas', 'boards', 'dedup', 'budget', 'prompts', 'render-md']
+const MODULES = ['date-utils', 'schemas', 'boards', 'dedup', 'budget', 'fallback', 'prompts', 'render-md']
 
 // 剥模块为可 inline 文本：去 import 行（依赖由顺序保证）、export 前缀、模块头注释。
 const stripModule = name => {
@@ -46,7 +47,12 @@ const main = () => {
   const outPath = outIdx >= 0 ? path.resolve(argv[outIdx + 1]) : DEFAULT_OUT
   const checkOnly = argv.includes('--check-only')
   const code = build()
-  const tmp = outPath + '.buildtmp.js'  // 以 .js 结尾：本仓库无 type:module，.js 走 CJS 模式，顶层 return/export 合法（与真产物同判定）
+  // 产物是混合语法：含 export（ESM 词法）+ 顶层 return（仅 CJS 合法）。严格 --check 两端都判 syntax error，
+  // 唯一能过的是"无 package.json 的 .js"——Node 走宽松 CJS、export 降级为 warning、return 合法 → exit 0。
+  // 但镜像仓库根 package.json 是 "type":"module"，产物旁写 .js 会继承 ESM → 顶层 return 判 illegal → build 崩。
+  // 解法：tmp 写 os.tmpdir()（系统临时目录，无 package.json 干扰）+ .js 后缀，两端都 CJS 宽松判定；check 过再写回 outPath。
+  // 2026-08-22 第二十项同步时镜像 build 崩即此因（旧版 tmp=outPath+'.buildtmp.js' 继承了镜像 type:module）。
+  const tmp = path.join(os.tmpdir(), 'ai-daily-buildtmp-' + process.pid + '.js')
   fs.writeFileSync(tmp, code)
   try {
     execFileSync(process.execPath, ['--check', tmp], { stdio: 'pipe' })
@@ -59,7 +65,8 @@ const main = () => {
     console.log('build check-only OK：模板+模块可生成语法合法产物（' + code.split('\n').length + ' 行），未写盘')
     return
   }
-  fs.renameSync(tmp, outPath)
+  fs.writeFileSync(outPath, code)
+  fs.unlinkSync(tmp)
   console.log('built → ' + outPath + '（' + code.split('\n').length + ' 行）')
 }
 main()
