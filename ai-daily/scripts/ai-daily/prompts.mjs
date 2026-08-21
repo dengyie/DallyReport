@@ -7,7 +7,8 @@ export const harvestPrompt = (g, ctx) =>
   g.feeds.map(f => '- **' + (f.label || f.url) + '**\n  URL: ' + f.url).join('\n') + '\n\n' +
   '## 执行（对每个 feed 必须独立执行抓取，逐条做出来再进入下一个）\n' +
   g.feeds.map((f, i) =>
-    'Step ' + (i + 1) + '：cd ' + ctx.GROK_DIR + " && ./scripts/fetch.js --max-chars " + ctx.feedMaxChars(f) + " '" + f.url + "'\n" +
+    'Step ' + (i + 1) + '：cd ' + ctx.GROK_DIR + " && ./scripts/fetch.js --max-chars " + ctx.feedMaxChars(f) + " --provider " + (/export\.arxiv\.org\/api\/query/i.test(f.url) ? 'direct' : 'auto') + " '" + f.url + "'\n" +
+    '   **arXiv 官方 API 源：输出为 Atom XML（`<entry>` 为单篇，含 title/summary/updated/id 链接）。feed 字段必须用**本条目的来源 Feed URL（原样，勿改）**。**\n' +
     '   **只看返回 sources 里的 url/title/date 卡片，不看 answer.text（模型旧知识，不可作新闻依据）。**\n' +
     '   保留日期落在 [' + ctx.WFROM + ', ' + (ctx.WTO || ctx.DATE) + '] 内的条目，最多 15 条写入 entries；这些条目必须带 feed 字段 = **本条目的来源 Feed URL（原样，勿改）**，否则无法归栈。\n' +
     '   日期在窗口前（窗口首日前约 7 天内）但属**重大发布/官宣**（行业里程碑级）的，挑最多 4 条写入 recent（同样带 feed 字段，note 一句话说明为何重大）。普通旧新闻不写。\n' +
@@ -27,6 +28,7 @@ export const discoverPrompt = (g, ctx) => {
   const digestBlock = multi ? ctx.digestForFeeds(g.feeds) : ctx.digestForBoard(bds[0])
   return '## 板块发现代理' + (multi ? '（合组：' + g.label + '）' : '：' + bds[0].title) + '\n\n窗口：' + ctx.WINDOW_LABEL + '。为日报采集窗口内可信可核实的新闻 URL。\n' +
     '⚠️ 关键纪律：搜索脚本的输出里 answer.text 是模型旧知识总结（训练截止点可能早于窗口！），绝不可作为新闻判断依据；只采信 sources 里的 URL 卡片（sources.grok / sources.merged 的 url/title/date）与下方**共享源摘要**（已由主流程预抓，可信）。官方渠道官宣的新模型/新发布通常不在模型知识里——要靠下方摘要与 X 官方源找到。\n\n' +
+    '⚠️ 收口框架（最终唯一出口——先记住这条再做下面的步骤）：本代理的最终动作**只能是调用 StructuredOutput 工具**返回 { urls, noNews, nearWindow, majorOutOfWindow, degraded }。思考过程中即使已得出全部 URL 与结论，**最后一步也是调用该工具，而不是 end_turn 输出文字解释**。任何"我在思考里已想清楚，现在说明一下结论"的文字输出都算失败——主流程判定为 null，本组所属板块整组降级、0 claim。正确流程：执行下方 1-6 步 → 调一次 StructuredOutput 工具填齐字段 → 结束。禁止在工具调用前先打一段总结文字。\n\n' +
     coverLine + '\n\n' +
     '## 共享源摘要（已预抓，直接采信；**禁止再运行 fetch.js**）\n' + digestBlock + '\n\n' +
     '## 执行\n' +
@@ -40,7 +42,7 @@ export const discoverPrompt = (g, ctx) => {
     '5) 若某公司/主题本窗口无动态、但近 2 周内有重大发布/官宣/可信事实（如 DeepSeek V4 开源、Grok 4.6 发布、DeepSeek Harness 这类**行业客观公认事实**），将其列入 majorOutOfWindow（name/date/note），供日报正文以「[窗口外·重大]」标签呈现。注意：majorOutOfWindow 只放**客观事实**（非传闻、非推测），且必须是**行业里程碑级**——如果是普通更新或次要动态，放 nearWindow 供窗口外参考节引用即可。' +
     '6)【预算·硬性纪律】X 搜索本组 ≤' + g.xBudget + ' 次，一家/一个主题一次尝试、无果即放过、不反复深挖；WebSearch 全流水合计 ≤' + ctx.WEB_BUDGET_TOTAL + ' 次、本组 ≤' + ctx.WEB_BUDGET_PER + ' 次，不可用即跳过、勿失败。**发现阶段禁止运行 fetch.js**，也禁止 WebFetch 连续深挖单公司官网新闻页（官网正文抓取是 fetch 阶段职责，发现阶段只需给出 URL 候选；官网首页一次快速确认至多 1 次）。输出只保留用于抓取/核查的高置信候选，超过上限按重要性截断。' +
     'degraded 语义：仅当本（组/板块）的【主源/官方通道】整体一无所获（摘要 + X 搜索均返回零个可用 URL）时才置 true；个别补充源（GitHub trending、WebSearch、某一 X 搜索等）失败不算 degraded，正常返回即可。尽力用可用渠道，不要整任务失败。' +
-    '\n\nStructured output only.'
+    '\n\n⚠️ 最终收口（呼应开头条目）：执行完上述步骤后，立即调用 StructuredOutput 工具返回结构化对象。**严禁 end_turn 返回纯文本**——这是最常见的失败模式（思考里说"我来调用 StructuredOutput"却以文字结束）。调工具即结束，勿在工具调用前/后铺垫文字。Structured output only.'
 }
 
 export const fetchPrompt = (src, ctx) =>
@@ -69,15 +71,16 @@ export const reportPrompt = ctx =>
   ctx.missBlock +
   "\n## 覆盖自检\n" + ctx.coverBlock + "\n\n## 编辑要求\n" +
   "0. **禁止调用任何工具**（禁 WebFetch、WebSearch、Read、curl 及一切工具调用）——只做纯推理合成；一旦发起工具调用即视为失败。\n\n" +
-  "1. **先筛选，再写稿**：通读全部素材，选出今天**真正值得报道的 2-3 条头条**（正式发布/官宣/大额融资/监管裁决/里程碑）。其余素材按板块归类，不重要的（小更新/营销话术/旧闻重复）**直接 discard 不进正文**。宁缺毋滥。\n\n" +
-  "2. **oneLiner（今日一句话）**：用一句话概括今天 AI 行业最重要的事——像新闻快讯标题，不是笼统总结。\n\n" +
-  "3. **execSummary（执行摘要）**：3-5 句，按重要性排序，写成一个连贯段落（不是分点列项）。每句对应一条重要新闻，写清楚谁做了什么+结果。\n\n" +
+  "1. **先筛选，再写稿**：通读全部素材，选出今天**真正值得报道的 2-3 条头条**。头条优先序：**新模型发布 > 模型能力重大突破 > 技术里程碑 > 开源重磅发布 > 研究突破 > 监管/官宣**。**融资/并购/收费/估值/商业动态永远不进头条**，只进对应板块正文。其余素材按板块归类，不重要的（小更新/营销话术/旧闻重复）**直接 discard 不进正文**。宁缺毋滥。\n\n" +
+  "2. **oneLiner（今日一句话）**：用一句话概括今天 AI 行业**技术层面**最重要的事——新模型、新能力、新突破，不是商业新闻。如果今天没有技术头条，才退而求其次选战略/产品新闻。\n\n" +
+  "3. **execSummary（执行摘要）**：3-5 句，按技术重要性排序，写成一个连贯段落（不是分点列项）。每句对应一条重要新闻，写清楚谁做了什么+结果。\n\n" +
   "4. **sections / items**：\n" +
-  "   - title：**新闻式标题**（≤25字，主语+动词+结果/数字，例：Stripe $7.5B 收购 OpenRouter）。**不要前置 [窗口外·重大]/[2-0✓] 等标签**，不要长从句，不要括号解释。\n" +
+  "   - title：**新闻式标题**（≤25字，主语+动词+结果/数字，例：GLM-5.3 开源，Coding 能力接近 Fable 5）。**不要前置 [窗口外·重大]/[2-0✓] 等标签**，不要长从句，不要括号解释。\n" +
   "   - summary：**一段新闻正文**（2-3 句），写清楚发生了什么、为什么重要，不是重复 title。\n" +
   "   - status：核查状态，取值为 已核查 2-0 / 已核查 2-1 / [窗口外·重大] / 未核查 / 已否决（render 会在标题后加徽标）\n" +
   "   - 多个 sources 时只保留最权威的 1-2 个 URL。\n\n" +
-  "5. **板块组织**：不要机械按来源分板。如果某板块今天无重要新闻，该板块可以不出现在正文（但保留 coverage 自检）。重磅新闻放在最靠前的板块下。\n\n" +
+  "4.5. **不确定度如实标注**（与 AI.md 风格一致）：summary 中若素材存在不确定性（单源/社区传闻/灰度状态/未官方确认），用「有用户称」「据讨论」「现有资料未说明」「暂不能确认」等措辞如实标注，不假装确定性；社区传闻与官方动态须用不同措辞区分。\n\n" +
+  "5. **板块组织**：不要机械按来源分板。**labs（新模型/模型能力）板块如果有内容，必须放在第一个板块**。如果某板块今天无重要新闻，该板块可以不出现在正文（但保留 coverage 自检）。重磅新闻放在最靠前的板块下。\n\n" +
   "6. **caveats**：注明弱来源/厂商口径/时间敏感。openQuestions 2-4 个。\n\n" +
   "7. 如果素材大部分是超窗重大项（major-out）而窗口内几乎为空，则 oneLiner 和 execSummary 如实反映这一情况，优先报道 major-out 中最重要的 1-2 条。\n\n" +
   "Structured output only. 输出格式：{ sections, oneLiner, execSummary, caveats, openQuestions } 其中 sections 为 [{ board, title, items: [{ title, summary, confidence, sources, vote, status }] }]"

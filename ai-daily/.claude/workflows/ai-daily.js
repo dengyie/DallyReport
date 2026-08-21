@@ -75,7 +75,10 @@ const WINDOW_LABEL = WFROM && WTO ? WFROM + ' ~ ' + WTO : WTO || DATE
 
 // ─── 常量区（供 prompt ctx 与编排使用）───
 // 8/15：稠密源（arXiv/HF papers）与普通源统一 12000 字符——稠密源曾是输入大户，降到与普通源同档。
-const feedMaxChars = () => 12000
+// 8/21 学术板修复：arXiv 官方 API 返回 Atom XML（50 entries ≈ 42KB/URL），普通上限 12000 字符会截到 header →
+// 条目被截只剩 1-2 条、digest 空洞。给 arXiv API 源单独放宽：窗口内最近 50 篇的标题/摘要即为此域全部正文，
+// 无 `--full-path` 泄露、无多 feed 依赖。其余普通源仍 12000。
+const feedMaxChars = f => /export\.arxiv\.org\/api\/query/i.test(f.url || f) ? 40000 : 12000
 const WEB_BUDGET_TOTAL = 4
 const WEB_BUDGET_PER = 2
 
@@ -244,7 +247,7 @@ const BOARDS = [
   { key: 'strategy', title: '重磅头条·战略', focus: '重大战略/资本/基础设施新闻：大额融资平台、星际之门类项目、并购、行业地位变动', feeds: ['https://www.qbitai.com/', 'https://techcrunch.com/category/artificial-intelligence/'] },
   { key: 'products', title: '产品与硬件', focus: '消费级 AI 产品、AI 硬件、设备发布、机器人、新品落地', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.theverge.com/ai-artificial-intelligence/', 'https://www.qbitai.com/'] },
   { key: 'opensource', title: '开源与工具链', focus: '开源权重发布、HF 趋势、GitHub 趋势、Agent 框架与工具', feeds: ['https://huggingface.co/blog/feed.xml', 'https://huggingface.co/papers'], xHandles: ['huggingface', 'OpenSourceModels'] },
-  { key: 'academic', title: '学术研究', focus: 'arXiv 新提交、HF Daily Papers 榜单、研究突破', feeds: ['https://arxiv.org/list/cs.AI/recent', 'https://arxiv.org/list/cs.CL/recent', 'https://huggingface.co/papers'] },
+  { key: 'academic', title: '学术研究', focus: 'arXiv 新提交、HF Daily Papers 论文、研究突破', feeds: ['https://export.arxiv.org/api/query?search_query=%28cat%3Acs.AI+OR+cat%3Acs.CL%29+AND+submittedDate%3A%5B{{WFROM}}0000+TO+{{WTO}}2359%5D&start=0&max_results=50', 'https://huggingface.co/papers'] },
   { key: 'funding', title: '融资并购', focus: '融资轮次、估值、并购、投资动态', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://36kr.com/', 'https://www.qbitai.com/'] },
   { key: 'policy', title: '政策监管', focus: '政府/监管/法院/标准组织对 AI 的动作', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.qbitai.com/'] },
   { key: 'safety', title: '安全与伦理', focus: '对齐、安全、滥用、水印、系统卡、攻击事件', feeds: ['https://www.qbitai.com/', 'https://techcrunch.com/category/artificial-intelligence/'] },
@@ -319,20 +322,27 @@ for (const g of DISCOVER_GROUPS_ALL) for (const b of g.boards) {
  * 计算每个选中板的降级状态（纯函数，供覆盖自检/降级上报）。
  * @param {Array<{group:{key:string}, degraded?:boolean}>} rows 发现组返回行（safeAgent.then 产物；失败组无行）
  * @param {string[]} boardKeys 参与判定的板块 key 列表（通常 = boards.map(b=>b.key)，冒烟可子集）
- * @returns {Map<string,{degraded:boolean, missing:boolean}>}
+ * @param {Iterable<string>} [recoveredKeys] 兜底救回的板（disc 失败但 harvest entries 已补进 boardURLMap，8/22 第二十项）
+ * @returns {Map<string,{degraded:boolean, missing:boolean, recovered?:boolean}>}
  */
-const computeBoardStates = (rows, boardKeys) => {
+const computeBoardStates = (rows, boardKeys, recoveredKeys) => {
   const returnedGroups = new Set((rows || []).map(r => r?.group?.key).filter(Boolean))
   const degradedGroups = new Set((rows || []).filter(r => r?.degraded).map(r => r.group.key))
+  const recoveredSet = recoveredKeys ? new Set(recoveredKeys) : new Set()
   const m = new Map()
   for (const key of boardKeys) {
     const groups = groupKeyByBoard.get(key) || new Set()
     const anyReturned = [...groups].some(g => returnedGroups.has(g))
     const anyFailedGroup = [...groups].some(g => !returnedGroups.has(g))
     const anyDegradedGroup = [...groups].some(g => degradedGroups.has(g))
-    const missing = groups.size > 0 && !anyReturned            // 所有归属组全部失败
-    const degraded = anyFailedGroup || anyDegradedGroup          // 任一组失败 或 任一返回组自降级
-    m.set(key, { degraded, missing })
+    const inRecovery = recoveredSet.has(key)
+    // recovered 仅当该板确属失败/降级路径（有失败组 或 返回组自降级）才标——成功板误传 recoveredKeys 不打标记。
+    const recovered = inRecovery && (anyFailedGroup || anyDegradedGroup)
+    // missing = 所有归属组全部失败 且 未被兜底救回（兜底补了 URL 即有覆盖，不再标 missing/unreached）。
+    // degraded = 任一组失败 或 返回组自降级；兜底救回仍属「通道失败」→ 保留 degraded 供如实降级上报。
+    const missing = groups.size > 0 && !anyReturned && !inRecovery
+    const degraded = anyFailedGroup || anyDegradedGroup
+    m.set(key, { degraded, missing, ...(recovered ? { recovered: true } : {}) })
   }
   return m
 }
@@ -436,6 +446,51 @@ const makeBudgetGate = (deadlines, elapsedFn, onSkip) => {
   budgetGate.skipped = skipped  // 暴露记账数组供 degraded 标记读取（对应现行 budgetSkipped）
   return budgetGate
 }
+// ─── inline: fallback ───
+// ai-daily discover 兜底构造器 — 纯函数，供 template inline 与测试直调。
+// 8/22 第二十项：disc 失败的组，从 harvest 已抓到的 digestByKey entries 补 URL 候选进 boardURLMap，
+// 不重跑代理（省墙钟、不烧 token）。本模块抽出兜底构造逻辑为纯函数，消除"测试复刻修复逻辑"的 forward-test 缺陷
+// （测试直调此函数，断言真实兜底行为，而非 grep 模板源码）。
+//
+// 依赖注入（template inline 后这些都在闭包内可见）：normURL、claimWindow。
+// claimWindow = makeClaimWindow(...) 返回的函数 c => 'in'|'out'|'unknown'，判 !== 'out'（含 in 与无日期 unknown）。
+
+/**
+ * 从 harvest digest 构造兜底 URL 候选。
+ * @param {Map} digestByKey key=normURL(feed.url) → {feed, entries, recent, failed}
+ * @param {Array<{key:string,boards:string[],feeds?:string[]}>} failedGroups discover 失败的组
+ * @param {(c:{date?:string})=>string} claimWindow 窗口判定函数（!== 'out' 即纳入）
+ * @param {(u:string)=>string} normURL URL 归一化（去 query/hash，与 digestByKey 存键一致）
+ * @returns {{fallbackByUrl:Array, recoveredBoards:Set<string>}}
+ *   fallbackByUrl 每项 {url,title,date,board,found_via:'harvest-fallback'}；recoveredBoards 记救回的板。
+ */
+const buildFallback = (digestByKey, failedGroups, claimWindow, normURL) => {
+  const fallbackByUrl = []
+  const recoveredBoards = new Set()
+  for (const g of failedGroups) {
+    // srcUrls：合组走 g.feeds（硬编码组源），单板组从组 boards 派生订阅源（feeds+companies feed+labs 官方源）。
+    // 注意：srcUrls 的来源由调用方（template）构造后传入更合适，但为保持纯函数自包含，这里接收 failedGroups
+    // 已带 srcUrls 的形态——template 在调用前把 srcUrls 预算进 g（见 template inline 版本，下方兼容 g.feeds）。
+    const srcUrls = g.srcUrls || g.feeds || []
+    for (const su of [...new Set(srcUrls.map(normURL))]) {
+      const h = digestByKey.get(su)
+      if (!h || h.failed) continue
+      // feed.boards 是该 feed 被订阅的全部板（feedMap 记录）；与失败组 boards 求交 = 真正归属板。
+      const feedBoards = (h.feed && h.feed.boards) ? [...h.feed.boards].filter(b => g.boards.includes(b)) : []
+      // 空交集说明该 feed 不属于当前失败组的任何板（冒烟子集：feed 订阅板被 BOARDS_SELECTED 过滤掉）。
+      // 跳过该 entry 更诚实，不制造错误归属（首板被灌满、真实板 0 claim）。
+      if (!feedBoards.length) continue
+      for (const e of (h.entries || [])) {
+        if (!(e && e.url && claimWindow({ date: e.date }) !== 'out')) continue
+        for (const b of feedBoards) {
+          fallbackByUrl.push({ url: e.url, title: e.title || e.url, date: e.date, board: b, found_via: 'harvest-fallback' })
+          recoveredBoards.add(b)
+        }
+      }
+    }
+  }
+  return { fallbackByUrl, recoveredBoards }
+}
 // ─── inline: prompts ───
 // ai-daily prompt 模板 — 与 workflow 内逐字节一致；闭包依赖收敛为 ctx 显式注入。
 // ctx = { WINDOW_LABEL, WFROM, WTO, DATE, GROK_DIR, MAX_URLS_PER_BOARD, WEB_BUDGET_TOTAL, WEB_BUDGET_PER, feedMaxChars }
@@ -446,7 +501,8 @@ const harvestPrompt = (g, ctx) =>
   g.feeds.map(f => '- **' + (f.label || f.url) + '**\n  URL: ' + f.url).join('\n') + '\n\n' +
   '## 执行（对每个 feed 必须独立执行抓取，逐条做出来再进入下一个）\n' +
   g.feeds.map((f, i) =>
-    'Step ' + (i + 1) + '：cd ' + ctx.GROK_DIR + " && ./scripts/fetch.js --max-chars " + ctx.feedMaxChars(f) + " '" + f.url + "'\n" +
+    'Step ' + (i + 1) + '：cd ' + ctx.GROK_DIR + " && ./scripts/fetch.js --max-chars " + ctx.feedMaxChars(f) + " --provider " + (/export\.arxiv\.org\/api\/query/i.test(f.url) ? 'direct' : 'auto') + " '" + f.url + "'\n" +
+    '   **arXiv 官方 API 源：输出为 Atom XML（`<entry>` 为单篇，含 title/summary/updated/id 链接）。feed 字段必须用**本条目的来源 Feed URL（原样，勿改）**。**\n' +
     '   **只看返回 sources 里的 url/title/date 卡片，不看 answer.text（模型旧知识，不可作新闻依据）。**\n' +
     '   保留日期落在 [' + ctx.WFROM + ', ' + (ctx.WTO || ctx.DATE) + '] 内的条目，最多 15 条写入 entries；这些条目必须带 feed 字段 = **本条目的来源 Feed URL（原样，勿改）**，否则无法归栈。\n' +
     '   日期在窗口前（窗口首日前约 7 天内）但属**重大发布/官宣**（行业里程碑级）的，挑最多 4 条写入 recent（同样带 feed 字段，note 一句话说明为何重大）。普通旧新闻不写。\n' +
@@ -466,6 +522,7 @@ const discoverPrompt = (g, ctx) => {
   const digestBlock = multi ? ctx.digestForFeeds(g.feeds) : ctx.digestForBoard(bds[0])
   return '## 板块发现代理' + (multi ? '（合组：' + g.label + '）' : '：' + bds[0].title) + '\n\n窗口：' + ctx.WINDOW_LABEL + '。为日报采集窗口内可信可核实的新闻 URL。\n' +
     '⚠️ 关键纪律：搜索脚本的输出里 answer.text 是模型旧知识总结（训练截止点可能早于窗口！），绝不可作为新闻判断依据；只采信 sources 里的 URL 卡片（sources.grok / sources.merged 的 url/title/date）与下方**共享源摘要**（已由主流程预抓，可信）。官方渠道官宣的新模型/新发布通常不在模型知识里——要靠下方摘要与 X 官方源找到。\n\n' +
+    '⚠️ 收口框架（最终唯一出口——先记住这条再做下面的步骤）：本代理的最终动作**只能是调用 StructuredOutput 工具**返回 { urls, noNews, nearWindow, majorOutOfWindow, degraded }。思考过程中即使已得出全部 URL 与结论，**最后一步也是调用该工具，而不是 end_turn 输出文字解释**。任何"我在思考里已想清楚，现在说明一下结论"的文字输出都算失败——主流程判定为 null，本组所属板块整组降级、0 claim。正确流程：执行下方 1-6 步 → 调一次 StructuredOutput 工具填齐字段 → 结束。禁止在工具调用前先打一段总结文字。\n\n' +
     coverLine + '\n\n' +
     '## 共享源摘要（已预抓，直接采信；**禁止再运行 fetch.js**）\n' + digestBlock + '\n\n' +
     '## 执行\n' +
@@ -479,7 +536,7 @@ const discoverPrompt = (g, ctx) => {
     '5) 若某公司/主题本窗口无动态、但近 2 周内有重大发布/官宣/可信事实（如 DeepSeek V4 开源、Grok 4.6 发布、DeepSeek Harness 这类**行业客观公认事实**），将其列入 majorOutOfWindow（name/date/note），供日报正文以「[窗口外·重大]」标签呈现。注意：majorOutOfWindow 只放**客观事实**（非传闻、非推测），且必须是**行业里程碑级**——如果是普通更新或次要动态，放 nearWindow 供窗口外参考节引用即可。' +
     '6)【预算·硬性纪律】X 搜索本组 ≤' + g.xBudget + ' 次，一家/一个主题一次尝试、无果即放过、不反复深挖；WebSearch 全流水合计 ≤' + ctx.WEB_BUDGET_TOTAL + ' 次、本组 ≤' + ctx.WEB_BUDGET_PER + ' 次，不可用即跳过、勿失败。**发现阶段禁止运行 fetch.js**，也禁止 WebFetch 连续深挖单公司官网新闻页（官网正文抓取是 fetch 阶段职责，发现阶段只需给出 URL 候选；官网首页一次快速确认至多 1 次）。输出只保留用于抓取/核查的高置信候选，超过上限按重要性截断。' +
     'degraded 语义：仅当本（组/板块）的【主源/官方通道】整体一无所获（摘要 + X 搜索均返回零个可用 URL）时才置 true；个别补充源（GitHub trending、WebSearch、某一 X 搜索等）失败不算 degraded，正常返回即可。尽力用可用渠道，不要整任务失败。' +
-    '\n\nStructured output only.'
+    '\n\n⚠️ 最终收口（呼应开头条目）：执行完上述步骤后，立即调用 StructuredOutput 工具返回结构化对象。**严禁 end_turn 返回纯文本**——这是最常见的失败模式（思考里说"我来调用 StructuredOutput"却以文字结束）。调工具即结束，勿在工具调用前/后铺垫文字。Structured output only.'
 }
 
 const fetchPrompt = (src, ctx) =>
@@ -508,15 +565,16 @@ const reportPrompt = ctx =>
   ctx.missBlock +
   "\n## 覆盖自检\n" + ctx.coverBlock + "\n\n## 编辑要求\n" +
   "0. **禁止调用任何工具**（禁 WebFetch、WebSearch、Read、curl 及一切工具调用）——只做纯推理合成；一旦发起工具调用即视为失败。\n\n" +
-  "1. **先筛选，再写稿**：通读全部素材，选出今天**真正值得报道的 2-3 条头条**（正式发布/官宣/大额融资/监管裁决/里程碑）。其余素材按板块归类，不重要的（小更新/营销话术/旧闻重复）**直接 discard 不进正文**。宁缺毋滥。\n\n" +
-  "2. **oneLiner（今日一句话）**：用一句话概括今天 AI 行业最重要的事——像新闻快讯标题，不是笼统总结。\n\n" +
-  "3. **execSummary（执行摘要）**：3-5 句，按重要性排序，写成一个连贯段落（不是分点列项）。每句对应一条重要新闻，写清楚谁做了什么+结果。\n\n" +
+  "1. **先筛选，再写稿**：通读全部素材，选出今天**真正值得报道的 2-3 条头条**。头条优先序：**新模型发布 > 模型能力重大突破 > 技术里程碑 > 开源重磅发布 > 研究突破 > 监管/官宣**。**融资/并购/收费/估值/商业动态永远不进头条**，只进对应板块正文。其余素材按板块归类，不重要的（小更新/营销话术/旧闻重复）**直接 discard 不进正文**。宁缺毋滥。\n\n" +
+  "2. **oneLiner（今日一句话）**：用一句话概括今天 AI 行业**技术层面**最重要的事——新模型、新能力、新突破，不是商业新闻。如果今天没有技术头条，才退而求其次选战略/产品新闻。\n\n" +
+  "3. **execSummary（执行摘要）**：3-5 句，按技术重要性排序，写成一个连贯段落（不是分点列项）。每句对应一条重要新闻，写清楚谁做了什么+结果。\n\n" +
   "4. **sections / items**：\n" +
-  "   - title：**新闻式标题**（≤25字，主语+动词+结果/数字，例：Stripe $7.5B 收购 OpenRouter）。**不要前置 [窗口外·重大]/[2-0✓] 等标签**，不要长从句，不要括号解释。\n" +
+  "   - title：**新闻式标题**（≤25字，主语+动词+结果/数字，例：GLM-5.3 开源，Coding 能力接近 Fable 5）。**不要前置 [窗口外·重大]/[2-0✓] 等标签**，不要长从句，不要括号解释。\n" +
   "   - summary：**一段新闻正文**（2-3 句），写清楚发生了什么、为什么重要，不是重复 title。\n" +
   "   - status：核查状态，取值为 已核查 2-0 / 已核查 2-1 / [窗口外·重大] / 未核查 / 已否决（render 会在标题后加徽标）\n" +
   "   - 多个 sources 时只保留最权威的 1-2 个 URL。\n\n" +
-  "5. **板块组织**：不要机械按来源分板。如果某板块今天无重要新闻，该板块可以不出现在正文（但保留 coverage 自检）。重磅新闻放在最靠前的板块下。\n\n" +
+  "4.5. **不确定度如实标注**（与 AI.md 风格一致）：summary 中若素材存在不确定性（单源/社区传闻/灰度状态/未官方确认），用「有用户称」「据讨论」「现有资料未说明」「暂不能确认」等措辞如实标注，不假装确定性；社区传闻与官方动态须用不同措辞区分。\n\n" +
+  "5. **板块组织**：不要机械按来源分板。**labs（新模型/模型能力）板块如果有内容，必须放在第一个板块**。如果某板块今天无重要新闻，该板块可以不出现在正文（但保留 coverage 自检）。重磅新闻放在最靠前的板块下。\n\n" +
   "6. **caveats**：注明弱来源/厂商口径/时间敏感。openQuestions 2-4 个。\n\n" +
   "7. 如果素材大部分是超窗重大项（major-out）而窗口内几乎为空，则 oneLiner 和 execSummary 如实反映这一情况，优先报道 major-out 中最重要的 1-2 条。\n\n" +
   "Structured output only. 输出格式：{ sections, oneLiner, execSummary, caveats, openQuestions } 其中 sections 为 [{ board, title, items: [{ title, summary, confidence, sources, vote, status }] }]"
@@ -524,19 +582,102 @@ const reportPrompt = ctx =>
 // ai-daily 确定性 md 渲染 — mdWriter 代理的替代。
 // report 成功 → renderMarkdown（完整版）；report 失败 → renderDegradedMarkdown（降级版，原冒烟 compose 脚本正式化）。
 // 两者输出都进 payloads.md 由 orchestrator 逐字节落盘，md 产出不再受网关波动影响。
+// 2026-08-22 风格优化（spec 2026-08-22-ai-daily-report-style-design.md）：
+//   A. 来源角标化（buildCitationMap + 正文 [n] + 末尾「### 参考来源」节）
+//   B. renderMarkdown 可选 meta → Obsidian frontmatter + 素材窗口横幅 + 低素材提示
+//   D. 降级版修 reportError 硬编码 + 来源角标化 + windowMisses 与 major-out 去重
 
 const CONF_ZH = { high: '高', medium: '中', low: '低' }
 
-const itemLine = it =>
-  '- **' + it.title + '**' + (it.status ? ' `' + it.status + '`' : '') + '（' + (it.vote ? '`' + it.vote + '` ' : '') + '可信度 ' + (CONF_ZH[it.confidence] || it.confidence) + '）— ' + it.summary +
-  (it.sources && it.sources.length ? ' — *来源: ' + it.sources.join(' , ') + '*' : '')
+// 跨 section 唯一 URL 引用图：按「首次出现序」给每个唯一 URL 分配 1-based 编号（spec A.1）。
+// 非 URL 来源（如 (多源公认)）不参与编号——正文不挂角标、不进参考列表。
+// 返回 { map: Map<href, n>, list: [{ n, url, title }] }；list 即「### 参考来源」节的数据源，title 取 hostname。
+const buildCitationMap = sections => {
+  const map = new Map()
+  const list = []
+  const hostname = s => { try { return new URL(s).hostname } catch { return s } }
+  for (const sec of sections || []) {
+    for (const it of (sec.items || [])) {
+      for (const s of (it.sources || [])) {
+        let url
+        try { url = new URL(s).href } catch { continue }
+        if (!map.has(url)) {
+          map.set(url, list.length + 1)
+          list.push({ n: list.length + 1, url, title: hostname(url) })
+        }
+      }
+    }
+  }
+  return { map, list }
+}
+
+// item/claim 的来源 → 该条正文末尾的角标串，如 ' [1][3]'（按编号升序、跨来源去重）。
+// 无 URL 来源或图里无对应 → ''（不挂角标）。
+const citationBadges = (sources, citeMap) => {
+  if (!sources || !sources.length || !citeMap) return ''
+  const ns = []
+  for (const s of sources) {
+    let url
+    try { url = new URL(s).href } catch { continue }
+    const n = citeMap.map.get(url)
+    if (n != null) ns.push(n)
+  }
+  if (!ns.length) return ''
+  return ' ' + [...new Set(ns)].sort((a, b) => a - b).map(n => '[' + n + ']').join('')
+}
+
+const itemBlock = (it, citeMap) => {
+  const tag = it.status ? ' `' + it.status + '`' : ''
+  const conf = (CONF_ZH[it.confidence] || it.confidence) ? '可信度：' + (CONF_ZH[it.confidence] || it.confidence) : ''
+  const badges = citationBadges(it.sources, citeMap)
+  const lines = []
+  lines.push('**' + it.title + '**' + tag)
+  lines.push('')
+  lines.push(it.summary + badges + (conf ? '\n\n*' + conf + '*' : ''))
+  return lines.join('\n')
+}
+
+// 完整版 optionally 带 meta 时输出 Obsidian frontmatter（spec B.1）。字段全来自 meta，无新数据。
+const frontmatterLines = (meta, date, window) => {
+  if (!meta) return []
+  const st = meta.stats && typeof meta.stats === 'object' ? meta.stats : {}
+  const num = v => (typeof v === 'number' ? v : null)
+  const L = ['---']
+  L.push('date: ' + (meta.date || date))
+  L.push('window: ' + (meta.window || window))
+  L.push('generator: ai-daily')
+  L.push('model: deepseek-v4-flash')
+  L.push('tags: [日报, AI]')
+  const statsParts = []
+  if (num(st.confirmed) != null) statsParts.push('confirmed:' + st.confirmed)
+  if (num(st.major_out) != null) statsParts.push('major_out:' + st.major_out)
+  if (num(st.killed) != null) statsParts.push('killed:' + st.killed)
+  if (num(st.urls_fetched) != null) statsParts.push('urls_fetched:' + st.urls_fetched)
+  if (statsParts.length) L.push('stats: {' + statsParts.join(', ') + '}')
+  L.push('---')
+  return L
+}
 
 // 完整版：report 代理产出 sections 后的确定性排版。
 // 输入即现行 mdWriter prompt 里 reportJson 的同构数据。
-const renderMarkdown = ({ date, window, report, coverage, windowMisses, degraded }) => {
+// meta 为可选参数：{ date, window, stats:{confirmed,major_out,killed,urls_fetched,urls_discovered}, generated_by, degraded }；
+// 缺失时退化（无 frontmatter/横幅），向后兼容旧调用。
+const renderMarkdown = ({ date, window, report, coverage, windowMisses, degraded, meta }) => {
   const L = []
+  for (const fl of frontmatterLines(meta, date, window)) L.push(fl)
   L.push('# 🤖 AI 日报 · ' + date)
   L.push('')
+  // 素材窗口横幅（meta 提供时，标题后、覆盖行前，AI.md 风格）。N=当日素材(窗口内 confirmed)，M=近几日来源(全部 urls_discovered)。
+  const st = meta && meta.stats && typeof meta.stats === 'object' ? meta.stats : {}
+  if (meta) {
+    const N = typeof st.confirmed === 'number' ? st.confirmed : null
+    const M = typeof st.urls_discovered === 'number' ? st.urls_discovered : (typeof meta.urls_discovered === 'number' ? meta.urls_discovered : null)
+    if (N != null || M != null) {
+      L.push('> **素材窗口**：当日素材 ' + (N != null ? N : '?') + ' 条；近几日来源 ' + (M != null ? M : '?') + ' 条。')
+    }
+    const hard = (typeof st.confirmed === 'number' ? st.confirmed : 0) + (typeof st.major_out === 'number' ? st.major_out : 0)
+    if (hard < 8) L.push('> ⚠️ **低素材提示**：当日硬源不足 8 条，正文以近期趋势为主，请注意时效。')
+  }
   L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（deepseek-v4-flash）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
   L.push('')
   L.push('## 📌 今日一句话')
@@ -547,10 +688,11 @@ const renderMarkdown = ({ date, window, report, coverage, windowMisses, degraded
   L.push('')
   L.push(report.execSummary)
   L.push('')
+  const citeMap = buildCitationMap(report && report.sections)
   for (const sec of report.sections || []) {
     L.push('### ' + sec.title)
     L.push('')
-    for (const it of sec.items || []) L.push(itemLine(it))
+    for (const it of sec.items || []) { L.push(itemBlock(it, citeMap)); L.push('') }
     L.push('')
   }
   if (report.caveats && report.caveats.length) {
@@ -577,17 +719,51 @@ const renderMarkdown = ({ date, window, report, coverage, windowMisses, degraded
     L.push('- **' + c.title + '**：' + c.claims + ' claims / ' + c.urls + ' sources' + (c.degraded ? ' `[degraded]`' : ''))
   }
   L.push('')
+  // 参考来源节（md 末尾，AI.md 风格 [n] → 编号参考列表，跨 section 全文唯一）
+  if (citeMap.list.length) {
+    L.push('### 参考来源')
+    L.push('')
+    for (const c of citeMap.list) L.push('- [' + c.n + '] [' + c.title + '](<' + c.url + '>)')
+    L.push('')
+  }
   return L.join('\n')
 }
 
 // 降级版：report 代理失败时由编排数据确定性合成——可读快讯，不再是原始数据转储。
-// 8/22 改为新闻快讯风格：按窗口内/窗口外/否决分节，每条 claim 写为完整句子，附加核查徽标。
+// 8/22 改为新闻快讯风格：按窗口内/窗口外/否决分节，每条 claim 写为完整句子，附加核查徽标；
+// 2026-08-22 再改：来源角标化对齐完整版 + 修 reportError 硬编码 + windowMisses 与 major-out 去重。
+
+// windowMisses 去重：过滤已在 major-out 出现的 name（spec D.3）。
+// 判定：完全包含 或 共享区分性拉丁实体 token（如 Grok、Qwen3.8-27B）——8/21 实况「Grok 4.6 in Copilot」与「Qwen3.8-27B edge model」即靠实体 token 命中。
+const STOP_TOKENS = new Set(['news', 'note', 'report', 'model', 'models', 'open', 'new', 'blog', 'post', 'api', 'app', 'apps', 'ai', 'pro', 'free', 'beta', 'tool', 'tools', 'official', 'release', 'update'])
+const tokenize = s => (String(s || '').toLowerCase().match(/[a-z0-9][a-z0-9.%\-]*/g) || []).filter(t => t.length >= 4 && !STOP_TOKENS.has(t))
+const dedupWindowMisses = (windowMisses, maj) => {
+  if (!windowMisses.length || !maj.length) return windowMisses
+  const majClaims = maj.map(m => String(m.claim || '').replace(/\s+/g, ' ').trim())
+  const majTokens = new Set()
+  for (const c of majClaims) for (const t of tokenize(c)) majTokens.add(t)
+  return windowMisses.filter(w => {
+    const name = String(w.name || '').trim()
+    if (!name) return true
+    if (majClaims.some(c => c.includes(name))) return false
+    if (tokenize(name).some(t => majTokens.has(t))) return false
+    return true
+  })
+}
+
 const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, windowMisses, degraded, noNewsCompanies, reportError }) => {
   const S = s => String(s || '').replace(/\s+/g, ' ').trim()
   const voteTag = x => x.verifiedByVote ? '`✓' + (x.vote || '?') + '`' : '`◇' + (x.vote || '?') + '`'
-  const srcDomain = x => { try { return new URL(x.source || '').hostname } catch { return x.source || '?' } }
+  // 降级版来源形态为单 URL x.source（非数组），统一走 buildCitationMap 角标化（spec D.2）。
+  const citeMap = buildCitationMap([
+    { items: (confirmed || []).map(x => ({ sources: x.source ? [x.source] : [] })) },
+    { items: (refuted || []).map(x => ({ sources: x.source ? [x.source] : [] })) },
+  ])
+  const badge = x => citationBadges(x.source ? [x.source] : [], citeMap)
   const inW = (confirmed || []).filter(x => x.window === 'in')
   const maj = (confirmed || []).filter(x => x.window === 'major-out')
+  // 修 reportError 硬编码（spec D.1）：null/空不抹成 'report agent failed'，如实描述。
+  const reason = reportError ? String(reportError).replace(/\s+/g, ' ').trim() : 'report 代理未产出完整版合成结构'
   const L = []
   L.push('# 🤖 AI 日报 · ' + date)
   L.push('')
@@ -595,12 +771,12 @@ const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, wi
   L.push('')
   L.push('## ⚠️ 本日报为**降级快讯**（report 合成代理未产出，由编排器据已核查归档拼合）')
   L.push('')
-  L.push('降级原因：' + (reportError || 'report agent failed') + '。以下内容依核查结果逐条拼合，无合成代理润色编排。')
+  L.push('降级原因：' + reason + '。以下内容依核查结果逐条拼合，无合成代理润色编排。')
   L.push('')
   L.push('### 窗口内新闻（' + inW.length + ' 条，对抗式核查确认）')
   L.push('')
   for (const x of inW) {
-    L.push('- ' + voteTag(x) + ' ' + S(x.claim) + ' — *来源：' + srcDomain(x) + '（' + (x.sourceQuality || '?') + '）*' + (x.erroredCount ? ' ⚠️' + x.erroredCount + ' 票异常' : ''))
+    L.push('- ' + voteTag(x) + ' ' + S(x.claim) + badge(x) + ' — *（' + (x.sourceQuality || '?') + '）*' + (x.erroredCount ? ' ⚠️' + x.erroredCount + ' 票异常' : ''))
   }
   L.push('')
   if (maj.length) {
@@ -615,14 +791,15 @@ const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, wi
     L.push('### 已否决的提案（' + refuted.length + ' 条，对抗式核查未通过）')
     L.push('')
     for (const x of refuted) {
-      L.push('- ~~' + S(x.claim) + '~~ → 否决 `' + (x.vote || '?') + '`（' + srcDomain(x) + '）' + (x.erroredCount ? ' ⚠️' + x.erroredCount + ' 票异常' : ''))
+      L.push('- ~~' + S(x.claim) + '~~ → 否决 `' + (x.vote || '?') + '`' + badge(x) + (x.erroredCount ? ' ⚠️' + x.erroredCount + ' 票异常' : ''))
     }
     L.push('')
   }
-  if (windowMisses && windowMisses.length) {
+  const wm = dedupWindowMisses(windowMisses || [], maj)
+  if (wm.length) {
     L.push('### 📎 窗口外参考')
     L.push('')
-    for (const w of windowMisses) L.push('- ' + w.name + '（' + (w.date || '日期未知') + '）：' + w.note)
+    for (const w of wm) L.push('- ' + w.name + '（' + (w.date || '日期未知') + '）：' + w.note)
     L.push('')
   }
   L.push('### ✅ 覆盖矩阵')
@@ -636,11 +813,25 @@ const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, wi
     L.push('| ' + b.board + ' | ' + b.title + ' | ' + b.claims + ' | ' + note + ' |')
   }
   L.push('')
+  if (citeMap.list.length) {
+    L.push('### 参考来源')
+    L.push('')
+    for (const c of citeMap.list) L.push('- [' + c.n + '] [' + c.title + '](<' + c.url + '>)')
+    L.push('')
+  }
   return L.join('\n')
 }
 
 // boards 由 BOARDS 花名册按选区派生（BOARDS 已 inline 就绪，此时访问无 TDZ）。
 const boards = BOARDS_SELECTED ? BOARDS.filter(b => BOARDS_SELECTED.has(b.key)) : BOARDS
+// 8/21 学术板修复：arXiv 官方 API 窗口查询（替代 HTML list 页——auto provider(Tavily) 把 HTML 压成 501 字符
+// → digest 空 → discover degraded）。URL 含 {{WFROM}}/{{WTO}} 占位（YYYYMMDD + 0000/2359 时刻），此处按窗口展开；
+// 无窗口时回退原 list 页（数组原元素）。cs.AI|cs.CL 合并在单 URL，normURL 去 query → key 稳定，digest 归栈一致。
+const arxivWindow = (WFROM && WTO) ? { wf: WFROM.replace(/-/g, ''), wt: WTO.replace(/-/g, '') } : null
+for (const b of boards) {
+  if (!b.feeds) continue
+  b.feeds = b.feeds.map(f => arxivWindow ? f.replace('{{WFROM}}', arxivWindow.wf).replace('{{WTO}}', arxivWindow.wt) : f.replace(/{{WFROM}}|{{WTO}}/g, 'recent'))
+}
 
 // ─── 编排层 helpers（realm 专属/依赖注入后）───
 const impRank = { central: 0, supporting: 1, tangential: 2 }
@@ -836,6 +1027,44 @@ for (const d of discoverRows) for (const u of d.urls) {
   if (!boardURLMap.has(b)) boardURLMap.set(b, [])
   boardURLMap.get(b).push({ ...u, board: b })
 }
+
+// ─── Discover 失败兜底（8/22 第十八项）：用 harvest 已抓到的 entries 补 URL 候选 ───
+// 根因（systematic-debugging 实证）：deepseek-v4-flash 长思考后倾向 end_turn 不调 StructuredOutput
+// → disc:academic 返回 null（thinking 里已推导出 6 条 URL 却没调工具）→ tries=1 不重试 → DISCOVER-FAIL → academic 板 0 claim。
+// harvest 阶段已成功抓到 feed entries（arXiv API + direct 走通），这些 entries 本就是高置信候选。
+// 兜底：disc 失败的组，直接从 digestByKey 取窗口内 entries 补进 boardURLMap，不重跑代理（省墙钟、不烧 token）。
+// 仅对失败的组补，且只取非窗口外（claimWindow !== 'out'，含 in 与无日期 unknown——后者交 verify 把关）、有 url 的 entries。found_via 标 "harvest-fallback" 供核查溯源。
+//
+// 8/22 第二十项 CRITICAL-1 修复：合组（media-cn/media-en，g.boards.length>1）失败时，旧版把 board 置 null
+// → 下游 if(!u.board) continue 把兜底 entry 全丢弃，兜底对合组完全失效（恰是历史高发场景）。
+// 修复：board 按 digest feed.boards（feedMap 已按板订阅集记录）与 g.boards 求交派生，交集中每个板都补进
+// boardURLMap——allocateFetchBudget 跨板按 normURL 去重，同 URL 补多板只 fetch 一次，不重复抓取。
+// 空交集（冒烟子集 BOARDS_SELECTED：feed 订阅板被过滤掉）时跳过该 entry，不灌到首板制造错误归属。
+// 同时记 recoveredBoards：兜底救回的板在 computeBoardStates 里从 missing 降为 degraded（HIGH-2：兜底救回内容
+// 但「通道失败」如实降级保留，不再误标 missing/unreached 让 coverage 自检读成「该板 0 claim 无覆盖」）。
+//
+// 兜底构造逻辑抽为纯函数 buildFallback（fallback.mjs，build.mjs inline 在此），消除"测试复刻修复逻辑"的 forward-test
+// 缺陷——测试直调 buildFallback 断言真实行为，而非 grep 模板源码。
+const succeedGroupKeys = new Set(discoverRows.map(d => d.group.key))
+const failedGroups = DISCOVER_GROUPS.filter(g => !succeedGroupKeys.has(g.key))
+const recoveredBoards = new Set()
+if (failedGroups.length) {
+  // 预算每失败组的 srcUrls（合组走 g.feeds 硬编码源；单板组从 boards 订阅源派生，含 labs 官方源），挂到 g.srcUrls。
+  for (const g of failedGroups) {
+    const bds = g.boards.map(k => boards.find(b => b.key === k)).filter(Boolean)
+    g.srcUrls = g.feeds ? g.feeds : bds.flatMap(b => (b.feeds || []).concat((b.companies || []).filter(c => c.feed).map(c => c.feed)).concat(b.key === 'labs' ? OFFICIAL_FEEDS.map(f => f.url) : []))
+  }
+  const { fallbackByUrl, recoveredBoards: rb } = buildFallback(digestByKey, failedGroups, claimWindow, normURL)
+  for (const b of rb) recoveredBoards.add(b)
+  if (fallbackByUrl.length) {
+    log('DISCOVER-FALLBACK ' + failedGroups.map(g => g.key).join('+') + ' → ' + fallbackByUrl.length + ' 条 harvest entries 补进 ' + recoveredBoards.size + ' 板（disc 失败兜底；CRITICAL-1：合组 board 按 feed.boards∩g.boards 派生）')
+    for (const u of fallbackByUrl) {
+      if (!boardURLMap.has(u.board)) boardURLMap.set(u.board, [])
+      boardURLMap.get(u.board).push(u)
+    }
+  }
+}
+
 const { fetchTargets, dupes, budgetDropped } = allocateFetchBudget(boardURLMap, MAX_FETCH)
 log('Dedup: ' + dupes.length + ' dupes, ' + budgetDropped.length + ' budget-dropped, fetching ' + fetchTargets.length)
 
@@ -968,7 +1197,7 @@ for (const d of discoverRows) (d.noNews || []).forEach(k => noNewsSet.add(k))
 // 分组发现失败判据（8/22 修复）：一个板只要「任一归属组失败（无返回）或返回的组自报 degraded」即 marked DE。
 // 由 boards.mjs 的 computeBoardStates 统一计算——策略/融资/政策/安全/人 同属 media-en/media-cn 覆盖，同一失败组
 // 不再只把独占板标红（safety/people），而是全部标记，避免"同组共享板静默 0 claims"（8/21 bug）。
-const boardStates = computeBoardStates(discoverRows, boards.map(b => b.key))
+const boardStates = computeBoardStates(discoverRows, boards.map(b => b.key), recoveredBoards)
 const missingBoardKeys = [...boardStates].filter(([, s]) => s.missing).map(([k]) => k)
 const coverage = boards.map(b => {
   const st = boardStates.get(b.key) || { degraded: false, missing: false }
@@ -977,10 +1206,12 @@ const coverage = boards.map(b => {
     claims: boardClaimCount.get(b.key) || 0,
     urls: sources.filter(s => s.board === b.key).length,
     // 公司三态：板被按组标 fail（missing 且通常无 discover）→ 全 unreached；否则按 noNews 派生。
+    // 兜底救回的板（recovered）不标 missing → 不全 unreached，按 noNews 派生（与有返回一致）。
     companiesChecked: b.companies ? b.companies.map(c => st.missing
       ? { name: c.name, state: 'unreached', evidence: 'no_discover_agent' }
       : { name: c.name, state: noNewsSet.has(c.name) ? 'no_news' : 'has_dynamic', evidence: 'labs' }) : null,
     degraded: st.degraded,   // 板级降级（任一组失败 或 有返回但自报降级 → 通道降级保留）
+    recovered: !!st.recovered,  // 兜底救回（disc 失败但 harvest entries 补进）— 供覆盖自检/降级溯源
   }
 })
 
@@ -1027,7 +1258,7 @@ const reportBody = (confirmed.length ? confirmed.map((c, i) =>
   : '(无已确认声明)')
 const refutedList = killed.map(c => '- "' + c.claim + '" — ' + c.sourceUrl)
 const unverifiedList = unverified.map(c => '- "' + c.claim + '" — ' + c.sourceUrl)
-const coverBlock = coverage.map(c => '- ' + c.title + ': ' + c.claims + ' claims / ' + c.urls + ' sources' + (c.degraded ? ' [degraded]' : '') + (c.companiesChecked
+const coverBlock = coverage.map(c => '- ' + c.title + ': ' + c.claims + ' claims / ' + c.urls + ' sources' + (c.recovered ? ' [recovered]' : (c.degraded ? ' [degraded]' : '')) + (c.companiesChecked
   ? ' ; 公司覆盖(' + c.companiesChecked.length + '家): 有动态[' + c.companiesChecked.filter(x => x.state === 'has_dynamic').map(x => x.name).join('、') + '] 未发现动态[' + c.companiesChecked.filter(x => x.state === 'no_dynamic').map(x => x.name).join('、') + ']' + (c.companiesChecked.some(x => x.state === 'unreached') ? ' 未达[' + c.companiesChecked.filter(x => x.state === 'unreached').map(x => x.name).join('、') + ']' : '')
   : '')).join('\n')
 const missLines = windowMisses.map(w => '- ' + w.name + '（' + (w.date || '日期未知') + '）：' + w.note).join('\n')
@@ -1045,6 +1276,7 @@ if (toolError > 0) degradedFlags.push('verify_agent_errors:' + toolError)
 if (budgetDropped.length > 0) degradedFlags.push('fetch_budget_dropped:' + budgetDropped.length)
 if (missingBoardKeys.length > 0) degradedFlags.push('discovery_degraded:missing_' + missingBoardKeys.join('+'))
 else if (discoverRows.some(d => d.degraded)) degradedFlags.push('discovery_degraded')
+if (recoveredBoards.size > 0) degradedFlags.push('discovery_recovered:' + [...recoveredBoards].join('+'))
 if (budgetSkipped.length > 0) degradedFlags.push('budget_skipped:' + budgetSkipped.join('+'))
 const reportErr = report ? null : 'report agent failed; reverting to raw archive'
 if (reportErr) degradedFlags.push('report_failed')
@@ -1054,7 +1286,11 @@ const refutedOut = killed.map(c => ({ claim: c.claim, source: c.sourceUrl, vote:
 const unverifiedOut = unverified.map(c => ({ claim: c.claim, source: c.sourceUrl }))
 const outOfWindowOut = outOfWindow.map(c => ({ claim: c.claim, source: c.sourceUrl, date: c.publishDate || c.date, vote: (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, erroredCount: c.erroredCount || 0 }))
 const md = report
-  ? renderMarkdown({ date: DATE, window: WINDOW_LABEL, report, coverage, windowMisses, degraded: degradedFlags })
+  ? renderMarkdown({ date: DATE, window: WINDOW_LABEL, report, coverage, windowMisses, degraded: degradedFlags, meta: {
+      date: DATE, window: WINDOW_LABEL,
+      stats: { confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, urls_fetched: sources.length, urls_discovered: discoverRows.reduce((n, d) => n + d.urls.length, 0) },
+      generated_by: 'ai-daily (deepseek-v4-flash)',
+    } })
   : renderDegradedMarkdown({ date: DATE, window: WINDOW_LABEL, confirmed: confirmedOut, refuted: refutedOut, coverage, windowMisses, degraded: degradedFlags, noNewsCompanies: noDynamicCompanies, reportError: reportErr })
 
 const claimsJson = JSON.stringify({ date: DATE, window: WINDOW_LABEL, confirmed: confirmedOut, refuted: refutedOut, unverified: unverifiedOut, outOfWindow: outOfWindowOut }, null, 1)
