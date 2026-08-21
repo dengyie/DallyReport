@@ -49,7 +49,26 @@ test('makeAddMajor 同事件只保留一份；日期更具体者覆盖', () => {
   assert.equal(arr2[0].date, '2026-07-28')
 })
 
-test('makeAddMajor 产物 verifiedByVote:false / vote:— 不冒充投票', () => {
+// ─── B.4 2026-08-22 三契约缺口修复：major-out 可溯源（种子带 url → 真 URL；无 url → (多源公认) 兜底）───
+
+test('_mkMajor 带 url 种子 → sourceUrl 是真 URL + sourceTitle 为 hostname', () => {
+  const arr = []
+  makeAddMajor(arr)({ name: 'DeepSeek V4-Pro 正式版上线', date: '2026-08-13', note: '官方登记', url: 'https://api-docs.deepseek.com/news/' }, 'labs')
+  assert.equal(arr.length, 1)
+  assert.equal(arr[0].sourceUrl, 'https://api-docs.deepseek.com/news/')
+  assert.equal(arr[0].sourceTitle, 'api-docs.deepseek.com', 'hostname 提取')
+  assert.equal(arr[0].isMajorOut, true)
+})
+
+test('_mkMajor 无 url → sourceUrl 退回 (多源公认) + sourceTitle 行业客观公认事实', () => {
+  const arr = []
+  makeAddMajor(arr)({ name: 'OpenAI 预告 Astra 旗舰模型', date: '2026-08-02', note: '媒体口径预告' }, 'labs')
+  assert.equal(arr.length, 1)
+  assert.equal(arr[0].sourceUrl, '(多源公认)')
+  assert.equal(arr[0].sourceTitle, '行业客观公认事实')
+})
+
+test('makeAddMajor 产物 verifiedByVote:false / vote:— 不冒充投出', () => {
   const arr = []
   makeAddMajor(arr)({ name: 'DeepSeek V4 Pro / V4 Flash 开源', date: '2026-07-31', note: 'MIT 开源' }, 'labs')
   assert.equal(arr[0].isMajorOut, true)

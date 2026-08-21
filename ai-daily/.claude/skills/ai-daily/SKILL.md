@@ -28,6 +28,14 @@ description: 生成 AI 每日日报（自动每天 08:40 由 launchd 触发，�
 - 确保 `docs/daily/` 存在：`mkdir -p docs/daily`（Obsidian 库内，可被库引用）。
 - `outDir` = `/Users/mango/project/claude-project/obsidian/docs/daily`（绝对路径）。
 
+### 3.4. run 前 build 产物检查（部署纪律）
+- 跑 workflow 前，若 `scripts/ai-daily/`（即源模块 `ai-daily/scripts/ai-daily/`）任何源文件比产物
+  `.claude/workflows/ai-daily.js` 新，必须先重建产物：`node scripts/ai-daily/build.mjs`。
+- 检测命令（工作目录 = 源仓库根 `/Users/mango/project/claude-project/obsidian`）：
+  `find ai-daily/scripts/ai-daily -newer ai-daily/.claude/workflows/ai-daily.js`——有输出即需要重建。
+- 原因：run 用的是磁盘上 workflow 文件那一刻的内容，源改动只改 `scripts/ai-daily/*.mjs` 而没重建 +
+  提交产物，run 就会用旧版（缺失 citation/最新渲染逻辑）。build 产物与源模块必须同步提交。
+
 ### 4. 调用 Workflow
 用 Workflow 工具，`scriptPath: /Users/mango/project/claude-project/obsidian/.claude/workflows/ai-daily.js`，
 `args` 传 JSON 对象：

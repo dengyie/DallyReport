@@ -11,7 +11,8 @@ export const DISCOVER_SCHEMA = {
     }},
     noNews: { type: 'array', items: { type: 'string' } },
     nearWindow: { type: 'array', items: { type: 'object', required: ['name', 'note'], properties: { name: { type: 'string' }, date: { type: 'string' }, note: { type: 'string' } } } },
-    majorOutOfWindow: { type: 'array', items: { type: 'object', required: ['name', 'date', 'note'], properties: { name: { type: 'string' }, date: { type: 'string' }, note: { type: 'string' } } } },
+    // majorOutOfWindow url 可选（2026-08-22 B.2）：有官方/一手可溯源页才带，无则不带（降级 C 兜底标 [行业公认·无单一链接]）。
+    majorOutOfWindow: { type: 'array', items: { type: 'object', required: ['name', 'date', 'note'], properties: { name: { type: 'string' }, date: { type: 'string' }, note: { type: 'string' }, url: { type: 'string' } } } },
     degraded: { type: 'boolean' },
   },
 }

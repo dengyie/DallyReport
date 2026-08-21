@@ -251,7 +251,7 @@ test('降级版：windowMisses 过滤已在 major-out 出现的条目（去重�
     date: 'd', window: 'w',
     confirmed: [
       { claim: 'Qwen3.8-27B 开源：行业公认事实', window: 'major-out', vote: '—', verifiedByVote: false, source: '(多源公认)', date: '2026-08-15', erroredCount: 0 },
-      { claim: 'Grok 4.6 发布：xAI 官方确认', window: 'major-out', vote: '—', verifiedByVote: false, source: '(多源公认)', date: '2026-08-12', erroredCount: 0 },
+      { claim: 'Grok 4.6 发布：官方确认', window: 'major-out', vote: '—', verifiedByVote: false, source: '(多源公认)', date: '2026-08-12', erroredCount: 0 },
     ],
     refuted: [], coverage: [], degraded: [], noNewsCompanies: [],
     windowMisses: [
@@ -265,4 +265,51 @@ test('降级版：windowMisses 过滤已在 major-out 出现的条目（去重�
   assert.ok(!md.includes('Grok 4.6 in GitHub Copilot'), '已入 major-out 的 windowMiss 去除')
   assert.ok(!md.includes('Qwen3.8-27B edge model'), '已入 major-out 的 windowMiss 去除')
   assert.ok(md.includes('Reproducing 2,200 ICML 论文'), '未入 major-out 的保留')
+})
+
+// ─── 2026-08-22 三契约缺口修复（spec 2026-08-22-ai-daily-sources-and-uncertainty-design.md）───
+
+test('B.5 noUrl 兜底：sources 全非 URL 文字描述 + status [窗口外·重大] → [行业公认·无单一链接] 且不进参考来源节', () => {
+  const report = {
+    oneLiner: 'o', execSummary: 'e',
+    sections: [{ board: 'labs', title: 'T', items: [
+      { title: 'DeepSeek V4-Pro 上线', summary: '官方登记。', confidence: 'high', sources: ['HuggingFace 官方博客（多源公认）'], vote: '—', status: '[窗口外·重大]' },
+    ]}],
+    caveats: [], openQuestions: [],
+  }
+  const md = renderMarkdown({ date: 'd', window: 'w', report, coverage: [], windowMisses: [], degraded: [] })
+  assert.ok(md.includes('[行业公认·无单一链接]'), '非 URL 来源不假装有链接')
+  assert.ok(!md.includes('### 参考来源'), '该项无 URL，整份 md 不出参考来源节')
+})
+
+test('C.2 未核查徽标：status [窗口外·重大] → *[未核查·待证实]*；已核查 2-0 → 无', () => {
+  const mkOne = (s, status) => renderMarkdown({ date: 'd', window: 'w',
+    report: { oneLiner: 'o', execSummary: 'e', sections: [{ board: 'x', title: 'T', items: [
+      { title: 'T', summary: s, confidence: 'medium', sources: ['https://x.ai/1'], vote: status.includes('已核查') ? '2-0' : '—', status },
+    ]}], caveats: [], openQuestions: [] },
+    coverage: [], windowMisses: [], degraded: [] })
+  const unchecked = mkOne('摘要文本', '[窗口外·重大]')
+  assert.ok(unchecked.includes('*[未核查·待证实]*'), '未核查项徽标必须在场')
+  const plain = mkOne('摘要文本', '已核查 2-0')
+  assert.ok(!plain.includes('*[未核查·待证实]*'), '已核查项不得挂未核查徽标')
+})
+
+test('B.4+A：major-out 带 URL → [n] 角标 + 参考来源节对应条目', () => {
+  const md = renderMarkdown({ date: 'd', window: 'w',
+    report: { oneLiner: 'o', execSummary: 'e', sections: [{ board: 'x', title: 'T', items: [
+      { title: 'DeepSeek V4-Pro 上线', summary: '官方登记。', confidence: 'high', sources: ['https://api-docs.deepseek.com/news/'], vote: '—', status: '[窗口外·重大]' },
+    ]}], caveats: [], openQuestions: [] },
+    coverage: [], windowMisses: [], degraded: [] })
+  assert.ok(md.includes('[1]'), 'major-out 带 URL 挂 [1] 角标')
+  assert.ok(md.includes('### 参考来源'))
+  assert.ok(md.includes('- [1] [api-docs.deepseek.com](<https://api-docs.deepseek.com/news/>)'))
+})
+
+test('已核查正常项带 URL sources → 无 [行业公认·无单一链接] 标注', () => {
+  const md = renderMarkdown({ date: 'd', window: 'w',
+    report: { oneLiner: 'o', execSummary: 'e', sections: [{ board: 'x', title: 'T', items: [
+      { title: 'Stripe 7.5B', summary: '支付巨头。', confidence: 'medium', sources: ['https://t.co'], vote: '2-0', status: '已核查 2-0' },
+    ]}], caveats: [], openQuestions: [] },
+    coverage: [], windowMisses: [], degraded: [] })
+  assert.ok(!md.includes('[行业公认·无单一链接]'), '已核查项带真 URL 不标 noUrl 兜底')
 })
