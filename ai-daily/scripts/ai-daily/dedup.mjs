@@ -18,12 +18,24 @@ export const majorKey = name => {
   return String(name).toLowerCase().replace(/[（(].*?[)）]/g, '').replace(/\s+/g, '')
 }
 
-const _mkMajor = (m, board) => ({
-  claim: m.name + '：' + m.note, quote: m.note, sourceUrl: '(多源公认)', sourceTitle: '行业客观公认事实',
-  date: m.date, board: board, publishDate: m.date, sourceQuality: 'primary', importance: 'central',
-  verdicts: [], refutedCount: 0, erroredCount: 0, survives: true, isRefuted: false, isMajorOut: true, vote: '—',
-  // verifiedByVote:false —— [窗口外·重大] 未经过窗口内对抗投票，reportBody 统一渲染 Vote: —（未投票），不得冒充 3-0。
-})
+// hostname 提取（本地实现，不 import render-md——render-md 是末模块，会循环依赖）。
+// 种子带可选 url 字段：有 url 的 major-out 项 sourceUrl 是真 URL → buildCitationMap 正常编号挂 [n] 角标。
+// (与 render-md buildCitationMap 的 hostname 逻辑复刻一致；两模块都不 import 对方)
+const _hostnameOf = s => {
+  try { return new URL(s).hostname } catch { return null }
+}
+
+const _mkMajor = (m, board) => {
+  const host = _hostnameOf(m.url)
+  return {
+    claim: m.name + '：' + m.note, quote: m.note,
+    sourceUrl: m.url || '(多源公认)',
+    sourceTitle: host || '行业客观公认事实',
+    date: m.date, board: board, publishDate: m.date, sourceQuality: 'primary', importance: 'central',
+    verdicts: [], refutedCount: 0, erroredCount: 0, survives: true, isRefuted: false, isMajorOut: true, vote: '—',
+    // verifiedByVote:false —— [窗口外·重大] 未经过窗口内对抗投票，reportBody 统一渲染 Vote: —（未投票），不得冒充 3-0。
+  }
+}
 
 // 工厂返回 _addMajor(m, board)，语义同现行：全 claim 与首段各测一次指纹（8/16 xAI 前缀 bug 修复）；日期更具体者覆盖。
 export const makeAddMajor = majorOutClaims => (m, board) => {

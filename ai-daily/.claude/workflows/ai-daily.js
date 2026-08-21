@@ -153,7 +153,8 @@ const DISCOVER_SCHEMA = {
     }},
     noNews: { type: 'array', items: { type: 'string' } },
     nearWindow: { type: 'array', items: { type: 'object', required: ['name', 'note'], properties: { name: { type: 'string' }, date: { type: 'string' }, note: { type: 'string' } } } },
-    majorOutOfWindow: { type: 'array', items: { type: 'object', required: ['name', 'date', 'note'], properties: { name: { type: 'string' }, date: { type: 'string' }, note: { type: 'string' } } } },
+    // majorOutOfWindow url 可选（2026-08-22 B.2）：有官方/一手可溯源页才带，无则不带（降级 C 兜底标 [行业公认·无单一链接]）。
+    majorOutOfWindow: { type: 'array', items: { type: 'object', required: ['name', 'date', 'note'], properties: { name: { type: 'string' }, date: { type: 'string' }, note: { type: 'string' }, url: { type: 'string' } } } },
     degraded: { type: 'boolean' },
   },
 }
@@ -266,8 +267,10 @@ const OFFICIAL_FEEDS = [
 // 种子"重大超窗事实"（行业里程碑级公认事件，即使不在窗口也应出现在正文，标注 [窗口外·重大]）：
 // 发现代理通过 majorOutOfWindow 字段上报更多此类事实。
 const KNOWN_MAJOR_OUT = [
+  // 种子 url 字段可选（2026-08-22 B.1）：有官方一手页可溯源才加；纯媒体口径预告无官方页不加（降级 C 兜底标 [行业公认·无单一链接]）。
+  // Astra 是媒体口径预告、无 OpenAI 官方一手页 → 不加 url；DeepSeek V4-Pro 官方 news 页可溯源 → 加 url。
   { name: 'OpenAI 预告 Astra 旗舰模型（解决 10 个长期开放数学难题）', date: '2026-08-02', note: 'OpenAI 公开预告下一个旗舰模型 Astra，宣称已解决 10 个长期开放数学难题，具体发布日期待官方确认（来源：多家媒体 2026-08-02，日期为预告日）。' },
-  { name: 'DeepSeek V4-Pro 正式版上线（Agent 能力增强）', date: '2026-08-13', note: 'DeepSeek 官方 news 页登记 DeepSeek-V4-Pro 正式版上线 2026/08/13，App/网页/API 全面开放，强化 Agent 能力并引入分时段峰值定价；网易 08-16 报道印证 2026-08-17 价格生效（双源）。' },
+  { name: 'DeepSeek V4-Pro 正式版上线（Agent 能力增强）', date: '2026-08-13', note: 'DeepSeek 官方 news 页登记 DeepSeek-V4-Pro 正式版上线 2026/08/13，App/网页/API 全面开放，强化 Agent 能力并引入分时段峰值定价；网易 08-16 报道印证 2026-08-17 价格生效（双源）。', url: 'https://api-docs.deepseek.com/news/' },
 ]
 
 // labs 花名册跨板块校正别名表：发现代理可能过报 no_news，已确认声明/来源标题命中别名即翻转 has_dynamic。
@@ -369,12 +372,24 @@ const majorKey = name => {
   return String(name).toLowerCase().replace(/[（(].*?[)）]/g, '').replace(/\s+/g, '')
 }
 
-const _mkMajor = (m, board) => ({
-  claim: m.name + '：' + m.note, quote: m.note, sourceUrl: '(多源公认)', sourceTitle: '行业客观公认事实',
-  date: m.date, board: board, publishDate: m.date, sourceQuality: 'primary', importance: 'central',
-  verdicts: [], refutedCount: 0, erroredCount: 0, survives: true, isRefuted: false, isMajorOut: true, vote: '—',
-  // verifiedByVote:false —— [窗口外·重大] 未经过窗口内对抗投票，reportBody 统一渲染 Vote: —（未投票），不得冒充 3-0。
-})
+// hostname 提取（本地实现，不 import render-md——render-md 是末模块，会循环依赖）。
+// 种子带可选 url 字段：有 url 的 major-out 项 sourceUrl 是真 URL → buildCitationMap 正常编号挂 [n] 角标。
+// (与 render-md buildCitationMap 的 hostname 逻辑复刻一致；两模块都不 import 对方)
+const _hostnameOf = s => {
+  try { return new URL(s).hostname } catch { return null }
+}
+
+const _mkMajor = (m, board) => {
+  const host = _hostnameOf(m.url)
+  return {
+    claim: m.name + '：' + m.note, quote: m.note,
+    sourceUrl: m.url || '(多源公认)',
+    sourceTitle: host || '行业客观公认事实',
+    date: m.date, board: board, publishDate: m.date, sourceQuality: 'primary', importance: 'central',
+    verdicts: [], refutedCount: 0, erroredCount: 0, survives: true, isRefuted: false, isMajorOut: true, vote: '—',
+    // verifiedByVote:false —— [窗口外·重大] 未经过窗口内对抗投票，reportBody 统一渲染 Vote: —（未投票），不得冒充 3-0。
+  }
+}
 
 // 工厂返回 _addMajor(m, board)，语义同现行：全 claim 与首段各测一次指纹（8/16 xAI 前缀 bug 修复）；日期更具体者覆盖。
 const makeAddMajor = majorOutClaims => (m, board) => {
@@ -533,7 +548,7 @@ const discoverPrompt = (g, ctx) => {
     '3)【WebSearch 补充】仍缺的：WebSearch `<公司/关键词> 新闻 ' + ctx.WTO + '`（全流水合计 ≤' + ctx.WEB_BUDGET_TOTAL + ' 次、本组 ≤' + ctx.WEB_BUDGET_PER + ' 次；不可用就跳过，勿失败）。\n' +
     '4) 只保留事件日期落在 [' + ctx.WFROM + ', ' + (ctx.WTO || ctx.DATE) + '] 内的；优先一手官方源；跳过无日期/明显陈旧/SEO/内容农场/常青帮助文档页。URL 写完整。\n' +
     '最多返回 ' + (multi ? 10 : ctx.MAX_URLS_PER_BOARD) + ' 条 url/title/found_via/date' + (multi ? ' + board（必填，本组板块之一）' : '') + '。' + (bds[0].key === 'labs' ? 'labs 板块逐家核厂商——确认窗口内无任何动态的，把公司名放 noNews。' : '') +
-    '5) 若某公司/主题本窗口无动态、但近 2 周内有重大发布/官宣/可信事实（如 DeepSeek V4 开源、Grok 4.6 发布、DeepSeek Harness 这类**行业客观公认事实**），将其列入 majorOutOfWindow（name/date/note），供日报正文以「[窗口外·重大]」标签呈现。注意：majorOutOfWindow 只放**客观事实**（非传闻、非推测），且必须是**行业里程碑级**——如果是普通更新或次要动态，放 nearWindow 供窗口外参考节引用即可。' +
+    '5) 若某公司/主题本窗口无动态、但近 2 周内有重大发布/官宣/可信事实（如 DeepSeek V4 开源、Grok 4.6 发布、DeepSeek Harness 这类**行业客观公认事实**），将其列入 majorOutOfWindow（name/date/note），供日报正文以「[窗口外·重大]」标签呈现。注意：majorOutOfWindow 只放**客观事实**（非传闻、非推测），且必须是**行业里程碑级**——如果是普通更新或次要动态，放 nearWindow 供窗口外参考节引用即可。若该事实有可溯源的官方/一手 URL，尽量在 `url` 字段带上（可选，无则不带）。' +
     '6)【预算·硬性纪律】X 搜索本组 ≤' + g.xBudget + ' 次，一家/一个主题一次尝试、无果即放过、不反复深挖；WebSearch 全流水合计 ≤' + ctx.WEB_BUDGET_TOTAL + ' 次、本组 ≤' + ctx.WEB_BUDGET_PER + ' 次，不可用即跳过、勿失败。**发现阶段禁止运行 fetch.js**，也禁止 WebFetch 连续深挖单公司官网新闻页（官网正文抓取是 fetch 阶段职责，发现阶段只需给出 URL 候选；官网首页一次快速确认至多 1 次）。输出只保留用于抓取/核查的高置信候选，超过上限按重要性截断。' +
     'degraded 语义：仅当本（组/板块）的【主源/官方通道】整体一无所获（摘要 + X 搜索均返回零个可用 URL）时才置 true；个别补充源（GitHub trending、WebSearch、某一 X 搜索等）失败不算 degraded，正常返回即可。尽力用可用渠道，不要整任务失败。' +
     '\n\n⚠️ 最终收口（呼应开头条目）：执行完上述步骤后，立即调用 StructuredOutput 工具返回结构化对象。**严禁 end_turn 返回纯文本**——这是最常见的失败模式（思考里说"我来调用 StructuredOutput"却以文字结束）。调工具即结束，勿在工具调用前/后铺垫文字。Structured output only.'
@@ -573,7 +588,7 @@ const reportPrompt = ctx =>
   "   - summary：**一段新闻正文**（2-3 句），写清楚发生了什么、为什么重要，不是重复 title。\n" +
   "   - status：核查状态，取值为 已核查 2-0 / 已核查 2-1 / [窗口外·重大] / 未核查 / 已否决（render 会在标题后加徽标）\n" +
   "   - 多个 sources 时只保留最权威的 1-2 个 URL。\n\n" +
-  "4.5. **不确定度如实标注**（与 AI.md 风格一致）：summary 中若素材存在不确定性（单源/社区传闻/灰度状态/未官方确认），用「有用户称」「据讨论」「现有资料未说明」「暂不能确认」等措辞如实标注，不假装确定性；社区传闻与官方动态须用不同措辞区分。\n\n" +
+  "4.5. **不确定度如实标注**（与 AI.md 风格一致）：summary 中若素材存在不确定性（单源/社区传闻/灰度状态/未官方确认），用「有用户称」「据讨论」「现有资料未说明」「暂不能确认」等措辞如实标注，不假装确定性；社区传闻与官方动态须用不同措辞区分。**对 status 为 `[窗口外·重大]` 或 `未核查` 的 item（未经窗口内对抗投票验证），summary 必须用不确定度措辞（「据报」「有媒体称」「宣称」「待官方确认」「暂不能确认」之一）描述其事项，禁止用「已解决」「完成」「正式发布」「确认」等肯定完成态措辞**。已核查项（status 为 `已核查 2-0`/`已核查 2-1`）有 vote 支撑，可正常陈述。社区传闻与官方动态须用不同措辞区分。\n\n" +
   "5. **板块组织**：不要机械按来源分板。**labs（新模型/模型能力）板块如果有内容，必须放在第一个板块**。如果某板块今天无重要新闻，该板块可以不出现在正文（但保留 coverage 自检）。重磅新闻放在最靠前的板块下。\n\n" +
   "6. **caveats**：注明弱来源/厂商口径/时间敏感。openQuestions 2-4 个。\n\n" +
   "7. 如果素材大部分是超窗重大项（major-out）而窗口内几乎为空，则 oneLiner 和 execSummary 如实反映这一情况，优先报道 major-out 中最重要的 1-2 条。\n\n" +
@@ -630,10 +645,16 @@ const itemBlock = (it, citeMap) => {
   const tag = it.status ? ' `' + it.status + '`' : ''
   const conf = (CONF_ZH[it.confidence] || it.confidence) ? '可信度：' + (CONF_ZH[it.confidence] || it.confidence) : ''
   const badges = citationBadges(it.sources, citeMap)
+  // B.5: sources 存在但全是非 URL 文字描述（buildCitationMap 没给编号）→ 诚实标注无单一链接
+  const hasSrc = it.sources && it.sources.length > 0
+  const noUrl = hasSrc && !badges
+  // C.2: 未核查项（status 为 [窗口外·重大] 或 未核查）→ 机器徽标双保险，不依赖代理措辞
+  const unchecked = it.status === '[窗口外·重大]' || it.status === '未核查'
+  const tail = badges + (noUrl ? ' [行业公认·无单一链接]' : '') + (unchecked ? ' *[未核查·待证实]*' : '')
   const lines = []
   lines.push('**' + it.title + '**' + tag)
   lines.push('')
-  lines.push(it.summary + badges + (conf ? '\n\n*' + conf + '*' : ''))
+  lines.push(it.summary + tail + (conf ? '\n\n*' + conf + '*' : ''))
   return lines.join('\n')
 }
 

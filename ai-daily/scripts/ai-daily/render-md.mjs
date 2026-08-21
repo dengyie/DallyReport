@@ -49,10 +49,16 @@ const itemBlock = (it, citeMap) => {
   const tag = it.status ? ' `' + it.status + '`' : ''
   const conf = (CONF_ZH[it.confidence] || it.confidence) ? '可信度：' + (CONF_ZH[it.confidence] || it.confidence) : ''
   const badges = citationBadges(it.sources, citeMap)
+  // B.5: sources 存在但全是非 URL 文字描述（buildCitationMap 没给编号）→ 诚实标注无单一链接
+  const hasSrc = it.sources && it.sources.length > 0
+  const noUrl = hasSrc && !badges
+  // C.2: 未核查项（status 为 [窗口外·重大] 或 未核查）→ 机器徽标双保险，不依赖代理措辞
+  const unchecked = it.status === '[窗口外·重大]' || it.status === '未核查'
+  const tail = badges + (noUrl ? ' [行业公认·无单一链接]' : '') + (unchecked ? ' *[未核查·待证实]*' : '')
   const lines = []
   lines.push('**' + it.title + '**' + tag)
   lines.push('')
-  lines.push(it.summary + badges + (conf ? '\n\n*' + conf + '*' : ''))
+  lines.push(it.summary + tail + (conf ? '\n\n*' + conf + '*' : ''))
   return lines.join('\n')
 }
 
