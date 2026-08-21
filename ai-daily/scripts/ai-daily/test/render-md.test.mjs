@@ -31,7 +31,7 @@ test('完整版：标题/一句话/摘要/分节/局限/开放问题/覆盖自�
   assert.ok(md.includes('今日 AI 行业一句话。'))
   assert.ok(md.includes('## 📄 执行摘要'))
   assert.ok(md.includes('### 头部实验室·新模型'))
-  assert.ok(md.includes('`3-0✓`'))
+  assert.ok(md.includes('**[3-0✓] xAI 发布 Grok 4.6**'))  // 旧式 title 含 [3-0✓] 前缀
   assert.ok(md.includes('## ⚠️ 未验证与局限'))
   assert.ok(md.includes('某条弱来源。'))
   assert.ok(md.includes('## ❓ 开放问题'))
@@ -45,13 +45,13 @@ test('完整版：精简陈述式 title 契约——前置状态标签不强制�
   assert.ok(md.includes('Stripe $7.5B 收购 OpenRouter'), '精简 title 原样呈现')
   // 旧式 title 仍兼容（不为兼容而吞信息）
   assert.ok(md.includes('[3-0✓] xAI 发布 Grok 4.6'), '旧式 title 仍兼容保留')
-  assert.ok(md.includes('可信度 中'), '新 title 附可信度')
+  assert.ok(md.includes('可信度：中'), '新 title 附可信度')
 })
 
 test('完整版：major-out 条目 vote — 原样呈现（不冒充投票）', () => {
   const md = renderMarkdown({ date: '2026-08-18', window: 'w', report: baseReport, coverage: baseCoverage, windowMisses: [], degraded: [] })
-  assert.ok(md.includes('[窗口外·重大] DeepSeek V4 开源'))
-  assert.ok(md.includes('`—`'))
+  assert.ok(md.includes('**[窗口外·重大] DeepSeek V4 开源**'))
+  assert.ok(md.includes('(多源公认)'))  // 来源原样呈现
 })
 
 test('完整版：windowMisses 存在时出窗口外参考节，否则不出', () => {

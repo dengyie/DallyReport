@@ -75,7 +75,10 @@ const WINDOW_LABEL = WFROM && WTO ? WFROM + ' ~ ' + WTO : WTO || DATE
 
 // ─── 常量区（供 prompt ctx 与编排使用）───
 // 8/15：稠密源（arXiv/HF papers）与普通源统一 12000 字符——稠密源曾是输入大户，降到与普通源同档。
-const feedMaxChars = () => 12000
+// 8/21 学术板修复：arXiv 官方 API 返回 Atom XML（50 entries ≈ 42KB/URL），普通上限 12000 字符会截到 header →
+// 条目被截只剩 1-2 条、digest 空洞。给 arXiv API 源单独放宽：窗口内最近 50 篇的标题/摘要即为此域全部正文，
+// 无 `--full-path` 泄露、无多 feed 依赖。其余普通源仍 12000。
+const feedMaxChars = f => /export\.arxiv\.org\/api\/query/i.test(f.url || f) ? 40000 : 12000
 const WEB_BUDGET_TOTAL = 4
 const WEB_BUDGET_PER = 2
 
@@ -91,6 +94,14 @@ const WEB_BUDGET_PER = 2
 
 // boards 由 BOARDS 花名册按选区派生（BOARDS 已 inline 就绪，此时访问无 TDZ）。
 const boards = BOARDS_SELECTED ? BOARDS.filter(b => BOARDS_SELECTED.has(b.key)) : BOARDS
+// 8/21 学术板修复：arXiv 官方 API 窗口查询（替代 HTML list 页——auto provider(Tavily) 把 HTML 压成 501 字符
+// → digest 空 → discover degraded）。URL 含 {{WFROM}}/{{WTO}} 占位（YYYYMMDD + 0000/2359 时刻），此处按窗口展开；
+// 无窗口时回退原 list 页（数组原元素）。cs.AI|cs.CL 合并在单 URL，normURL 去 query → key 稳定，digest 归栈一致。
+const arxivWindow = (WFROM && WTO) ? { wf: WFROM.replace(/-/g, ''), wt: WTO.replace(/-/g, '') } : null
+for (const b of boards) {
+  if (!b.feeds) continue
+  b.feeds = b.feeds.map(f => arxivWindow ? f.replace('{{WFROM}}', arxivWindow.wf).replace('{{WTO}}', arxivWindow.wt) : f.replace(/{{WFROM}}|{{WTO}}/g, 'recent'))
+}
 
 // ─── 编排层 helpers（realm 专属/依赖注入后）───
 const impRank = { central: 0, supporting: 1, tangential: 2 }
@@ -286,6 +297,38 @@ for (const d of discoverRows) for (const u of d.urls) {
   if (!boardURLMap.has(b)) boardURLMap.set(b, [])
   boardURLMap.get(b).push({ ...u, board: b })
 }
+
+// ─── Discover 失败兜底（8/22 第十八项）：用 harvest 已抓到的 entries 补 URL 候选 ───
+// 根因（systematic-debugging 实证）：deepseek-v4-flash 长思考后倾向 end_turn 不调 StructuredOutput
+// → disc:academic 返回 null（thinking 里已推导出 6 条 URL 却没调工具）→ tries=1 不重试 → DISCOVER-FAIL → academic 板 0 claim。
+// harvest 阶段已成功抓到 feed entries（arXiv API + direct 走通），这些 entries 本就是高置信候选。
+// 兜底：disc 失败的组，直接从 digestByKey 取窗口内 entries 补进 boardURLMap，不重跑代理（省墙钟、不烧 token）。
+// 仅对失败的组补，且只取非窗口外（claimWindow !== 'out'，含 in 与无日期 unknown——后者交 verify 把关）、有 url 的 entries。found_via 标 "harvest-fallback" 供核查溯源。
+const succeedGroupKeys = new Set(discoverRows.map(d => d.group.key))
+const failedGroups = DISCOVER_GROUPS.filter(g => !succeedGroupKeys.has(g.key))
+if (failedGroups.length) {
+  const fallbackByUrl = []
+  for (const g of failedGroups) {
+    const bds = g.boards.map(k => boards.find(b => b.key === k)).filter(Boolean)
+    const srcUrls = g.feeds ? g.feeds : bds.flatMap(b => (b.feeds || []).concat((b.companies || []).filter(c => c.feed).map(c => c.feed)).concat(b.key === 'labs' ? OFFICIAL_FEEDS.map(f => f.url) : []))
+    for (const su of [...new Set(srcUrls.map(normURL))]) {
+      const h = digestByKey.get(su)
+      if (!h || h.failed) continue
+      for (const e of (h.entries || [])) {
+        if (e && e.url && claimWindow({ date: e.date }) !== 'out') fallbackByUrl.push({ url: e.url, title: e.title || e.url, date: e.date, board: g.boards.length === 1 ? g.boards[0] : null, found_via: 'harvest-fallback' })
+      }
+    }
+  }
+  if (fallbackByUrl.length) {
+    log('DISCOVER-FALLBACK ' + failedGroups.map(g => g.key).join('+') + ' → ' + fallbackByUrl.length + ' 条 harvest entries 补进（disc 失败兜底）')
+    for (const u of fallbackByUrl) {
+      if (!u.board) continue
+      if (!boardURLMap.has(u.board)) boardURLMap.set(u.board, [])
+      boardURLMap.get(u.board).push(u)
+    }
+  }
+}
+
 const { fetchTargets, dupes, budgetDropped } = allocateFetchBudget(boardURLMap, MAX_FETCH)
 log('Dedup: ' + dupes.length + ' dupes, ' + budgetDropped.length + ' budget-dropped, fetching ' + fetchTargets.length)
 

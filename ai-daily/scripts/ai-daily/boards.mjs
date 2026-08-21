@@ -31,7 +31,7 @@ export const BOARDS = [
   { key: 'strategy', title: '重磅头条·战略', focus: '重大战略/资本/基础设施新闻：大额融资平台、星际之门类项目、并购、行业地位变动', feeds: ['https://www.qbitai.com/', 'https://techcrunch.com/category/artificial-intelligence/'] },
   { key: 'products', title: '产品与硬件', focus: '消费级 AI 产品、AI 硬件、设备发布、机器人、新品落地', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.theverge.com/ai-artificial-intelligence/', 'https://www.qbitai.com/'] },
   { key: 'opensource', title: '开源与工具链', focus: '开源权重发布、HF 趋势、GitHub 趋势、Agent 框架与工具', feeds: ['https://huggingface.co/blog/feed.xml', 'https://huggingface.co/papers'], xHandles: ['huggingface', 'OpenSourceModels'] },
-  { key: 'academic', title: '学术研究', focus: 'arXiv 新提交、HF Daily Papers 榜单、研究突破', feeds: ['https://arxiv.org/list/cs.AI/recent', 'https://arxiv.org/list/cs.CL/recent', 'https://huggingface.co/papers'] },
+  { key: 'academic', title: '学术研究', focus: 'arXiv 新提交、HF Daily Papers 论文、研究突破', feeds: ['https://export.arxiv.org/api/query?search_query=%28cat%3Acs.AI+OR+cat%3Acs.CL%29+AND+submittedDate%3A%5B{{WFROM}}0000+TO+{{WTO}}2359%5D&start=0&max_results=50', 'https://huggingface.co/papers'] },
   { key: 'funding', title: '融资并购', focus: '融资轮次、估值、并购、投资动态', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://36kr.com/', 'https://www.qbitai.com/'] },
   { key: 'policy', title: '政策监管', focus: '政府/监管/法院/标准组织对 AI 的动作', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.qbitai.com/'] },
   { key: 'safety', title: '安全与伦理', focus: '对齐、安全、滥用、水印、系统卡、攻击事件', feeds: ['https://www.qbitai.com/', 'https://techcrunch.com/category/artificial-intelligence/'] },

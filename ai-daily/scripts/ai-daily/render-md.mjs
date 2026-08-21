@@ -4,9 +4,17 @@
 
 const CONF_ZH = { high: '高', medium: '中', low: '低' }
 
-const itemLine = it =>
-  '- **' + it.title + '**' + (it.status ? ' `' + it.status + '`' : '') + '（' + (it.vote ? '`' + it.vote + '` ' : '') + '可信度 ' + (CONF_ZH[it.confidence] || it.confidence) + '）— ' + it.summary +
-  (it.sources && it.sources.length ? ' — *来源: ' + it.sources.join(' , ') + '*' : '')
+const itemBlock = (it, i) => {
+  const tag = it.status ? ' `' + it.status + '`' : ''
+  const src = it.sources && it.sources.length ? '来源：' + it.sources.map(s => { try { return new URL(s).hostname } catch { return s } }).join('、') : ''
+  const conf = (CONF_ZH[it.confidence] || it.confidence) ? '可信度：' + (CONF_ZH[it.confidence] || it.confidence) : ''
+  const meta = [src, conf].filter(Boolean).join(' | ')
+  const lines = []
+  lines.push('**' + it.title + '**' + tag)
+  lines.push('')
+  lines.push(it.summary + (meta ? '\n\n*' + meta + '*' : ''))
+  return lines.join('\n')
+}
 
 // 完整版：report 代理产出 sections 后的确定性排版。
 // 输入即现行 mdWriter prompt 里 reportJson 的同构数据。
@@ -27,7 +35,7 @@ export const renderMarkdown = ({ date, window, report, coverage, windowMisses, d
   for (const sec of report.sections || []) {
     L.push('### ' + sec.title)
     L.push('')
-    for (const it of sec.items || []) L.push(itemLine(it))
+    for (const it of sec.items || []) { L.push(itemBlock(it)); L.push('') }
     L.push('')
   }
   if (report.caveats && report.caveats.length) {

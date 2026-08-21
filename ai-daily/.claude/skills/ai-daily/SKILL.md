@@ -70,6 +70,7 @@ description: 生成 AI 每日日报（自动每天 08:40 由 launchd 触发，�
   - **降级标记 `degraded`**（如 discovery_degraded / verify_agent_errors / fetch_budget_dropped / budget_skipped）——必须如实转达。
 - 若 Workflow 返回 `error` 或产物缺失：降级处理，产出一份"未核查日报"到 `docs/daily/<date>-ai日报.md`（标注降级原因），并保留已归档 JSON；如实向用户说明失败点。
 - 不要向用户重复贴全文大 JSON；贴 md 文件路径 + 摘要即可。
+- **生成完成后清理本会话开起的浏览器/进程**：若本次生成过程中，我（编排器）为开发/调试而调用过 Playwright MCP / 启动过浏览器或 node 进程，则收尾时**只关闭我自己开起的那几个**（精确按本会话子进程/本会话写入的标记关闭，或用 `pkill -f 'playwright-mcp.*<本会话唯一标识>'`）。**绝不**去关用户自己开的 Chrome/浏览器/其他 Claude Code 会话的工具进程——那些不属于日报系统。关闭前用 `ps -o pid,etime,lstart,command` 复核该进程确实是本会话拉起、且不是其它会话/用户正在用的，再终止。本条为流程纪律：生成完日报即清理自身资源，不遗留占用。
 
 ## 产出物命名
 - `docs/daily/YYYY-MM-DD-ai日报.md`

@@ -75,7 +75,10 @@ const WINDOW_LABEL = WFROM && WTO ? WFROM + ' ~ ' + WTO : WTO || DATE
 
 // ─── 常量区（供 prompt ctx 与编排使用）───
 // 8/15：稠密源（arXiv/HF papers）与普通源统一 12000 字符——稠密源曾是输入大户，降到与普通源同档。
-const feedMaxChars = () => 12000
+// 8/21 学术板修复：arXiv 官方 API 返回 Atom XML（50 entries ≈ 42KB/URL），普通上限 12000 字符会截到 header →
+// 条目被截只剩 1-2 条、digest 空洞。给 arXiv API 源单独放宽：窗口内最近 50 篇的标题/摘要即为此域全部正文，
+// 无 `--full-path` 泄露、无多 feed 依赖。其余普通源仍 12000。
+const feedMaxChars = f => /export\.arxiv\.org\/api\/query/i.test(f.url || f) ? 40000 : 12000
 const WEB_BUDGET_TOTAL = 4
 const WEB_BUDGET_PER = 2
 
@@ -244,7 +247,7 @@ const BOARDS = [
   { key: 'strategy', title: '重磅头条·战略', focus: '重大战略/资本/基础设施新闻：大额融资平台、星际之门类项目、并购、行业地位变动', feeds: ['https://www.qbitai.com/', 'https://techcrunch.com/category/artificial-intelligence/'] },
   { key: 'products', title: '产品与硬件', focus: '消费级 AI 产品、AI 硬件、设备发布、机器人、新品落地', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.theverge.com/ai-artificial-intelligence/', 'https://www.qbitai.com/'] },
   { key: 'opensource', title: '开源与工具链', focus: '开源权重发布、HF 趋势、GitHub 趋势、Agent 框架与工具', feeds: ['https://huggingface.co/blog/feed.xml', 'https://huggingface.co/papers'], xHandles: ['huggingface', 'OpenSourceModels'] },
-  { key: 'academic', title: '学术研究', focus: 'arXiv 新提交、HF Daily Papers 榜单、研究突破', feeds: ['https://arxiv.org/list/cs.AI/recent', 'https://arxiv.org/list/cs.CL/recent', 'https://huggingface.co/papers'] },
+  { key: 'academic', title: '学术研究', focus: 'arXiv 新提交、HF Daily Papers 论文、研究突破', feeds: ['https://export.arxiv.org/api/query?search_query=%28cat%3Acs.AI+OR+cat%3Acs.CL%29+AND+submittedDate%3A%5B{{WFROM}}0000+TO+{{WTO}}2359%5D&start=0&max_results=50', 'https://huggingface.co/papers'] },
   { key: 'funding', title: '融资并购', focus: '融资轮次、估值、并购、投资动态', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://36kr.com/', 'https://www.qbitai.com/'] },
   { key: 'policy', title: '政策监管', focus: '政府/监管/法院/标准组织对 AI 的动作', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.qbitai.com/'] },
   { key: 'safety', title: '安全与伦理', focus: '对齐、安全、滥用、水印、系统卡、攻击事件', feeds: ['https://www.qbitai.com/', 'https://techcrunch.com/category/artificial-intelligence/'] },
@@ -446,7 +449,8 @@ const harvestPrompt = (g, ctx) =>
   g.feeds.map(f => '- **' + (f.label || f.url) + '**\n  URL: ' + f.url).join('\n') + '\n\n' +
   '## 执行（对每个 feed 必须独立执行抓取，逐条做出来再进入下一个）\n' +
   g.feeds.map((f, i) =>
-    'Step ' + (i + 1) + '：cd ' + ctx.GROK_DIR + " && ./scripts/fetch.js --max-chars " + ctx.feedMaxChars(f) + " '" + f.url + "'\n" +
+    'Step ' + (i + 1) + '：cd ' + ctx.GROK_DIR + " && ./scripts/fetch.js --max-chars " + ctx.feedMaxChars(f) + " --provider " + (/export\.arxiv\.org\/api\/query/i.test(f.url) ? 'direct' : 'auto') + " '" + f.url + "'\n" +
+    '   **arXiv 官方 API 源：输出为 Atom XML（`<entry>` 为单篇，含 title/summary/updated/id 链接）。feed 字段必须用**本条目的来源 Feed URL（原样，勿改）**。**\n' +
     '   **只看返回 sources 里的 url/title/date 卡片，不看 answer.text（模型旧知识，不可作新闻依据）。**\n' +
     '   保留日期落在 [' + ctx.WFROM + ', ' + (ctx.WTO || ctx.DATE) + '] 内的条目，最多 15 条写入 entries；这些条目必须带 feed 字段 = **本条目的来源 Feed URL（原样，勿改）**，否则无法归栈。\n' +
     '   日期在窗口前（窗口首日前约 7 天内）但属**重大发布/官宣**（行业里程碑级）的，挑最多 4 条写入 recent（同样带 feed 字段，note 一句话说明为何重大）。普通旧新闻不写。\n' +
@@ -479,6 +483,7 @@ const discoverPrompt = (g, ctx) => {
     '5) 若某公司/主题本窗口无动态、但近 2 周内有重大发布/官宣/可信事实（如 DeepSeek V4 开源、Grok 4.6 发布、DeepSeek Harness 这类**行业客观公认事实**），将其列入 majorOutOfWindow（name/date/note），供日报正文以「[窗口外·重大]」标签呈现。注意：majorOutOfWindow 只放**客观事实**（非传闻、非推测），且必须是**行业里程碑级**——如果是普通更新或次要动态，放 nearWindow 供窗口外参考节引用即可。' +
     '6)【预算·硬性纪律】X 搜索本组 ≤' + g.xBudget + ' 次，一家/一个主题一次尝试、无果即放过、不反复深挖；WebSearch 全流水合计 ≤' + ctx.WEB_BUDGET_TOTAL + ' 次、本组 ≤' + ctx.WEB_BUDGET_PER + ' 次，不可用即跳过、勿失败。**发现阶段禁止运行 fetch.js**，也禁止 WebFetch 连续深挖单公司官网新闻页（官网正文抓取是 fetch 阶段职责，发现阶段只需给出 URL 候选；官网首页一次快速确认至多 1 次）。输出只保留用于抓取/核查的高置信候选，超过上限按重要性截断。' +
     'degraded 语义：仅当本（组/板块）的【主源/官方通道】整体一无所获（摘要 + X 搜索均返回零个可用 URL）时才置 true；个别补充源（GitHub trending、WebSearch、某一 X 搜索等）失败不算 degraded，正常返回即可。尽力用可用渠道，不要整任务失败。' +
+    '\n\n⚠️ 收口硬纪律（实测缺陷防护）：无论你在思考里推导出什么结论，最终必须**调用 StructuredOutput 工具**返回结构化对象。**禁止以 end_turn 返回纯文本/解释性文字**——哪怕你在思考中已得出全部 URL，只要没调 StructuredOutput 工具，本代理判定为失败（null），所属板块整组降级、0 claim。流程：思考完毕 → 调一次 StructuredOutput 工具（填齐 urls/degraded/noNews/majorOutOfWindow 字段）→ 结束。不要先打文字再"准备调工具"。' +
     '\n\nStructured output only.'
 }
 
@@ -508,15 +513,15 @@ const reportPrompt = ctx =>
   ctx.missBlock +
   "\n## 覆盖自检\n" + ctx.coverBlock + "\n\n## 编辑要求\n" +
   "0. **禁止调用任何工具**（禁 WebFetch、WebSearch、Read、curl 及一切工具调用）——只做纯推理合成；一旦发起工具调用即视为失败。\n\n" +
-  "1. **先筛选，再写稿**：通读全部素材，选出今天**真正值得报道的 2-3 条头条**（正式发布/官宣/大额融资/监管裁决/里程碑）。其余素材按板块归类，不重要的（小更新/营销话术/旧闻重复）**直接 discard 不进正文**。宁缺毋滥。\n\n" +
-  "2. **oneLiner（今日一句话）**：用一句话概括今天 AI 行业最重要的事——像新闻快讯标题，不是笼统总结。\n\n" +
-  "3. **execSummary（执行摘要）**：3-5 句，按重要性排序，写成一个连贯段落（不是分点列项）。每句对应一条重要新闻，写清楚谁做了什么+结果。\n\n" +
+  "1. **先筛选，再写稿**：通读全部素材，选出今天**真正值得报道的 2-3 条头条**。头条优先序：**新模型发布 > 模型能力重大突破 > 技术里程碑 > 开源重磅发布 > 研究突破 > 监管/官宣**。**融资/并购/收费/估值/商业动态永远不进头条**，只进对应板块正文。其余素材按板块归类，不重要的（小更新/营销话术/旧闻重复）**直接 discard 不进正文**。宁缺毋滥。\n\n" +
+  "2. **oneLiner（今日一句话）**：用一句话概括今天 AI 行业**技术层面**最重要的事——新模型、新能力、新突破，不是商业新闻。如果今天没有技术头条，才退而求其次选战略/产品新闻。\n\n" +
+  "3. **execSummary（执行摘要）**：3-5 句，按技术重要性排序，写成一个连贯段落（不是分点列项）。每句对应一条重要新闻，写清楚谁做了什么+结果。\n\n" +
   "4. **sections / items**：\n" +
-  "   - title：**新闻式标题**（≤25字，主语+动词+结果/数字，例：Stripe $7.5B 收购 OpenRouter）。**不要前置 [窗口外·重大]/[2-0✓] 等标签**，不要长从句，不要括号解释。\n" +
+  "   - title：**新闻式标题**（≤25字，主语+动词+结果/数字，例：GLM-5.3 开源，Coding 能力接近 Fable 5）。**不要前置 [窗口外·重大]/[2-0✓] 等标签**，不要长从句，不要括号解释。\n" +
   "   - summary：**一段新闻正文**（2-3 句），写清楚发生了什么、为什么重要，不是重复 title。\n" +
   "   - status：核查状态，取值为 已核查 2-0 / 已核查 2-1 / [窗口外·重大] / 未核查 / 已否决（render 会在标题后加徽标）\n" +
   "   - 多个 sources 时只保留最权威的 1-2 个 URL。\n\n" +
-  "5. **板块组织**：不要机械按来源分板。如果某板块今天无重要新闻，该板块可以不出现在正文（但保留 coverage 自检）。重磅新闻放在最靠前的板块下。\n\n" +
+  "5. **板块组织**：不要机械按来源分板。**labs（新模型/模型能力）板块如果有内容，必须放在第一个板块**。如果某板块今天无重要新闻，该板块可以不出现在正文（但保留 coverage 自检）。重磅新闻放在最靠前的板块下。\n\n" +
   "6. **caveats**：注明弱来源/厂商口径/时间敏感。openQuestions 2-4 个。\n\n" +
   "7. 如果素材大部分是超窗重大项（major-out）而窗口内几乎为空，则 oneLiner 和 execSummary 如实反映这一情况，优先报道 major-out 中最重要的 1-2 条。\n\n" +
   "Structured output only. 输出格式：{ sections, oneLiner, execSummary, caveats, openQuestions } 其中 sections 为 [{ board, title, items: [{ title, summary, confidence, sources, vote, status }] }]"
@@ -527,9 +532,17 @@ const reportPrompt = ctx =>
 
 const CONF_ZH = { high: '高', medium: '中', low: '低' }
 
-const itemLine = it =>
-  '- **' + it.title + '**' + (it.status ? ' `' + it.status + '`' : '') + '（' + (it.vote ? '`' + it.vote + '` ' : '') + '可信度 ' + (CONF_ZH[it.confidence] || it.confidence) + '）— ' + it.summary +
-  (it.sources && it.sources.length ? ' — *来源: ' + it.sources.join(' , ') + '*' : '')
+const itemBlock = (it, i) => {
+  const tag = it.status ? ' `' + it.status + '`' : ''
+  const src = it.sources && it.sources.length ? '来源：' + it.sources.map(s => { try { return new URL(s).hostname } catch { return s } }).join('、') : ''
+  const conf = (CONF_ZH[it.confidence] || it.confidence) ? '可信度：' + (CONF_ZH[it.confidence] || it.confidence) : ''
+  const meta = [src, conf].filter(Boolean).join(' | ')
+  const lines = []
+  lines.push('**' + it.title + '**' + tag)
+  lines.push('')
+  lines.push(it.summary + (meta ? '\n\n*' + meta + '*' : ''))
+  return lines.join('\n')
+}
 
 // 完整版：report 代理产出 sections 后的确定性排版。
 // 输入即现行 mdWriter prompt 里 reportJson 的同构数据。
@@ -550,7 +563,7 @@ const renderMarkdown = ({ date, window, report, coverage, windowMisses, degraded
   for (const sec of report.sections || []) {
     L.push('### ' + sec.title)
     L.push('')
-    for (const it of sec.items || []) L.push(itemLine(it))
+    for (const it of sec.items || []) { L.push(itemBlock(it)); L.push('') }
     L.push('')
   }
   if (report.caveats && report.caveats.length) {
@@ -641,6 +654,14 @@ const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, wi
 
 // boards 由 BOARDS 花名册按选区派生（BOARDS 已 inline 就绪，此时访问无 TDZ）。
 const boards = BOARDS_SELECTED ? BOARDS.filter(b => BOARDS_SELECTED.has(b.key)) : BOARDS
+// 8/21 学术板修复：arXiv 官方 API 窗口查询（替代 HTML list 页——auto provider(Tavily) 把 HTML 压成 501 字符
+// → digest 空 → discover degraded）。URL 含 {{WFROM}}/{{WTO}} 占位（YYYYMMDD + 0000/2359 时刻），此处按窗口展开；
+// 无窗口时回退原 list 页（数组原元素）。cs.AI|cs.CL 合并在单 URL，normURL 去 query → key 稳定，digest 归栈一致。
+const arxivWindow = (WFROM && WTO) ? { wf: WFROM.replace(/-/g, ''), wt: WTO.replace(/-/g, '') } : null
+for (const b of boards) {
+  if (!b.feeds) continue
+  b.feeds = b.feeds.map(f => arxivWindow ? f.replace('{{WFROM}}', arxivWindow.wf).replace('{{WTO}}', arxivWindow.wt) : f.replace(/{{WFROM}}|{{WTO}}/g, 'recent'))
+}
 
 // ─── 编排层 helpers（realm 专属/依赖注入后）───
 const impRank = { central: 0, supporting: 1, tangential: 2 }
@@ -836,6 +857,38 @@ for (const d of discoverRows) for (const u of d.urls) {
   if (!boardURLMap.has(b)) boardURLMap.set(b, [])
   boardURLMap.get(b).push({ ...u, board: b })
 }
+
+// ─── Discover 失败兜底（8/22 第十八项）：用 harvest 已抓到的 entries 补 URL 候选 ───
+// 根因（systematic-debugging 实证）：deepseek-v4-flash 长思考后倾向 end_turn 不调 StructuredOutput
+// → disc:academic 返回 null（thinking 里已推导出 6 条 URL 却没调工具）→ tries=1 不重试 → DISCOVER-FAIL → academic 板 0 claim。
+// harvest 阶段已成功抓到 feed entries（arXiv API + direct 走通），这些 entries 本就是高置信候选。
+// 兜底：disc 失败的组，直接从 digestByKey 取窗口内 entries 补进 boardURLMap，不重跑代理（省墙钟、不烧 token）。
+// 仅对失败的组补，且只取非窗口外（claimWindow !== 'out'，含 in 与无日期 unknown——后者交 verify 把关）、有 url 的 entries。found_via 标 "harvest-fallback" 供核查溯源。
+const succeedGroupKeys = new Set(discoverRows.map(d => d.group.key))
+const failedGroups = DISCOVER_GROUPS.filter(g => !succeedGroupKeys.has(g.key))
+if (failedGroups.length) {
+  const fallbackByUrl = []
+  for (const g of failedGroups) {
+    const bds = g.boards.map(k => boards.find(b => b.key === k)).filter(Boolean)
+    const srcUrls = g.feeds ? g.feeds : bds.flatMap(b => (b.feeds || []).concat((b.companies || []).filter(c => c.feed).map(c => c.feed)).concat(b.key === 'labs' ? OFFICIAL_FEEDS.map(f => f.url) : []))
+    for (const su of [...new Set(srcUrls.map(normURL))]) {
+      const h = digestByKey.get(su)
+      if (!h || h.failed) continue
+      for (const e of (h.entries || [])) {
+        if (e && e.url && claimWindow({ date: e.date }) !== 'out') fallbackByUrl.push({ url: e.url, title: e.title || e.url, date: e.date, board: g.boards.length === 1 ? g.boards[0] : null, found_via: 'harvest-fallback' })
+      }
+    }
+  }
+  if (fallbackByUrl.length) {
+    log('DISCOVER-FALLBACK ' + failedGroups.map(g => g.key).join('+') + ' → ' + fallbackByUrl.length + ' 条 harvest entries 补进（disc 失败兜底）')
+    for (const u of fallbackByUrl) {
+      if (!u.board) continue
+      if (!boardURLMap.has(u.board)) boardURLMap.set(u.board, [])
+      boardURLMap.get(u.board).push(u)
+    }
+  }
+}
+
 const { fetchTargets, dupes, budgetDropped } = allocateFetchBudget(boardURLMap, MAX_FETCH)
 log('Dedup: ' + dupes.length + ' dupes, ' + budgetDropped.length + ' budget-dropped, fetching ' + fetchTargets.length)
 
