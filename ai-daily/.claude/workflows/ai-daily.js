@@ -470,6 +470,7 @@ const discoverPrompt = (g, ctx) => {
   const digestBlock = multi ? ctx.digestForFeeds(g.feeds) : ctx.digestForBoard(bds[0])
   return '## 板块发现代理' + (multi ? '（合组：' + g.label + '）' : '：' + bds[0].title) + '\n\n窗口：' + ctx.WINDOW_LABEL + '。为日报采集窗口内可信可核实的新闻 URL。\n' +
     '⚠️ 关键纪律：搜索脚本的输出里 answer.text 是模型旧知识总结（训练截止点可能早于窗口！），绝不可作为新闻判断依据；只采信 sources 里的 URL 卡片（sources.grok / sources.merged 的 url/title/date）与下方**共享源摘要**（已由主流程预抓，可信）。官方渠道官宣的新模型/新发布通常不在模型知识里——要靠下方摘要与 X 官方源找到。\n\n' +
+    '⚠️ 收口框架（最终唯一出口——先记住这条再做下面的步骤）：本代理的最终动作**只能是调用 StructuredOutput 工具**返回 { urls, noNews, nearWindow, majorOutOfWindow, degraded }。思考过程中即使已得出全部 URL 与结论，**最后一步也是调用该工具，而不是 end_turn 输出文字解释**。任何"我在思考里已想清楚，现在说明一下结论"的文字输出都算失败——主流程判定为 null，本组所属板块整组降级、0 claim。正确流程：执行下方 1-6 步 → 调一次 StructuredOutput 工具填齐字段 → 结束。禁止在工具调用前先打一段总结文字。\n\n' +
     coverLine + '\n\n' +
     '## 共享源摘要（已预抓，直接采信；**禁止再运行 fetch.js**）\n' + digestBlock + '\n\n' +
     '## 执行\n' +
@@ -483,8 +484,7 @@ const discoverPrompt = (g, ctx) => {
     '5) 若某公司/主题本窗口无动态、但近 2 周内有重大发布/官宣/可信事实（如 DeepSeek V4 开源、Grok 4.6 发布、DeepSeek Harness 这类**行业客观公认事实**），将其列入 majorOutOfWindow（name/date/note），供日报正文以「[窗口外·重大]」标签呈现。注意：majorOutOfWindow 只放**客观事实**（非传闻、非推测），且必须是**行业里程碑级**——如果是普通更新或次要动态，放 nearWindow 供窗口外参考节引用即可。' +
     '6)【预算·硬性纪律】X 搜索本组 ≤' + g.xBudget + ' 次，一家/一个主题一次尝试、无果即放过、不反复深挖；WebSearch 全流水合计 ≤' + ctx.WEB_BUDGET_TOTAL + ' 次、本组 ≤' + ctx.WEB_BUDGET_PER + ' 次，不可用即跳过、勿失败。**发现阶段禁止运行 fetch.js**，也禁止 WebFetch 连续深挖单公司官网新闻页（官网正文抓取是 fetch 阶段职责，发现阶段只需给出 URL 候选；官网首页一次快速确认至多 1 次）。输出只保留用于抓取/核查的高置信候选，超过上限按重要性截断。' +
     'degraded 语义：仅当本（组/板块）的【主源/官方通道】整体一无所获（摘要 + X 搜索均返回零个可用 URL）时才置 true；个别补充源（GitHub trending、WebSearch、某一 X 搜索等）失败不算 degraded，正常返回即可。尽力用可用渠道，不要整任务失败。' +
-    '\n\n⚠️ 收口硬纪律（实测缺陷防护）：无论你在思考里推导出什么结论，最终必须**调用 StructuredOutput 工具**返回结构化对象。**禁止以 end_turn 返回纯文本/解释性文字**——哪怕你在思考中已得出全部 URL，只要没调 StructuredOutput 工具，本代理判定为失败（null），所属板块整组降级、0 claim。流程：思考完毕 → 调一次 StructuredOutput 工具（填齐 urls/degraded/noNews/majorOutOfWindow 字段）→ 结束。不要先打文字再"准备调工具"。' +
-    '\n\nStructured output only.'
+    '\n\n⚠️ 最终收口（呼应开头条目）：执行完上述步骤后，立即调用 StructuredOutput 工具返回结构化对象。**严禁 end_turn 返回纯文本**——这是最常见的失败模式（思考里说"我来调用 StructuredOutput"却以文字结束）。调工具即结束，勿在工具调用前/后铺垫文字。Structured output only.'
 }
 
 const fetchPrompt = (src, ctx) =>

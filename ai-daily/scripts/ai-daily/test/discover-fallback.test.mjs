@@ -54,9 +54,15 @@ test('fallback: DISCOVER-FALLBACK 日志可见（降级/兜底可 grep）', () =
   assert.match(TPL, /DISCOVER-FALLBACK/, '兜底触发时有可见日志行')
 })
 
-test('prompt: discoverPrompt 末尾强制 StructuredOutput 收口、禁止 end_turn 纯文本', () => {
-  // 实测缺陷：thinking 推导完却 end_turn 不调工具。末尾必须写死"必须调 StructuredOutput、禁止 end_turn 纯文本"。
-  assert.match(PROMPTS, /调用 StructuredOutput 工具/, 'prompt 要求调用 StructuredOutput 工具')
-  assert.match(PROMPTS, /禁止以 end_turn 返回纯文本/, 'prompt 禁止 end_turn 返回纯文本')
-  assert.match(PROMPTS, /没调 StructuredOutput 工具.*判定为失败/, '明确告知不调工具=失败/降级后果')
+test('prompt: discoverPrompt 收口纪律——开头框架 + 末尾硬收尾，强制 StructuredOutput、禁 end_turn 纯文本', () => {
+  // 实测缺陷：thinking 推导完却 end_turn 不调工具。优化后：开头立"唯一出口是 StructuredOutput"框架，末尾精炼硬收尾呼应。
+  assert.match(PROMPTS, /收口框架（最终唯一出口/, '开头立收口框架：最终唯一出口是 StructuredOutput')
+  assert.match(PROMPTS, /StructuredOutput 工具\*{0,2}返回 \{ urls, noNews, nearWindow, majorOutOfWindow, degraded \}/, '明确给出工具调用的字段结构')
+  assert.match(PROMPTS, /最后一步也是调用该工具，而不是 end_turn 输出文字/, '命中 thinking→tool 卡点：最后一步是调工具非 end_turn')
+  assert.match(PROMPTS, /判定为 null/, '明确告知不调工具=判定 null/降级后果')
+  assert.match(PROMPTS, /严禁 end_turn 返回纯文本/, '末尾硬收尾：严禁 end_turn 纯文本')
+  assert.match(PROMPTS, /这是最常见的失败模式/, '末尾标注该 end_turn 模式为常见失败模式')
+  // 收口纪律不得与末尾 Structured output only. 矛盾——两者都应在场且一致
+  const m = PROMPTS.match(/最终收口[\s\S]*?Structured output only\./)
+  assert.ok(m, '末尾最终收口段以 Structured output only. 收束')
 })
