@@ -148,10 +148,13 @@ export const renderMarkdown = ({ date, window, report, coverage, windowMisses, d
     for (const c of report.caveats) L.push('- ' + c)
     L.push('')
   }
-  if (windowMisses && windowMisses.length) {
+  // 层 1 去重：过滤已在 report.sections items 标题中出现的窗口外项（对齐降级版 D.3，2026-08-22）。
+  const majFromSections = (report.sections || []).flatMap(s => s.items || []).map(it => ({ claim: it.title }))
+  const windowMissesDedup = windowMisses ? dedupWindowMisses(windowMisses, majFromSections) : []
+  if (windowMissesDedup.length) {
     L.push('## 📎 窗口外参考')
     L.push('')
-    for (const w of windowMisses) L.push('- ' + w.name + '（' + (w.date || '日期未知') + '）：' + w.note)
+    for (const w of windowMissesDedup) L.push('- ' + w.name + '（' + (w.date || '日期未知') + '）：' + w.note)
     L.push('')
   }
   if (report.openQuestions && report.openQuestions.length) {

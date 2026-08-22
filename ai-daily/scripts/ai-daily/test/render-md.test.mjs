@@ -349,3 +349,43 @@ test('已核查正常项带 URL sources → 无 [行业公认·无单一链接] 
     coverage: [], windowMisses: [], degraded: [] })
   assert.ok(!md.includes('[行业公认·无单一链接]'), '已核查项带真 URL 不标 noUrl 兜底')
 })
+
+// ─── 2026-08-22 完整版结构性重复修复（spec 窗口外参考去重，对齐降级版 D.3）───
+// 根因：renderMarkdown 直接把 windowMisses 渲染进「## 📎 窗口外参考」节，不去重；
+// 而 report 代理合成 sections 时可能把同一窗口外次要项又写成一条 item → 正文重复。
+// 修复：渲染前用 dedupWindowMisses(windowMisses, majFromSections) 过滤已在 sections 出现的条目。
+
+test('完整版：windowMisses 与 report.sections items 标题去重——重复的窗口外项不再出现（token 共享）', () => {
+  // 8/22 生产 run 实证：'OpenAI 零数据保留'/'Anthropic 650 亿'/'Groq 3.5 亿' 等窗口外参考在正文出现两次。
+  // name 与 sections item title 非完全一致（有措辞差异），靠共享区分性拉丁实体 token 命中。
+  const report = {
+    oneLiner: 'o', execSummary: 'e',
+    sections: [{ board: 'labs', title: '头部实验室', items: [
+      { title: 'OpenAI 推出前沿模型零数据保留选项', summary: '官方公告。', confidence: 'medium', sources: ['https://openai.com/index/a'], vote: '—' },
+      { title: 'Anthropic 发布 Claude 650 亿参数', summary: '官方公告。', confidence: 'medium', sources: ['https://anthropic.com/a'], vote: '—' },
+    ]}],
+    caveats: [], openQuestions: [],
+  }
+  const windowMisses = [
+    { name: 'OpenAI 前沿模型零数据保留选项', date: '2026-08-14', note: '官方提供零数据保留选项' },
+    { name: 'Anthropic 650 亿参数模型', date: '2026-08-13', note: '大参数新模型' },
+    { name: 'Groq 3.5 亿参数推理加速', date: '2026-08-12', note: '推理加速' },
+  ]
+  const md = renderMarkdown({ date: 'd', window: 'w', report, coverage: [], windowMisses, degraded: [] })
+  // 已入正文 sections 的窗口外项（共享 OpenAI/Anthropic token）不得在「窗口外参考」节重复出现
+  assert.ok(!md.includes('OpenAI 前沿模型零数据保留选项'), '已入正文的 OpenAI 窗口外项不得重复')
+  assert.ok(!md.includes('Anthropic 650 亿参数模型'), '已入正文的 Anthropic 窗口外项不得重复')
+  // 未入正文的 Groq 窗口外项保留
+  assert.ok(md.includes('Groq 3.5 亿参数推理加速'), '未入正文的窗口外项保留')
+  // 正文 sections 自身内容不受去重影响
+  assert.ok(md.includes('OpenAI 推出前沿模型零数据保留选项'))
+  assert.ok(md.includes('Anthropic 发布 Claude 650 亿参数'))
+})
+
+test('完整版：windowMisses 全部已在 sections 时不出「窗口外参考」节（没有就不出契约）', () => {
+  const report = { oneLiner: 'o', execSummary: 'e', sections: [{ board: 'x', title: 'T', items: [
+    { title: 'OpenAI 推出前沿模型零数据保留选项', summary: 's', confidence: 'medium', sources: ['https://openai.com/a'], vote: '—' },
+  ]}], caveats: [], openQuestions: [] }
+  const md = renderMarkdown({ date: 'd', window: 'w', report, coverage: [], windowMisses: [{ name: 'OpenAI 前沿模型零数据保留选项', date: '2026-08-14', note: 'n' }], degraded: [] })
+  assert.ok(!md.includes('## 📎 窗口外参考'), '去重后为空 → 不渲染窗口外参考节')
+})
