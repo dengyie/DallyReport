@@ -146,3 +146,15 @@
 - 核查终判序不变；降级走既有路径，无新抛错点。
 - KNOWN_MAJOR_OUT 种子**内容**不增删（只加 url 字段）；age gate 阈值 21d 不变。
 - reportPrompt 既有头条优先序、禁工具调用、新闻式标题≤25字、§4.5 现有不确定度措辞全保留，仅增量收紧未核查项措辞。
+
+## 追加根因（2026-08-22 烟雾验证发现）：workflow realm 无 URL 全局
+
+三层修复（A/B/C）落地后，8/22 单板 labs 烟雾 run 实证：report 代理已正确返回真 URL sources（`https://api-docs.deepseek.com/news/`、`https://x.ai/news/grok-4-6`、`https://openai.com/index/stampli` 等），但完整版 md 仍是 **0 [n] 角标、0 参考来源节、全项 [行业公认·无单一链接] 兜底**。源端 `renderMarkdown` 在同一 report 上却产 12 角标——同代码同数据不同输出，悖论。
+
+**根因（Workflow 脚本 realm 实证）**：Workflow 工具的脚本 realm 是受限 JS 环境，**无 Node 全局 `URL`**（`typeof URL === 'undefined'`；`Map`/`Set`/`JSON` 等 JS 内置可用）。`render-md.mjs` 风格优化新增的 `buildCitationMap`/`citationBadges`/`hostname` 用 `new URL(s).href` → 抛 `ReferenceError: URL is not defined` → 各处 `catch { continue }` / `catch { return s }` 静默吞掉**每一个 URL** → citeMap 空 → 0 角标、0 参考来源节、`noUrl` 兜底全项触发。`dedup.mjs` `_hostnameOf` 的 `new URL(s).hostname`（catch→null）同病但影响小（只丢 sourceTitle）。
+
+**为什么三层修复没拦住**：三层都在代码/schema/prompt 层，而这是 realm 运行时缺失全局。8/21 完整版第一次 run 也是 0 角标——当时误判为"产物未含引用逻辑"（层 1），但实测 HEAD 产物确含 buildCitationMap；真正原因即此 realm 缺失，从风格优化上线起一直静默失效。
+
+**修复（层 4 — realm 适配）**：新增 `scripts/ai-daily/url-polyfill.mjs`——最小 WHATWG URL polyfill（仅 `.href`/`.hostname`/`.protocol`，非 URL 抛 TypeError 保留各处 catch 语义，幂等：已有全局 URL 则跳过），模块加载即 `globalThis.URL = MinURL`。`build.mjs MODULES` 置 `url-polyfill` 第一（在任何用 `new URL()` 的模块前 inline 执行）。`render-md.mjs` import 并在顶部 `installUrlPolyfill()`（node:test 直跑时全局 URL 已在，幂等跳过；realm 时由最先 inline 的 url-polyfill 已注入）。`test/realm-url.test.mjs` 模拟 realm（删 globalThis.URL）断言：①无 URL 时 citeMap 空（复现 bug）②注入后产 URL 条目 ③完整版 md 含 [n] 角标+参考来源节 ④href 幂等 ⑤hostname 正确 ⑥非 URL 抛错。
+
+**验证**：93/93 测绿（87+6 realm-url）。端到端确认（2026-08-22 烟雾 run wf_8708dac6-4c0，report 代理 600s 超时走降级路径）：降级版 md 含 `[1]`/`[2]`/`[3]` 正文角标 + `### 参考来源` 4 条（hostname 正确：openai.com / blogs.nvidia.com / api-docs.deepseek.com）+ 非 URL `(多源公认)` 正确跳过。降级路径走 `renderDegradedMarkdown` → `buildCitationMap`（与完整版 `renderMarkdown` 同一函数、同一 `new URL()`），故降级版产角标即证 polyfill 修复完整版同样生效（0 角标 bug 根因消除）。完整版真实 run 待 report 代理稳定产出 sections 后再补端到端截图。

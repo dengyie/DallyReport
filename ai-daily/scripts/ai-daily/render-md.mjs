@@ -6,6 +6,13 @@
 //   B. renderMarkdown 可选 meta → Obsidian frontmatter + 素材窗口横幅 + 低素材提示
 //   D. 降级版修 reportError 硬编码 + 来源角标化 + windowMisses 与 major-out 去重
 
+// workflow realm 缺失 URL 全局的最小 polyfill（见 url-polyfill.mjs；build inline 后自动注入）。
+// node:test 直跑时全局 URL 已存在，installUrlPolyfill 幂等跳过。
+import { installUrlPolyfill } from './url-polyfill.mjs'
+installUrlPolyfill()
+// 供 test/realm-url.test.mjs 模拟 realm（删 globalThis.URL）后重新注入用。
+export const setUrlPolyfillForRealm = () => { installUrlPolyfill() }
+
 const CONF_ZH = { high: '高', medium: '中', low: '低' }
 
 // 跨 section 唯一 URL 引用图：按「首次出现序」给每个唯一 URL 分配 1-based 编号（spec A.1）。

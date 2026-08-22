@@ -83,7 +83,10 @@ const WEB_BUDGET_TOTAL = 4
 const WEB_BUDGET_PER = 2
 
 // ═══ 模块内联区（build.mjs 替换；逻辑真源见 scripts/ai-daily/*.mjs）═══
-// 依赖序与 build.mjs MODULES 一致：date-utils(normURL) 必须在 boards(GROUPS_RAW.test 闭包) 与 dedup 前。
+// 依赖序与 build.mjs MODULES 一致：url-polyfill 最先（注入 globalThis.URL，workflow realm 无 URL 全局，
+// 否则 dedup._hostnameOf / render-md.buildCitationMap 的 new URL() 抛错被 catch 吞 → 完整版 0 角标）；
+// date-utils(normURL) 必须在 boards(GROUPS_RAW.test 闭包) 与 dedup 前。
+/* @inline: url-polyfill */
 /* @inline: date-utils */
 /* @inline: schemas */
 /* @inline: boards */

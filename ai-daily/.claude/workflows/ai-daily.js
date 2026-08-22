@@ -83,7 +83,41 @@ const WEB_BUDGET_TOTAL = 4
 const WEB_BUDGET_PER = 2
 
 // ═══ 模块内联区（build.mjs 替换；逻辑真源见 scripts/ai-daily/*.mjs）═══
-// 依赖序与 build.mjs MODULES 一致：date-utils(normURL) 必须在 boards(GROUPS_RAW.test 闭包) 与 dedup 前。
+// 依赖序与 build.mjs MODULES 一致：url-polyfill 最先（注入 globalThis.URL，workflow realm 无 URL 全局，
+// 否则 dedup._hostnameOf / render-md.buildCitationMap 的 new URL() 抛错被 catch 吞 → 完整版 0 角标）；
+// date-utils(normURL) 必须在 boards(GROUPS_RAW.test 闭包) 与 dedup 前。
+// ─── inline: url-polyfill ───
+// workflow realm 缺失 URL 全局的最小 WHATWG URL polyfill（2026-08-22 实证根因）。
+// Workflow 脚本 realm 无 URL（typeof URL==='undefined'），dedup._hostnameOf / render-md.buildCitationMap /
+// render-md.citationBadges 的 `new URL(s)` 抛 ReferenceError 被 catch{continue/null} 静默吞：
+//  → buildCitationMap 空 → 完整版 0 [n] 角标、0 参考来源节、全项 [行业公认·无单一链接] 兜底（8/22 两次 run 实证）。
+// 本 polyfill 须在任何 inline 模块前注入（build MODULES 顺序：url-polyfill 第一）。
+// 仅覆盖 pipeline 实际用到的 .href / .hostname / protocol；非 URL 输入抛 TypeError（保留各处 catch 语义）。
+// 幂等：已存在全局 URL（node:test 直跑、或已注入）时不覆盖，保证宿主 URL 优先。
+// href 返回构造时原输入字符串（规范 URL 已归一），保证 buildCitationMap 建图与 citationBadges 查图
+// 用同一 polyfill、同一 key（map.get 命中）。
+
+const installUrlPolyfill = () => {
+  if (typeof globalThis === 'undefined') return false
+  if (typeof globalThis.URL !== 'undefined') return false
+  const MinURL = class URL {
+    constructor(input) {
+      const s = String(input)
+      const m = s.match(/^(https?):\/\/([^\/?#]+)([^?#]*)(\?[^#]*)?(#.*)?$/i)
+      if (!m) throw new TypeError('invalid url: ' + s)
+      this._href = s
+      this.protocol = m[1].toLowerCase() + ':'
+      this.hostname = m[2].toLowerCase()
+      this.pathname = m[3] || '/'
+    }
+    get href() { return this._href }
+  }
+  globalThis.URL = MinURL
+  return true
+}
+
+// 模块加载即注入（workflow realm inline 后于顶部执行；node:test 已有全局 URL 则跳过）。
+installUrlPolyfill()
 // ─── inline: date-utils ───
 // ai-daily 日期/URL/数组纯函数 — 与 workflow 内逐字节一致（claimWindow 改工厂注入，唯一签名变化）。
 
@@ -601,6 +635,12 @@ const reportPrompt = ctx =>
 //   A. 来源角标化（buildCitationMap + 正文 [n] + 末尾「### 参考来源」节）
 //   B. renderMarkdown 可选 meta → Obsidian frontmatter + 素材窗口横幅 + 低素材提示
 //   D. 降级版修 reportError 硬编码 + 来源角标化 + windowMisses 与 major-out 去重
+
+// workflow realm 缺失 URL 全局的最小 polyfill（见 url-polyfill.mjs；build inline 后自动注入）。
+// node:test 直跑时全局 URL 已存在，installUrlPolyfill 幂等跳过。
+installUrlPolyfill()
+// 供 test/realm-url.test.mjs 模拟 realm（删 globalThis.URL）后重新注入用。
+const setUrlPolyfillForRealm = () => { installUrlPolyfill() }
 
 const CONF_ZH = { high: '高', medium: '中', low: '低' }
 
