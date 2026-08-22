@@ -15,6 +15,19 @@ export const setUrlPolyfillForRealm = () => { installUrlPolyfill() }
 
 const CONF_ZH = { high: '高', medium: '中', low: '低' }
 
+// C.3(2026-08-22): 状态标签规范化——把代理产出的 status 各种写法归一后判定是否「未核查」类（未经窗口内对抗投票）。
+// 归一：全半角括号（[]()（）［］）→ 去掉、全角空白→半角、两端去空白、去内部空白、去全角·→. 后比较。
+// 真值（标未核查徽标）：[窗口外·重大] / 窗口外·重大 / 窗口外重大 / 未核查；已核查/已否决不算。
+const normalizeStatus = s => String(s || '')
+  .replace(/[［【\[]/g, '[').replace(/[］】\]]/g, ']')  // 全角括号归一为半角
+  .replace(/[（）]/g, '(').replace(/[）]/g, ')')
+  .replace(/[\s]+/g, '')               // 去所有空白
+  .replace(/[·．]/g, '·')              // 全角点·点归一半角
+const isUncheckedStatus = s => {
+  const n = normalizeStatus(s)
+  return n === '[窗口外·重大]' || n === '窗口外·重大' || n === '窗口外重大' || n === '未核查'
+}
+
 // 跨 section 唯一 URL 引用图：按「首次出现序」给每个唯一 URL 分配 1-based 编号（spec A.1）。
 // 非 URL 来源（如 (多源公认)）不参与编号——正文不挂角标、不进参考列表。
 // 返回 { map: Map<href, n>, list: [{ n, url, title }] }；list 即「### 参考来源」节的数据源，title 取 hostname。
@@ -59,8 +72,10 @@ const itemBlock = (it, citeMap) => {
   // B.5: sources 存在但全是非 URL 文字描述（buildCitationMap 没给编号）→ 诚实标注无单一链接
   const hasSrc = it.sources && it.sources.length > 0
   const noUrl = hasSrc && !badges
-  // C.2: 未核查项（status 为 [窗口外·重大] 或 未核查）→ 机器徽标双保险，不依赖代理措辞
-  const unchecked = it.status === '[窗口外·重大]' || it.status === '未核查'
+  // C.2: 未核查项（status 为 [窗口外·重大] 或 未核查）→ 机器徽标双保险，不依赖代理措辞。
+  // C.3(2026-08-22): 状态标签容错——8/22 生产 run 实证 major-out 条目 status 有 `[窗口外·重大]`/`窗口外重大`
+  // （无方括号）等写法，精确匹配漏判 6/7 条。规范化（去 []／""、空白、全半角）后统一判定，真值走正常。
+  const unchecked = isUncheckedStatus(it.status)
   const tail = badges + (noUrl ? ' [行业公认·无单一链接]' : '') + (unchecked ? ' *[未核查·待证实]*' : '')
   const lines = []
   lines.push('**' + it.title + '**' + tag)

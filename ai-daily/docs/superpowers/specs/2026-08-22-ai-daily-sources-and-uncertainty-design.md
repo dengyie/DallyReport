@@ -158,3 +158,11 @@
 **修复（层 4 — realm 适配）**：新增 `scripts/ai-daily/url-polyfill.mjs`——最小 WHATWG URL polyfill（仅 `.href`/`.hostname`/`.protocol`，非 URL 抛 TypeError 保留各处 catch 语义，幂等：已有全局 URL 则跳过），模块加载即 `globalThis.URL = MinURL`。`build.mjs MODULES` 置 `url-polyfill` 第一（在任何用 `new URL()` 的模块前 inline 执行）。`render-md.mjs` import 并在顶部 `installUrlPolyfill()`（node:test 直跑时全局 URL 已在，幂等跳过；realm 时由最先 inline 的 url-polyfill 已注入）。`test/realm-url.test.mjs` 模拟 realm（删 globalThis.URL）断言：①无 URL 时 citeMap 空（复现 bug）②注入后产 URL 条目 ③完整版 md 含 [n] 角标+参考来源节 ④href 幂等 ⑤hostname 正确 ⑥非 URL 抛错。
 
 **验证**：93/93 测绿（87+6 realm-url）。端到端确认（2026-08-22 烟雾 run wf_8708dac6-4c0，report 代理 600s 超时走降级路径）：降级版 md 含 `[1]`/`[2]`/`[3]` 正文角标 + `### 参考来源` 4 条（hostname 正确：openai.com / blogs.nvidia.com / api-docs.deepseek.com）+ 非 URL `(多源公认)` 正确跳过。降级路径走 `renderDegradedMarkdown` → `buildCitationMap`（与完整版 `renderMarkdown` 同一函数、同一 `new URL()`），故降级版产角标即证 polyfill 修复完整版同样生效（0 角标 bug 根因消除）。完整版真实 run 待 report 代理稳定产出 sections 后再补端到端截图。
+
+## 追加 C.3（2026-08-22）：状态标签容错 + status 枚举收口
+
+层 4 修复后的完整版首 run（09:05 生产日）暴露一个相邻缺陷：正文里 7 条 major-out 只有 1 条挂了 `*[未核查·待证实]*` 徽标——6/7 的 status 写成无方括号的 `窗口外重大`，`render-md.mjs` C.2 判定精确匹配 `'[窗口外·重大]'`，漏判。这是报告代理产出 status 写法不统一 + 判定过严双重原因，层 4 前完整版 0 角标看不到正文所以没显形。
+
+**修复（双轨）**：①render 容错——`render-md.mjs` 新增 `normalizeStatus`（全半角括号归一半角、去全半角空白、全角 `（）［］` 归半角）+ `isUncheckedStatus` 判定，`窗口外·重大`/`窗口外重大`/`未核查`/带空白变体统一挂徽标，`已核查 2-x`/`已否决` 不误判；②源头收口——`REPORT_SCHEMA.status` 加枚举（`已核查 2-0`/`已核查 2-1`/`[窗口外·重大]`/`未核查`/`已否决`），`reportPrompt` 增加"必须写枚举之一、窗口外重大必带方括号"的强制说明。
+
+**测试**：`render-md.test.mjs` 新增 C.3（6 个应挂徽标变体 + 8 个不应挂形态矩阵）；`status-enum.test.mjs` 新增 3 测锁死 schema 枚举字面量 + 不含变体 + prompt 强制说明。全套 97/97 绿。产物重建 1406 行，`node --check` OK。
