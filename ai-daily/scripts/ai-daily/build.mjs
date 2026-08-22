@@ -14,8 +14,10 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const TEMPLATE = path.join(HERE, 'ai-daily.template.js')
 const DEFAULT_OUT = path.resolve(HERE, '../../.claude/workflows/ai-daily.js')
 
-// inline 顺序即依赖序：date-utils 的 normURL 被 boards 的 GROUPS_RAW 闭包引用，必须在 boards 前。
-const MODULES = ['date-utils', 'schemas', 'boards', 'dedup', 'budget', 'fallback', 'prompts', 'render-md']
+// inline 顺序即依赖序：url-polyfill 最先（注入 globalThis.URL，workflow realm 无 URL 全局，
+// 否则 dedup._hostnameOf / render-md.buildCitationMap 的 new URL() 抛 ReferenceError 被 catch 吞 → 完整版 0 角标）；
+// date-utils 的 normURL 被 boards 的 GROUPS_RAW 闭包引用，必须在 boards 前。
+const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'fallback', 'prompts', 'render-md']
 
 // 剥模块为可 inline 文本：去 import 行（依赖由顺序保证）、export 前缀、模块头注释。
 const stripModule = name => {
