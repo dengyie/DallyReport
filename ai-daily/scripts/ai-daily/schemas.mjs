@@ -63,6 +63,8 @@ export const REPORT_SCHEMA = {
           type: 'object', required: ['title', 'summary', 'confidence', 'sources'],
           properties: {
             title: { type: 'string' }, summary: { type: 'string' }, confidence: { enum: ['high', 'medium', 'low'] },
+            // 2026-08-22 C.3 收口：status 枚举字面量（render 依赖精确值判定；容错在 render 侧做，源头仍须规范）。
+            status: { enum: ['已核查 2-0', '已核查 2-1', '[窗口外·重大]', '未核查', '已否决'] },
             sources: { type: 'array', items: { type: 'string' } }, vote: { type: 'string' },
           },
         }},

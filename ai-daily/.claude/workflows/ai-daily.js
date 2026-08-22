@@ -239,6 +239,8 @@ const REPORT_SCHEMA = {
           type: 'object', required: ['title', 'summary', 'confidence', 'sources'],
           properties: {
             title: { type: 'string' }, summary: { type: 'string' }, confidence: { enum: ['high', 'medium', 'low'] },
+            // 2026-08-22 C.3 收口：status 枚举字面量（render 依赖精确值判定；容错在 render 侧做，源头仍须规范）。
+            status: { enum: ['已核查 2-0', '已核查 2-1', '[窗口外·重大]', '未核查', '已否决'] },
             sources: { type: 'array', items: { type: 'string' } }, vote: { type: 'string' },
           },
         }},
@@ -620,7 +622,7 @@ const reportPrompt = ctx =>
   "4. **sections / items**：\n" +
   "   - title：**新闻式标题**（≤25字，主语+动词+结果/数字，例：GLM-5.3 开源，Coding 能力接近 Fable 5）。**不要前置 [窗口外·重大]/[2-0✓] 等标签**，不要长从句，不要括号解释。\n" +
   "   - summary：**一段新闻正文**（2-3 句），写清楚发生了什么、为什么重要，不是重复 title。\n" +
-  "   - status：核查状态，取值为 已核查 2-0 / 已核查 2-1 / [窗口外·重大] / 未核查 / 已否决（render 会在标题后加徽标）\n" +
+  "   - status：核查状态，**必须**是以下枚举之一（机器消费、精确匹配，不加括号/空格变体）：`已核查 2-0` / `已核查 2-1` / `[窗口外·重大]` / `未核查` / `已否决`。窗口外重大项**必须**写 `[窗口外·重大]`（含方括号）；（render 会按该值在标题后加徽标，写错字面量会漏标未核查徽标）\n" +
   "   - 多个 sources 时只保留最权威的 1-2 个 URL。\n\n" +
   "4.5. **不确定度如实标注**（与 AI.md 风格一致）：summary 中若素材存在不确定性（单源/社区传闻/灰度状态/未官方确认），用「有用户称」「据讨论」「现有资料未说明」「暂不能确认」等措辞如实标注，不假装确定性；社区传闻与官方动态须用不同措辞区分。**对 status 为 `[窗口外·重大]` 或 `未核查` 的 item（未经窗口内对抗投票验证），summary 必须用不确定度措辞（「据报」「有媒体称」「宣称」「待官方确认」「暂不能确认」之一）描述其事项，禁止用「已解决」「完成」「正式发布」「确认」等肯定完成态措辞**。已核查项（status 为 `已核查 2-0`/`已核查 2-1`）有 vote 支撑，可正常陈述。社区传闻与官方动态须用不同措辞区分。\n\n" +
   "5. **板块组织**：不要机械按来源分板。**labs（新模型/模型能力）板块如果有内容，必须放在第一个板块**。如果某板块今天无重要新闻，该板块可以不出现在正文（但保留 coverage 自检）。重磅新闻放在最靠前的板块下。\n\n" +
@@ -643,6 +645,19 @@ installUrlPolyfill()
 const setUrlPolyfillForRealm = () => { installUrlPolyfill() }
 
 const CONF_ZH = { high: '高', medium: '中', low: '低' }
+
+// C.3(2026-08-22): 状态标签规范化——把代理产出的 status 各种写法归一后判定是否「未核查」类（未经窗口内对抗投票）。
+// 归一：全半角括号（[]()（）［］）→ 去掉、全角空白→半角、两端去空白、去内部空白、去全角·→. 后比较。
+// 真值（标未核查徽标）：[窗口外·重大] / 窗口外·重大 / 窗口外重大 / 未核查；已核查/已否决不算。
+const normalizeStatus = s => String(s || '')
+  .replace(/[［【\[]/g, '[').replace(/[］】\]]/g, ']')  // 全角括号归一为半角
+  .replace(/[（）]/g, '(').replace(/[）]/g, ')')
+  .replace(/[\s]+/g, '')               // 去所有空白
+  .replace(/[·．]/g, '·')              // 全角点·点归一半角
+const isUncheckedStatus = s => {
+  const n = normalizeStatus(s)
+  return n === '[窗口外·重大]' || n === '窗口外·重大' || n === '窗口外重大' || n === '未核查'
+}
 
 // 跨 section 唯一 URL 引用图：按「首次出现序」给每个唯一 URL 分配 1-based 编号（spec A.1）。
 // 非 URL 来源（如 (多源公认)）不参与编号——正文不挂角标、不进参考列表。
@@ -688,8 +703,10 @@ const itemBlock = (it, citeMap) => {
   // B.5: sources 存在但全是非 URL 文字描述（buildCitationMap 没给编号）→ 诚实标注无单一链接
   const hasSrc = it.sources && it.sources.length > 0
   const noUrl = hasSrc && !badges
-  // C.2: 未核查项（status 为 [窗口外·重大] 或 未核查）→ 机器徽标双保险，不依赖代理措辞
-  const unchecked = it.status === '[窗口外·重大]' || it.status === '未核查'
+  // C.2: 未核查项（status 为 [窗口外·重大] 或 未核查）→ 机器徽标双保险，不依赖代理措辞。
+  // C.3(2026-08-22): 状态标签容错——8/22 生产 run 实证 major-out 条目 status 有 `[窗口外·重大]`/`窗口外重大`
+  // （无方括号）等写法，精确匹配漏判 6/7 条。规范化（去 []／""、空白、全半角）后统一判定，真值走正常。
+  const unchecked = isUncheckedStatus(it.status)
   const tail = badges + (noUrl ? ' [行业公认·无单一链接]' : '') + (unchecked ? ' *[未核查·待证实]*' : '')
   const lines = []
   lines.push('**' + it.title + '**' + tag)

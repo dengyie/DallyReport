@@ -294,6 +294,42 @@ test('C.2 未核查徽标：status [窗口外·重大] → *[未核查·待证�
   assert.ok(!plain.includes('*[未核查·待证实]*'), '已核查项不得挂未核查徽标')
 })
 
+// C.3 状态标签容错：真实数据里 major-out 条目 status 有 `[窗口外·重大]`/`窗口外重大`/`未核查` 多种写法
+// （2026-08-22 生产 run 实证：6/7 无方括号 `窗口外重大` 被精确匹配漏判、未挂未核查徽标）。
+// 统一规范化（去 []、去空白、全半角归一）后判定，不得漏判也不得误判已核查项。
+test('C.3 未核查徽标容错：状态标签规范化后统一判定（去括号/空白/全半角）', () => {
+  const mkOne = (s, status) => renderMarkdown({ date: 'd', window: 'w',
+    report: { oneLiner: 'o', execSummary: 'e', sections: [{ board: 'x', title: 'T', items: [
+      { title: 'T', summary: s, confidence: 'medium', sources: ['https://x.ai/1'], vote: '—', status },
+    ]}], caveats: [], openQuestions: [] },
+    coverage: [], windowMisses: [], degraded: [] })
+  // 应当挂未核查徽标的变体：
+  const badgeVariants = {
+    '精确字面量': '[窗口外·重大]',
+    '去方括号': '窗口外·重大',
+    '去方括号带尾注': '窗口外重大',
+    '全角括号': '［窗口外·重大］',
+    '多余空白': '  [窗口外·重大]  ',
+    '未核查(无括号)': '未核查',
+  }
+  for (const [label, status] of Object.entries(badgeVariants)) {
+    const md = mkOne('摘要文本', status)
+    assert.ok(md.includes('*[未核查·待证实]*'), `[${label}] status\`${status}\` 应挂未核查徽标`)
+  }
+  // 不应挂徽标的形态：
+  const noBadgeVariants = [
+    '已核查标准票', '已核查 2-0',
+    '已核查分歧票', '已核查 2-1',
+    '已否决', '已否决 2-0',
+    '内容被否决', '已否决决标',
+    '无关状态', '审核中',
+  ]
+  for (const [label, status] of Object.entries(noBadgeVariants)) {
+    const md = mkOne('摘要文本', status)
+    assert.ok(!md.includes('*[未核查·待证实]*'), `[${label}] status\`${status}\` 不应挂未核查徽标`)
+  }
+})
+
 test('B.4+A：major-out 带 URL → [n] 角标 + 参考来源节对应条目', () => {
   const md = renderMarkdown({ date: 'd', window: 'w',
     report: { oneLiner: 'o', execSummary: 'e', sections: [{ board: 'x', title: 'T', items: [
