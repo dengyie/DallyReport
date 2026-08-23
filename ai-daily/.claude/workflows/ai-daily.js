@@ -1041,6 +1041,10 @@ async function readBodyText(host, url) {
   const res = await fetch(`http://${host}/json/new?${encodeURIComponent(url)}`, { method: 'PUT', signal: AbortSignal.timeout(CDP_DEFAULTS.requestTimeoutMs) })
   // 8/23 复核修复：/json/new 非 2xx 时 target 未建立、无标签可关，直接 throw（无泄漏，无需 closeTab）。
   if (!res.ok) throw new Error('open-tab HTTP ' + res.status)
+  // 8/23 复核边界说明（pre-existing 不可达路径，非本修复缺口）：CDP 对 200 必回含 id 的 target JSON，
+  // 故 target.id 解析失败/缺失只存在于理论中——若真发生，该 tab 将无法定位关闭（拿不到 id 就关不掉）。
+  // 同理 json/new 请求被 AbortSignal 中断时服务端可能已建 tab 而客户端拿不到 targetId。两者均被
+  // try 前抛错/退出路径挡在"已建 tab 且拿得到 id"之外，其余任何路径下方的 finally 一概兜住。
   const target = await res.json()
   const targetId = target.id
   try {
