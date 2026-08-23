@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { reportPrompt } from '../prompts.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PROMPTS = fs.readFileSync(path.join(HERE, '../prompts.mjs'), 'utf8')
@@ -55,4 +56,32 @@ test('reportPrompt §3.2：同事件数字口径不一 → 直接并陈、不各
   assert.match(PROMPTS, /3\.2\..*数字口径/, '3.2 数字口径段在场')
   assert.match(PROMPTS, /直接并陈不同口径、不各自成条、提醒勿相加/, '并陈不各自成条勿相加')
   assert.match(PROMPTS, /4\.25GW\/\$150-200B\/\$600B\/\$105B/, '口径示例在场')
+})
+
+// ─── 2026-08-23 task-1：report 标题按 status 分轨（未核查 title 必须带不确定性措辞）───
+
+const reportCtx = {
+  WINDOW_LABEL: '2026-08-23',
+  confirmedVerifyCount: 0,
+  majorOutCount: 0,
+  reportBody: '素材',
+  killedCount: 0,
+  unverifiedCount: 0,
+  refutedList: '',
+  unverifiedList: '',
+  missBlock: '',
+  coverBlock: '自检',
+}
+
+test('reportPrompt title 分轨约束：按 status 分轨 + 禁止 + 肯定完成态关键词在场', () => {
+  const s = reportPrompt(reportCtx)
+  assert.match(s, /按 status 分轨/, '标题规则携带「按 status 分轨」约束')
+  assert.match(s, /禁止/, '未确认项 title 有「禁止」强硬约束')
+  assert.match(s, /肯定完成态/, '拒绝肯定完成态措辞')
+})
+
+test('reportPrompt title 分轨示例：未确认「某报」与已确认 LFM2.5 正反均在场', () => {
+  const s = reportPrompt(reportCtx)
+  assert.match(s, /据报/, '未核查示例措辞：以「据报」开头')
+  assert.match(s, /LFM2\.5/, '已核查示例 LFM2.5 在场')
 })
