@@ -17,7 +17,9 @@ const DEFAULT_OUT = path.resolve(HERE, '../../.claude/workflows/ai-daily.js')
 // inline 顺序即依赖序：url-polyfill 最先（注入 globalThis.URL，workflow realm 无 URL 全局，
 // 否则 dedup._hostnameOf / render-md.buildCitationMap 的 new URL() 抛 ReferenceError 被 catch 吞 → 完整版 0 角标）；
 // date-utils 的 normURL 被 boards 的 GROUPS_RAW 闭包引用，必须在 boards 前。
-const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'fallback', 'prompts', 'render-md']
+// cluster/linuxdo（8/23 第二十一项）为纯导出零依赖模块，排在 render-md 后（linuxdo 相对 render 无依赖，
+// 放最后即可；与模板占位符顺序保持一致）。
+const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'fallback', 'prompts', 'render-md', 'cluster', 'linuxdo']
 
 // 剥模块为可 inline 文本：去 import 行（依赖由顺序保证）、export 前缀、模块头注释。
 const stripModule = name => {

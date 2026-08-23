@@ -36,6 +36,8 @@ export const BOARDS = [
   { key: 'policy', title: '政策监管', focus: '政府/监管/法院/标准组织对 AI 的动作', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.qbitai.com/'] },
   { key: 'safety', title: '安全与伦理', focus: '对齐、安全、滥用、水印、系统卡、攻击事件', feeds: ['https://www.qbitai.com/', 'https://techcrunch.com/category/artificial-intelligence/'] },
   { key: 'people', title: '人才流动', focus: '重要人物离职/跳槽/创业/任命', feeds: ['https://www.qbitai.com/', 'https://techcrunch.com/category/artificial-intelligence/'] },
+  // 8/23 第二十一项：linuxdo 前沿快讯板（登录态 CDP 独立发现组产物落此板，urls 进 Fetch/Verify 既有流水线）
+  { key: 'linuxdo', title: 'linux.do 前沿快讯', focus: 'linux.do 论坛前沿快讯（登录态，同窗最新 AI 帖子）', feeds: ['https://linux.do/c/news/34'] },
 ]
 
 export const OFFICIAL_FEEDS = [
@@ -87,6 +89,12 @@ export const DISCOVER_GROUPS_ALL = [
     feeds: ['https://www.qbitai.com/', 'https://36kr.com/'], xBudget: 4 },
   { key: 'media-en', label: '英文媒体（TechCrunch/The Verge/qbitai）', boards: ['strategy', 'products', 'funding', 'policy'],
     feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.theverge.com/ai-artificial-intelligence/', 'https://www.qbitai.com/'], xBudget: 4 },
+  // 8/23 第二十一项：linuxdo 接入——独立发现组，走 9222 登录态 Chrome 抓 news/34.json（Discover 阶段每页
+  // 跑前调 fetchLinuxDoNews34）；产出 URL 进 Fetch/Verify 既有流水线，不改动对抗投票/状态机。组仅在
+  // boardKeysSel 含 linuxdo 时激活；linuxdoCdpHost 为 null（默认）时组保留但 urls=[] 不降级（命令行/手动补跑
+  // 默认不启用时板不崩）。boards 数组与 groupKeyByBoard 反向映射均运行时从本表派生，无需手改映射表。
+  { key: 'linuxdo', label: 'linux.do 前沿快讯（登录态 CDP）', boards: ['linuxdo'], feeds: [], xBudget: 3,
+    cdp: true, cdpPage: 'https://linux.do/c/news/34.json' },
 ]
 
 // ─── 板级降级判定（按板归属组统一，8/22 修复）───

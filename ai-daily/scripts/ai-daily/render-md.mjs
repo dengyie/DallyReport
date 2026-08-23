@@ -136,10 +136,13 @@ export const renderMarkdown = ({ date, window, report, coverage, windowMisses, d
   L.push(report.execSummary)
   L.push('')
   const citeMap = buildCitationMap(report && report.sections)
+  // 8/23 第二十一项：事件驱动分节——无内容的板块整体不出现（信息熵契约：不摆空骨架）。
   for (const sec of report.sections || []) {
+    const items = (sec.items || []).filter(Boolean)
+    if (!items.length) continue
     L.push('### ' + sec.title)
     L.push('')
-    for (const it of sec.items || []) { L.push(itemBlock(it, citeMap)); L.push('') }
+    for (const it of items) { L.push(itemBlock(it, citeMap)); L.push('') }
     L.push('')
   }
   if (report.caveats && report.caveats.length) {
@@ -257,6 +260,13 @@ export const renderDegradedMarkdown = ({ date, window, confirmed, refuted, cover
   L.push('| 板块 | 标题 | 覆盖 claim 数 | 备注 |')
   L.push('|---|---|---|---|')
   for (const b of coverage || []) {
+    // 8/23 第二十一项：事件驱动分节——无 claims 且无 URL 来源且公司三态均为空态之外的板：空矩阵行不渲染。
+    // 8/23 I1 复核修复：模板 8/22 第二十项 labs 花名册跨板块校正已把全部 no_news 翻转为 no_dynamic，
+    // render 时 no_news 永不出现。若枚举仍缺 no_dynamic，经校正的板（0 claims、0 urls、公司全
+    // no_dynamic）会被误判成空行跳过——「已核查这些公司、当日均无动态」的覆盖自检信息（无动态 备注列）
+    // 静默丢失（amnesia 类）。枚举补 'no_dynamic' → 该行保留渲染。真正空行仍是
+    // 「0 claims 且无 urls 且无任何公司三态信息」（无 companiesChecked 或全空态）。
+    if ((b.claims || 0) === 0 && !(b.urls || 0) && !(b.companiesChecked || []).some(c => ['has_dynamic', 'no_news', 'unreached', 'no_dynamic'].includes(c.state))) continue
     const note = b.board === 'labs'
       ? (noNewsCompanies && noNewsCompanies.length ? '无动态：' + noNewsCompanies.join('、') : (b.degraded ? 'degraded' : ''))
       : (b.degraded ? 'degraded' : '')

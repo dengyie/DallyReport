@@ -67,6 +67,11 @@ const WTO = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.to)) ? 
 const OUT = typeof args.outDir === 'string' && args.outDir ? args.outDir : null
 const BOARDS_SELECTED = Array.isArray(args.boards) ? new Set(args.boards) : null
 const GROK_DIR = '/Users/mango/.claude/skills/grok-search'
+// 8/23 第二十一项：linuxdo 接入（登录态 CDP 独立发现组）。linuxdoCdpHost 默认 null → 组保留在
+// DISCOVER_GROUPS（板不崩）但 LINUXDO-SKIP no_cdp_host → urls:[] 不降级（命令行/手动补跑默认不启用）；
+// linuxdoMaxSources 配额默认 24（帖子轮换进组返回行）。
+const LINUXDO_CDP_HOST = typeof args.linuxdoCdpHost === 'string' && args.linuxdoCdpHost ? args.linuxdoCdpHost : null
+const LINUXDO_MAX_SOURCES = typeof args.linuxdoMaxSources === 'number' && args.linuxdoMaxSources > 0 ? args.linuxdoMaxSources : 24
 
 if (!DATE || !OUT) {
   return { error: 'Args must include date (YYYY-MM-DD) and outDir (absolute path). window optional. got: ' + JSON.stringify(args) }
@@ -95,6 +100,8 @@ const WEB_BUDGET_PER = 2
 /* @inline: fallback */
 /* @inline: prompts */
 /* @inline: render-md */
+/* @inline: cluster */
+/* @inline: linuxdo */
 
 // boards 由 BOARDS 花名册按选区派生（BOARDS 已 inline 就绪，此时访问无 TDZ）。
 const boards = BOARDS_SELECTED ? BOARDS.filter(b => BOARDS_SELECTED.has(b.key)) : BOARDS
@@ -273,7 +280,35 @@ const discoverResults = []
 const DISCOVER_BATCH = 3
 for (const batch of chunkArr(DISCOVER_GROUPS, DISCOVER_BATCH)) {
   if (!budgetGate('Discover').ok) { log('BUDGET-BREAK Discover 余批跳过，用已完成批次结果'); break }
-  const round = await parallel(batch.map(g => () =>
+  // 8/23 第二十一项：linuxdo 组是独立发现通道（走 9222 登录态 Chrome 抓 news/34.json），非代理。
+  // 在该批并行代理前同步抓取——成功 → posts 按配额塞进组返回行（board 标 linuxdo，URL 进 Fetch/Verify
+  // 既有流水线）；失败 → 组返回行标 degraded（linuxdo_degraded 进降级旗标）；no_cdp_host（默认）→
+  // LINUXDO-SKIP + urls:[] 不降级（板不崩）。date 参数可空：抓取只取最新分页，不强依赖日期窗口。
+  for (const g of batch) {
+    if (!g.cdp) continue
+    if (!LINUXDO_CDP_HOST) {
+      log('LINUXDO-SKIP no_cdp_host ' + g.key + ' → urls:[]，不降级')
+      discoverResults.push({ group: g, boards: g.boards, urls: [], noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: false, linuxdoSkipped: true })
+      continue
+    }
+    const ld = await fetchLinuxDoNews34({ date: DATE, cdpHost: LINUXDO_CDP_HOST })
+    if (!ld.ok || !ld.topics) {
+      log('LINUXDO-FAIL ' + (ld.reason || 'unknown') + ' → ' + g.key + ' 降级')
+      discoverResults.push({ group: g, boards: g.boards, urls: [], noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: true, linuxdoFailed: true, linuxdoReason: ld.reason || '' })
+      continue
+    }
+    log('LINUXDO-OK ' + ld.topics + ' topics → ' + g.key + ' board（配额 ' + LINUXDO_MAX_SOURCES + '）')
+    // 按 linuxdoMaxSources 配额把 posts 转成组返回行 URL 候选（latest posts 在前，配额轮换截至）。
+    const srcs = (ld.posts || []).slice(0, LINUXDO_MAX_SOURCES).map(p => ({
+      url: p.url, title: p.title, found_via: 'linuxdo-cdp', date: p.date || DATE, board: 'linuxdo',
+    }))
+    discoverResults.push({ group: g, boards: g.boards, urls: srcs, noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: false, linuxdoTopics: ld.topics, linuxdoPosts: (ld.posts || []).length })
+  }
+  // 8/23 C2 复核修复：cdp 组已在上方预块处理并 push（CDP 抓取不进普通发现代理）；此处只跑普通组，
+  // 避免 linuxdo 组被双 push（urls_discovered 翻倍、Fetch 预算空耗）且不被当普通代理喂裸
+  // https://linux.do/c/news/34（spec §A 明文裸 fetch 必 403 → 长墙钟失败 + 误标 degraded，违背
+  // 「默认不启用时板不崩」）。.filter 后 batch 内不再有 g.cdp 组，.then 无需再判 cdp。
+  const round = await parallel(batch.filter(g => !g.cdp).map(g => () =>
     // 8/16：discover 与 harvest 同款的批量串行（5→3+2 两波）+ 按实测放宽死线 + 瞬时错误重试一次。
     // 8/15 只给 labs 特殊 600s 并在单板冒烟里验证（334s 达标），全量 5 并发时网关争抢使每个 discover 都 3-6×变慢，
     // media-cn 实测 1967s、labs 1213s、opensource/media-en 各 ~770s，全部超死线被 withDeadline 丢弃 → 8/9 板块 degrade、23/23 unreached。
@@ -440,6 +475,20 @@ for (const batch of chunkArr(rankedClaims, VERIFY_BATCH)) {
 }
 
 const confirmedVerify = voted.filter(c => c.survives && claimWindow(c) !== 'out')
+// ─── 8/23 第二十一项：双轨聚类主视图（verify→report 之间）───
+// clustered = clusterClaims(confirmedVerify)：只聚类、不放行。多条目簇经 mergeCluster 合并成单一
+// 编排同构主视图塞进 reportBody 的「已聚类」区（打标 [cluster 已合并 N 条]，精准供 report prompt 4.7 识别）；
+// 被合并项仍保留在 confirmed 原样（report 收到"主视图 + 多视角原样"，同一事件只写 ONE 条、不同口径并陈）。
+// 不传 clustered 给 ctxP——report prompt 输入契约（reportBody/refutedList/unverifiedList/missBlock/coverBlock）不变。
+const clustered = clusterClaims(confirmedVerify)
+const clusteredMerged = clustered.filter(cl => cl.items.length > 1).map(cl => mergeCluster(cl.items, DATE, null))
+const clusteredBlock = clusteredMerged.length
+  ? '## 已聚类（cluster 合并 ' + clusteredMerged.reduce((n, c) => n + c.mergedCount, 0) + ' 条→主视图）\n' + clusteredMerged.map((c, i) =>
+      '\n[已聚类·' + (i + 1) + '] [cluster 已合并 ' + c.mergedCount + ' 条] ' + c.claim.split('\n').join(' / ') + '\n' +
+      (c.summary ? '主视图摘要：' + c.summary + '\n' : '') +
+      (c.sources && c.sources.length ? '来源：' + c.sources.join('、') : '')
+    ).join('\n')
+  : ''
 const confirmed = [...confirmedVerify]  // copy：后续 major-out 注入不许污染 confirmedVerify 计数（reportPrompt 分开统计）
 const outOfWindow = voted.filter(c => c.survives && claimWindow(c) === 'out')
 const killed = voted.filter(c => c.isRefuted)
@@ -530,6 +579,11 @@ const reportBody = (confirmed.length ? confirmed.map((c, i) =>
   '### ' + (c.isMajorOut ? '[窗口外·重大] ' : '') + '[' + i + '] ' + c.claim + '\nVote: ' + (c.isMajorOut ? '—（未投票，多源公认行业里程碑）' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount) + ' · Source: ' + c.sourceUrl + ' (' + c.sourceQuality + ') · Date: ' + (c.publishDate || c.date || '?') + '\nQuote: "' + c.quote.slice(0, 140) + (c.quote.length > 140 ? '…' : '') + '"\n')
   .join('\n')
   : '(无已确认声明)')
+// 8/23 第二十一项：聚类主视图并列注入 reportBody 开头的「## 已聚类」区（report prompt 4.7 专门读取）——
+// 仅当确认声明确有跨条可并簇项时出现；被合并 item 仍保留在 confirmed 原样（本块只做主视图提示，不删数据）。
+// 8/23 分支合并复核修复：外层只拼「原始素材」分节头（由 reportPrompt/prompts.mjs 唯一提供），此处不再重复注入——
+// clusteredBlock 自带「已聚类」头，拼接只接 \n\n 与 reportBody，避免 report 代理收到两个同名 H2。
+const reportBodyWithCluster = clusteredBlock ? clusteredBlock + '\n\n' + reportBody : reportBody
 const refutedList = killed.map(c => '- "' + c.claim + '" — ' + c.sourceUrl)
 const unverifiedList = unverified.map(c => '- "' + c.claim + '" — ' + c.sourceUrl)
 const coverBlock = coverage.map(c => '- ' + c.title + ': ' + c.claims + ' claims / ' + c.urls + ' sources' + (c.recovered ? ' [recovered]' : (c.degraded ? ' [degraded]' : '')) + (c.companiesChecked
@@ -540,7 +594,7 @@ const missBlock = windowMisses.length ? '\n## 窗口外参考（次要超窗项�
 
 const report = synthAllowed ? await safeAgent(reportPrompt({
   ...ctxP, confirmedVerifyCount: confirmedVerify.length, majorOutCount: majorOutClaims.length,
-  reportBody, killedCount: killed.length, refutedList, unverifiedCount: unverified.length, unverifiedList, missBlock, coverBlock,
+  reportBody: reportBodyWithCluster, killedCount: killed.length, refutedList, unverifiedCount: unverified.length, unverifiedList, missBlock, coverBlock,
 }), { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: 600000 }, 1) : null
 
 // ─── md 确定性渲染（report 成功 → 完整版；失败 → 降级版）。render-md.mjs，不再有 mdWriter 代理。───
@@ -552,6 +606,9 @@ if (missingBoardKeys.length > 0) degradedFlags.push('discovery_degraded:missing_
 else if (discoverRows.some(d => d.degraded)) degradedFlags.push('discovery_degraded')
 if (recoveredBoards.size > 0) degradedFlags.push('discovery_recovered:' + [...recoveredBoards].join('+'))
 if (budgetSkipped.length > 0) degradedFlags.push('budget_skipped:' + budgetSkipped.join('+'))
+// 8/23 第二十一项：linuxdo 组失败/降级 → linuxdo_degraded 独立降级旗标（no_cdp_host 跳过不算降级）。
+const linuxdoFailedRows = discoverRows.filter(d => d.linuxdoFailed)
+if (linuxdoFailedRows.length) degradedFlags.push('linuxdo_degraded' + (linuxdoFailedRows.some(d => d.linuxdoReason) ? ':' + linuxdoFailedRows.map(d => d.linuxdoReason).join('+').slice(0, 80) : ''))
 const reportErr = report ? null : 'report agent failed; reverting to raw archive'
 if (reportErr) degradedFlags.push('report_failed')
 // 归档 payload 数组（claimsJson 与降级 md 共用同一份同构数据，避免两处映射漂移）。
@@ -581,6 +638,10 @@ const metaJson = JSON.stringify({
   claims_verified: voted.length, confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, unverified: unverified.length, out_of_window_confirmed: outOfWindow.length,
   window_misses: windowMisses,
   url_dupes: dupes.length, fetches_dropped: budgetDropped.length, verify_agent_errors: toolError,
+  // 8/23 第二十一项：linuxdo 抓取统计——linuxdo_posts = 抓到的帖子总数，linuxdo_open_posts = 按配额
+  // 进 boardURLMap 的 URL 候选数（成功时补入）；linuxdo_degraded 是独立降级旗标（见 degradedFlags）。
+  linuxdo_posts: discoverRows.filter(d => d.linuxdoTopics).reduce((n, d) => n + (d.linuxdoPosts || 0), 0),
+  linuxdo_open_posts: discoverRows.filter(d => d.linuxdoTopics).reduce((n, d) => n + d.urls.length, 0),
   degraded: degradedFlags, report_error: reportErr,
   // md_written 语义（8/18 重构后）：report 是否成功（1=完整版 md 进 payloads.md，0=降级版 md 仍落盘）——不再是 workflow 写盘计数。
   md_written: report ? 1 : 0, artifacts_failed: [],

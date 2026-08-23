@@ -67,6 +67,11 @@ const WTO = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.to)) ? 
 const OUT = typeof args.outDir === 'string' && args.outDir ? args.outDir : null
 const BOARDS_SELECTED = Array.isArray(args.boards) ? new Set(args.boards) : null
 const GROK_DIR = '/Users/mango/.claude/skills/grok-search'
+// 8/23 第二十一项：linuxdo 接入（登录态 CDP 独立发现组）。linuxdoCdpHost 默认 null → 组保留在
+// DISCOVER_GROUPS（板不崩）但 LINUXDO-SKIP no_cdp_host → urls:[] 不降级（命令行/手动补跑默认不启用）；
+// linuxdoMaxSources 配额默认 24（帖子轮换进组返回行）。
+const LINUXDO_CDP_HOST = typeof args.linuxdoCdpHost === 'string' && args.linuxdoCdpHost ? args.linuxdoCdpHost : null
+const LINUXDO_MAX_SOURCES = typeof args.linuxdoMaxSources === 'number' && args.linuxdoMaxSources > 0 ? args.linuxdoMaxSources : 24
 
 if (!DATE || !OUT) {
   return { error: 'Args must include date (YYYY-MM-DD) and outDir (absolute path). window optional. got: ' + JSON.stringify(args) }
@@ -289,6 +294,8 @@ const BOARDS = [
   { key: 'policy', title: '政策监管', focus: '政府/监管/法院/标准组织对 AI 的动作', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.qbitai.com/'] },
   { key: 'safety', title: '安全与伦理', focus: '对齐、安全、滥用、水印、系统卡、攻击事件', feeds: ['https://www.qbitai.com/', 'https://techcrunch.com/category/artificial-intelligence/'] },
   { key: 'people', title: '人才流动', focus: '重要人物离职/跳槽/创业/任命', feeds: ['https://www.qbitai.com/', 'https://techcrunch.com/category/artificial-intelligence/'] },
+  // 8/23 第二十一项：linuxdo 前沿快讯板（登录态 CDP 独立发现组产物落此板，urls 进 Fetch/Verify 既有流水线）
+  { key: 'linuxdo', title: 'linux.do 前沿快讯', focus: 'linux.do 论坛前沿快讯（登录态，同窗最新 AI 帖子）', feeds: ['https://linux.do/c/news/34'] },
 ]
 
 const OFFICIAL_FEEDS = [
@@ -340,6 +347,12 @@ const DISCOVER_GROUPS_ALL = [
     feeds: ['https://www.qbitai.com/', 'https://36kr.com/'], xBudget: 4 },
   { key: 'media-en', label: '英文媒体（TechCrunch/The Verge/qbitai）', boards: ['strategy', 'products', 'funding', 'policy'],
     feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.theverge.com/ai-artificial-intelligence/', 'https://www.qbitai.com/'], xBudget: 4 },
+  // 8/23 第二十一项：linuxdo 接入——独立发现组，走 9222 登录态 Chrome 抓 news/34.json（Discover 阶段每页
+  // 跑前调 fetchLinuxDoNews34）；产出 URL 进 Fetch/Verify 既有流水线，不改动对抗投票/状态机。组仅在
+  // boardKeysSel 含 linuxdo 时激活；linuxdoCdpHost 为 null（默认）时组保留但 urls=[] 不降级（命令行/手动补跑
+  // 默认不启用时板不崩）。boards 数组与 groupKeyByBoard 反向映射均运行时从本表派生，无需手改映射表。
+  { key: 'linuxdo', label: 'linux.do 前沿快讯（登录态 CDP）', boards: ['linuxdo'], feeds: [], xBudget: 3,
+    cdp: true, cdpPage: 'https://linux.do/c/news/34.json' },
 ]
 
 // ─── 板级降级判定（按板归属组统一，8/22 修复）───
@@ -626,7 +639,12 @@ const reportPrompt = ctx =>
   "   - 多个 sources 时只保留最权威的 1-2 个 URL。\n\n" +
   "4.5. **不确定度如实标注**（与 AI.md 风格一致）：summary 中若素材存在不确定性（单源/社区传闻/灰度状态/未官方确认），用「有用户称」「据讨论」「现有资料未说明」「暂不能确认」等措辞如实标注，不假装确定性；社区传闻与官方动态须用不同措辞区分。**对 status 为 `[窗口外·重大]` 或 `未核查` 的 item（未经窗口内对抗投票验证），summary 必须用不确定度措辞（「据报」「有媒体称」「宣称」「待官方确认」「暂不能确认」之一）描述其事项，禁止用「已解决」「完成」「正式发布」「确认」等肯定完成态措辞**。已核查项（status 为 `已核查 2-0`/`已核查 2-1`）有 vote 支撑，可正常陈述。社区传闻与官方动态须用不同措辞区分。\n\n" +
   "4.6. **窗口外参考节由编排器统一渲染**：素材里「## 窗口外参考」的**次要超窗项（nearWindow）不要自己合成进 sections**——不要写独立的「窗口外参考」section，也不要把这些条目拼进任何板块 item；编排器会在文末统一渲染「## 📎 窗口外参考」节。你只负责**窗口内** + **[窗口外·重大]（major-out）** 的合成。分工与 discover 阶段一致：major-out（行业里程碑级客观事实）进正文并带 `[窗口外·重大]` 状态；nearWindow（普通更新/次要动态）只供参考节引用。\n\n" +
+  "4.7.【聚类纪律】素材里「## 原始素材」开头的**「## 已聚类」区**（源自 fetch 阶段、被编排器标 `[cluster 已合并 N 条]` 的合并主视图）：\n" +
+  "  - 同一事件出现于多条已聚类素材 → 只写 ONE 条标题正文，其他绝不重复（不并排、不\"此外\"再造一条）。若不同条沿用不同口径数字，直接写\"M 为 X、N 为 Y，口径不一\"，不再分别作文。\n" +
+  "  - 判定两条是同一事件的双重标准（全部满足）：①共享 ≥1 个实体 token（组织/人名）；②日期同域（≥2 天内）；③数字字段重叠（含数量级）。\n" +
+  "  - 判定后你的摘要正文即为主合并 + 数字/口径自然呈现（如 4.25GW/$150-200B/$600B/$105B 并陈）。\n\n" +
   "5. **板块组织**：不要机械按来源分板。**labs（新模型/模型能力）板块如果有内容，必须放在第一个板块**。如果某板块今天无重要新闻，该板块可以不出现在正文（但保留 coverage 自检）。重磅新闻放在最靠前的板块下。\n\n" +
+  "3.2. **数字口径**：同事件多条素材数字口径不一（如 4.25GW/$150-200B/$600B/$105B）时，直接并陈不同口径、不各自成条、提醒勿相加。\n\n" +
   "6. **caveats**：注明弱来源/厂商口径/时间敏感。openQuestions 2-4 个。\n\n" +
   "7. 如果素材大部分是超窗重大项（major-out）而窗口内几乎为空，则 oneLiner 和 execSummary 如实反映这一情况，优先报道 major-out 中最重要的 1-2 条。\n\n" +
   "Structured output only. 输出格式：{ sections, oneLiner, execSummary, caveats, openQuestions } 其中 sections 为 [{ board, title, items: [{ title, summary, confidence, sources, vote, status }] }]"
@@ -768,10 +786,13 @@ const renderMarkdown = ({ date, window, report, coverage, windowMisses, degraded
   L.push(report.execSummary)
   L.push('')
   const citeMap = buildCitationMap(report && report.sections)
+  // 8/23 第二十一项：事件驱动分节——无内容的板块整体不出现（信息熵契约：不摆空骨架）。
   for (const sec of report.sections || []) {
+    const items = (sec.items || []).filter(Boolean)
+    if (!items.length) continue
     L.push('### ' + sec.title)
     L.push('')
-    for (const it of sec.items || []) { L.push(itemBlock(it, citeMap)); L.push('') }
+    for (const it of items) { L.push(itemBlock(it, citeMap)); L.push('') }
     L.push('')
   }
   if (report.caveats && report.caveats.length) {
@@ -889,6 +910,13 @@ const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, wi
   L.push('| 板块 | 标题 | 覆盖 claim 数 | 备注 |')
   L.push('|---|---|---|---|')
   for (const b of coverage || []) {
+    // 8/23 第二十一项：事件驱动分节——无 claims 且无 URL 来源且公司三态均为空态之外的板：空矩阵行不渲染。
+    // 8/23 I1 复核修复：模板 8/22 第二十项 labs 花名册跨板块校正已把全部 no_news 翻转为 no_dynamic，
+    // render 时 no_news 永不出现。若枚举仍缺 no_dynamic，经校正的板（0 claims、0 urls、公司全
+    // no_dynamic）会被误判成空行跳过——「已核查这些公司、当日均无动态」的覆盖自检信息（无动态 备注列）
+    // 静默丢失（amnesia 类）。枚举补 'no_dynamic' → 该行保留渲染。真正空行仍是
+    // 「0 claims 且无 urls 且无任何公司三态信息」（无 companiesChecked 或全空态）。
+    if ((b.claims || 0) === 0 && !(b.urls || 0) && !(b.companiesChecked || []).some(c => ['has_dynamic', 'no_news', 'unreached', 'no_dynamic'].includes(c.state))) continue
     const note = b.board === 'labs'
       ? (noNewsCompanies && noNewsCompanies.length ? '无动态：' + noNewsCompanies.join('、') : (b.degraded ? 'degraded' : ''))
       : (b.degraded ? 'degraded' : '')
@@ -902,6 +930,199 @@ const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, wi
     L.push('')
   }
   return L.join('\n')
+}
+// ─── inline: cluster ───
+// ai-daily 确定性聚类（verify → report 之间的纯函数去重，2026-08-23 第二十一项）。
+// 只做"主视图"聚类不放行：被合并的冗余 item 仍保留在 confirmed/claimsJson 归档，cluster 只影响
+// reportBody 的「已聚类」呈现与正文去重（report prompt 4.7 纪律据此写）。
+// clusterTokenize/clusterStopTokens 与 render-md 同款（正则 `/[a-z0-9][a-z0-9.%\-]*/g`、长度≥4、过滤
+// clusterStopTokens），但**必须用不同词法名**——build.mjs 整文件 inline 会让 render-md 的同名未导出
+// `tokenize`/`STOP_TOKENS` 与本文件的导出在同一顶层作用域 → 宿主 new Function 加载必抛
+// `Identifier 'tokenize' has already been declared` SyntaxError（产物 C1 溃败；node --check 是假绿）。
+// 双轨各自留副本（render-md 内 dedupWindowMisses 是私有函数、用户明令不改，不抽公共模块），仅为改名。
+
+// 8/23 C1 复核修复：原名 STOP_TOKENS/tokenize 与 render-md 顶层同名冲突 → 改 clusterStopTokens/clusterTokenize。
+const clusterStopTokens = new Set(['news', 'note', 'report', 'model', 'models', 'open', 'new', 'blog', 'post', 'api', 'app', 'apps', 'ai', 'pro', 'free', 'beta', 'tool', 'tools', 'official', 'release', 'update', 'announce', 'launch', 'said'])
+const clusterTokenize = s => (String(s || '').toLowerCase().match(/[a-z0-9][a-z0-9.%\-]*/g) || []).filter(t => t.length >= 4 && !clusterStopTokens.has(t))
+
+// 聚为 unordered 对：a 与 b 的 claim/claims 任一共享 ≥1 token 即成对。
+// keyOf/unionTokens 供 clusterClaims 内部使用：claim 优先，次 title。
+const unionTokens = (c, f) => new Set([...(c.claim ? clusterTokenize(c.claim) : []), ...(c.title ? clusterTokenize(c.title) : [])])
+
+/**
+ * 把共享实体 token 的声明聚成簇。
+ * @param {Array} claims 声明数组，每项可含 claim/title/summary/sources/status/quote 等
+ * @returns {Array<{key:string, items:Array}>} 簇：key 取首条 title/claim，items 为簇内声明（原样）
+ * 确定性：按输入序首现注册 token，无随机性。
+ */
+const clusterClaims = claims => {
+  if (!claims || !Array.isArray(claims)) return []
+  const clusters = []
+  const seen = new Map()   // token → cluster index（首现注册）
+  for (const c of claims) {
+    const ts = unionTokens(c)
+    let idx = -1
+    for (const t of ts) if (seen.has(t)) { idx = seen.get(t); break }
+    if (idx < 0) {
+      clusters.push({ key: c.title || c.claim, items: [c] })
+      for (const t of ts) if (!seen.has(t)) seen.set(t, clusters.length - 1)
+      continue
+    }
+    clusters[idx].items.push(c)
+    for (const t of ts) if (!seen.has(t)) seen.set(t, idx)
+  }
+  return clusters
+}
+
+// 源码页的数字各自被 verify 阶段用什么字段注载——此为启发式：只在摘要文本中出现同一实体+数字差异
+// 才算真冲突；否则只是两则独立陈述。当前实现保守返回 false（由 report prompt 4.7 / 3.2 在文案层处置）。
+const detectNumericConflict = items => false
+
+const distinctByClaim = claims => { const m = new Map(); for (const c of claims) m.set((c.claim || '').trim(), c); return [...m.values()] }
+
+const honestMergeSummary = (items, conflict) => {
+  // 取 items 摘要拼接（中文顿号分隔），冲突时 + 一句「口径不一，勿相加」。
+  const parts = items.map(c => (c.summary || c.quote || '').trim()).filter(Boolean)
+  if (!parts.length) return ''
+  return parts.join('；') + (conflict ? '（该事件多源数字口径不一，引用时勿叠加相加。）' : '')
+}
+
+/**
+ * 合并同一簇：nodup 计算 -> 数字冲突解析 -> merge。
+ * 返回编排同构输入（claim/title/summary/sources/status 齐），report prompt 依然只吃原始 resolved 输入。
+ * @param {Array} items 同一簇的声明（原样，可能含重复 claim）
+ * @param {string} [dateLabel] 保留位（合并主视图可带日期标注）
+ * @param {Object} [majorOutMap] 保留位（major-out 映射，本实现不使用）
+ * @returns {Object} { ...首条, claim: key, summary, sources, status?, mergedCount, numericConflict? }
+ */
+const mergeCluster = (items, dateLabel, majorOutMap) => {
+  const total = items.length
+  const distinct = distinctByClaim(items)
+  const key = distinct.map(c => c.claim || c.title).join('\n')   // 编排 key（信息熵契约新 claim）
+  const numMismatch = detectNumericConflict(distinct)
+  const sources = [...new Set(distinct.flatMap(c => c.sources || []))]
+  const vote = distinct[0] && distinct[0].status ? distinct[0].status : null
+  const summary = honestMergeSummary(distinct, numMismatch)
+  const out = { ...distinct[0], claim: key, summary, sources, ...(vote ? { status: vote } : {}), mergedCount: total }
+  if (numMismatch) out.numericConflict = true
+  return out
+}
+// ─── inline: linuxdo ───
+// ai-daily linux.do 登录态抓取（2026-08-23 第二十一项 §A）——纯导出零调用模块，自身零副作用。
+// 背景（已核实）：Cloudflare cf_clearance 绑定浏览器 TLS 指纹，裸 fetch 必 403，唯一可靠客户端是
+// 9222 真 Chrome（登录态）。经 CDP 开启临时标签 → 等 .json 文档在 Chrome 内渲染为 body 文本 → 读回。
+// 两条路径都覆盖：环境已有 globalThis.WebSocket（Node v26 是 function）→ 真 WebSocket 走
+// Runtime.evaluate 轮询 body.innerText；无 WebSocket 全局（workflow realm 降级保险）→ CDP HTTP-only
+// polling（每片轮询等价于"关旧标签+开新标签+读 body"的幂等快照）。
+// 不启动任何进程；fetch/AbortSignal/setTimeout/WebSocket 都是环境已有全局，直接引用。
+// build.mjs 只能把纯 float/纯导出 inline 进产物（workflow realm 自包含），本文件满足该约束。
+
+const CDP_DEFAULTS = {
+  cdpHost: '127.0.0.1:9222',
+  maxPages: 4,          // news/34.json 分页安全上限（多为 1-3 页）
+  perPageDeep: 3,       // 每页首页 JSON 字段已带 1 段文本摘要，topic 深抓仅少量(3)
+  requestTimeoutMs: 15000,
+  pollIntervalMs: 500,
+  pollMaxMs: 15000,
+}
+
+// 判断当前环境是否有真 WebSocket（Node v26 全局即 function；workflow realm 无 → HTTP polling 保险路径）。
+const hasW = () => (typeof globalThis !== 'undefined' && 'WebSocket' in globalThis) || typeof WebSocket === 'function'
+
+// CDP HTTP：开标签 → 读 body 文本 → 关标签。
+// 真 WebSocket：Runtime.evaluate 轮询 body.innerText（复用用户另一生成器的 polling 形态）。
+// 无 WebSocket（workflow realm）：CDP HTTP-only polling——每片轮询都等价于"关旧标签+开新标签+读 body"的幂等快照。
+async function readBodyText(host, url) {
+  const res = await fetch(`http://${host}/json/new?${encodeURIComponent(url)}`, { method: 'PUT', signal: AbortSignal.timeout(CDP_DEFAULTS.requestTimeoutMs) })
+  if (!res.ok) throw new Error('open-tab HTTP ' + res.status)
+  const target = await res.json()
+  const wsUrl = target.webSocketDebuggerUrl
+  let text = null
+  if (hasW()) {
+    // 真 WebSocket：轮询内文取 JSON。
+    const ws = new WebSocket(wsUrl)
+    await new Promise((ok, no) => { ws.onopen = ok; ws.onerror = no })
+    let n = 0; const pend = new Map()
+    ws.onmessage = e => { const v = JSON.parse(e.data); if (v.id && pend.has(v.id)) { pend.get(v.id)(v); pend.delete(v.id) } }
+    const send = (method, params = {}) => new Promise(res => { const id = ++n; pend.set(id, res); ws.send(JSON.stringify({ id, method, params })) })
+    await send('Runtime.enable')
+    for (let i = 0; i < Math.ceil(CDP_DEFAULTS.pollMaxMs / CDP_DEFAULTS.pollIntervalMs); i++) {
+      const { result } = await send('Runtime.evaluate', { expression: 'document.body ? document.body.innerText : null', returnByValue: true })
+      const v = result?.result?.value
+      if (v && String(v).trimStart().startsWith('{')) { text = v; break }
+      await new Promise(r => setTimeout(r, CDP_DEFAULTS.pollIntervalMs))
+    }
+    ws.close()
+  } else {
+    // 无 WebSocket 全局（workflow realm）：CDP HTTP-only polling — 每片轮询都等价于
+    // "关旧标签+开新标签+读 body"的幂等快照。
+    const close = () => fetch(`http://${host}/json/close/${target.id}`, { method: 'PUT', signal: AbortSignal.timeout(3000) }).catch(() => {})
+    await new Promise(r => setTimeout(r, CDP_DEFAULTS.pollIntervalMs))
+    for (let i = 0; i < Math.ceil(CDP_DEFAULTS.pollMaxMs / CDP_DEFAULTS.pollIntervalMs); i++) {
+      try {
+        const r2 = await fetch(`http://${host}/json/${target.id}`, { signal: AbortSignal.timeout(3000) })
+        if (r2.ok) { const j = await r2.json(); if (j.innerText) { text = j.innerText; break } }
+      } catch { /* poll */ }
+      await new Promise(r => setTimeout(r, CDP_DEFAULTS.pollIntervalMs))
+    }
+    await close()
+  }
+  return text && String(text).trimStart().startsWith('{') ? text : null
+}
+
+// 深抓单帖：GET https://linux.do/t/<id>.json 官方 JSON 接口（JSON 文档在 Chrome 内直接渲染为文本）。
+async function deepFetchTopic(host, id) {
+  return readBodyText(host, 'https://linux.do/t/' + id + '.json')
+}
+
+/**
+ * 抓取 linux.do 前沿快讯（news/34）分页，返回 posts。CDP 走 9222 登录态 Chrome。
+ * @param {{date?:string, cdpHost?:string}} opts date 为可空方言（抓取本身不强依赖日期窗口，只取最新分页）
+ * @returns {{ok:boolean, degraded:boolean, reason:string, pages:number, topics:number, posts:Array}}
+ *   posts 每项 { id, title, url, date, snippet, likeCount }
+ * no_cdp_host → ok:false 不降级（调用方选择不启用，板不崩）；其余失败 → ok:false + degraded:true。
+ */
+async function fetchLinuxDoNews34({ date, cdpHost }) {
+  const out = { ok: true, degraded: false, reason: '', pages: 0, topics: 0, posts: [] }
+  if (!cdpHost) { out.ok = false; out.reason = 'no_cdp_host'; return out }
+  try {
+    for (let page = 1; page <= CDP_DEFAULTS.maxPages; page++) {
+      const raw = await readBodyText(cdpHost, 'https://linux.do/c/news/34.json?page=' + page)
+      const topics = extractTopicsFromJson(raw)
+      if (!topics || !topics.length) break   // 空页即到底，不再翻
+      out.pages++; out.topics += topics.length
+      // 首页字段已带 topic excerpt（<200 字）→ 不算深抓；只对最前 perPageDeep 条补深抓正文片段。
+      for (const t of topics.slice(0, CDP_DEFAULTS.perPageDeep)) {
+        const deep = await deepFetchTopic(cdpHost, t.id)
+        const postText = extractPostTextFromJson(deep)
+        if (postText) t.snippet = postText.slice(0, 2400)
+      }
+      out.posts.push(...topics)
+    }
+    if (out.topics === 0) { out.ok = false; out.degraded = true; out.reason = 'empty_pages' }
+  } catch (e) {
+    out.ok = false; out.degraded = true; out.reason = String(e && e.message || e).slice(0, 120)
+  }
+  return out
+}
+
+// --- 轻量解析：从 Discourse JSON 提取 { id, title, url, date, snippet, likes } ---
+function extractTopicsFromJson(raw) {
+  if (!raw) return null
+  let obj; try { obj = JSON.parse(String(raw).trim()) } catch { return null }
+  if (!obj?.topic_list?.topics?.length) return null
+  return obj.topic_list.topics.map(t => ({
+    id: t.id, title: t.title, url: 'https://linux.do/t/topic/' + t.id,
+    date: t.created_at ? t.created_at.slice(0, 10) : '', snippet: t.excerpt || '', likeCount: t.like_count || 0,
+  }))
+}
+
+function extractPostTextFromJson(raw) {
+  if (!raw) return null
+  let obj; try { obj = JSON.parse(String(raw).trim()) } catch { return null }
+  const c = obj?.post_stream?.posts
+  const rawStr = c && c[0]?.cooked ? String(c[0].cooked).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : ''
+  return rawStr || null
 }
 
 // boards 由 BOARDS 花名册按选区派生（BOARDS 已 inline 就绪，此时访问无 TDZ）。
@@ -1081,7 +1302,35 @@ const discoverResults = []
 const DISCOVER_BATCH = 3
 for (const batch of chunkArr(DISCOVER_GROUPS, DISCOVER_BATCH)) {
   if (!budgetGate('Discover').ok) { log('BUDGET-BREAK Discover 余批跳过，用已完成批次结果'); break }
-  const round = await parallel(batch.map(g => () =>
+  // 8/23 第二十一项：linuxdo 组是独立发现通道（走 9222 登录态 Chrome 抓 news/34.json），非代理。
+  // 在该批并行代理前同步抓取——成功 → posts 按配额塞进组返回行（board 标 linuxdo，URL 进 Fetch/Verify
+  // 既有流水线）；失败 → 组返回行标 degraded（linuxdo_degraded 进降级旗标）；no_cdp_host（默认）→
+  // LINUXDO-SKIP + urls:[] 不降级（板不崩）。date 参数可空：抓取只取最新分页，不强依赖日期窗口。
+  for (const g of batch) {
+    if (!g.cdp) continue
+    if (!LINUXDO_CDP_HOST) {
+      log('LINUXDO-SKIP no_cdp_host ' + g.key + ' → urls:[]，不降级')
+      discoverResults.push({ group: g, boards: g.boards, urls: [], noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: false, linuxdoSkipped: true })
+      continue
+    }
+    const ld = await fetchLinuxDoNews34({ date: DATE, cdpHost: LINUXDO_CDP_HOST })
+    if (!ld.ok || !ld.topics) {
+      log('LINUXDO-FAIL ' + (ld.reason || 'unknown') + ' → ' + g.key + ' 降级')
+      discoverResults.push({ group: g, boards: g.boards, urls: [], noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: true, linuxdoFailed: true, linuxdoReason: ld.reason || '' })
+      continue
+    }
+    log('LINUXDO-OK ' + ld.topics + ' topics → ' + g.key + ' board（配额 ' + LINUXDO_MAX_SOURCES + '）')
+    // 按 linuxdoMaxSources 配额把 posts 转成组返回行 URL 候选（latest posts 在前，配额轮换截至）。
+    const srcs = (ld.posts || []).slice(0, LINUXDO_MAX_SOURCES).map(p => ({
+      url: p.url, title: p.title, found_via: 'linuxdo-cdp', date: p.date || DATE, board: 'linuxdo',
+    }))
+    discoverResults.push({ group: g, boards: g.boards, urls: srcs, noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: false, linuxdoTopics: ld.topics, linuxdoPosts: (ld.posts || []).length })
+  }
+  // 8/23 C2 复核修复：cdp 组已在上方预块处理并 push（CDP 抓取不进普通发现代理）；此处只跑普通组，
+  // 避免 linuxdo 组被双 push（urls_discovered 翻倍、Fetch 预算空耗）且不被当普通代理喂裸
+  // https://linux.do/c/news/34（spec §A 明文裸 fetch 必 403 → 长墙钟失败 + 误标 degraded，违背
+  // 「默认不启用时板不崩」）。.filter 后 batch 内不再有 g.cdp 组，.then 无需再判 cdp。
+  const round = await parallel(batch.filter(g => !g.cdp).map(g => () =>
     // 8/16：discover 与 harvest 同款的批量串行（5→3+2 两波）+ 按实测放宽死线 + 瞬时错误重试一次。
     // 8/15 只给 labs 特殊 600s 并在单板冒烟里验证（334s 达标），全量 5 并发时网关争抢使每个 discover 都 3-6×变慢，
     // media-cn 实测 1967s、labs 1213s、opensource/media-en 各 ~770s，全部超死线被 withDeadline 丢弃 → 8/9 板块 degrade、23/23 unreached。
@@ -1248,6 +1497,20 @@ for (const batch of chunkArr(rankedClaims, VERIFY_BATCH)) {
 }
 
 const confirmedVerify = voted.filter(c => c.survives && claimWindow(c) !== 'out')
+// ─── 8/23 第二十一项：双轨聚类主视图（verify→report 之间）───
+// clustered = clusterClaims(confirmedVerify)：只聚类、不放行。多条目簇经 mergeCluster 合并成单一
+// 编排同构主视图塞进 reportBody 的「已聚类」区（打标 [cluster 已合并 N 条]，精准供 report prompt 4.7 识别）；
+// 被合并项仍保留在 confirmed 原样（report 收到"主视图 + 多视角原样"，同一事件只写 ONE 条、不同口径并陈）。
+// 不传 clustered 给 ctxP——report prompt 输入契约（reportBody/refutedList/unverifiedList/missBlock/coverBlock）不变。
+const clustered = clusterClaims(confirmedVerify)
+const clusteredMerged = clustered.filter(cl => cl.items.length > 1).map(cl => mergeCluster(cl.items, DATE, null))
+const clusteredBlock = clusteredMerged.length
+  ? '## 已聚类（cluster 合并 ' + clusteredMerged.reduce((n, c) => n + c.mergedCount, 0) + ' 条→主视图）\n' + clusteredMerged.map((c, i) =>
+      '\n[已聚类·' + (i + 1) + '] [cluster 已合并 ' + c.mergedCount + ' 条] ' + c.claim.split('\n').join(' / ') + '\n' +
+      (c.summary ? '主视图摘要：' + c.summary + '\n' : '') +
+      (c.sources && c.sources.length ? '来源：' + c.sources.join('、') : '')
+    ).join('\n')
+  : ''
 const confirmed = [...confirmedVerify]  // copy：后续 major-out 注入不许污染 confirmedVerify 计数（reportPrompt 分开统计）
 const outOfWindow = voted.filter(c => c.survives && claimWindow(c) === 'out')
 const killed = voted.filter(c => c.isRefuted)
@@ -1338,6 +1601,11 @@ const reportBody = (confirmed.length ? confirmed.map((c, i) =>
   '### ' + (c.isMajorOut ? '[窗口外·重大] ' : '') + '[' + i + '] ' + c.claim + '\nVote: ' + (c.isMajorOut ? '—（未投票，多源公认行业里程碑）' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount) + ' · Source: ' + c.sourceUrl + ' (' + c.sourceQuality + ') · Date: ' + (c.publishDate || c.date || '?') + '\nQuote: "' + c.quote.slice(0, 140) + (c.quote.length > 140 ? '…' : '') + '"\n')
   .join('\n')
   : '(无已确认声明)')
+// 8/23 第二十一项：聚类主视图并列注入 reportBody 开头的「## 已聚类」区（report prompt 4.7 专门读取）——
+// 仅当确认声明确有跨条可并簇项时出现；被合并 item 仍保留在 confirmed 原样（本块只做主视图提示，不删数据）。
+// 8/23 分支合并复核修复：外层只拼「原始素材」分节头（由 reportPrompt/prompts.mjs 唯一提供），此处不再重复注入——
+// clusteredBlock 自带「已聚类」头，拼接只接 \n\n 与 reportBody，避免 report 代理收到两个同名 H2。
+const reportBodyWithCluster = clusteredBlock ? clusteredBlock + '\n\n' + reportBody : reportBody
 const refutedList = killed.map(c => '- "' + c.claim + '" — ' + c.sourceUrl)
 const unverifiedList = unverified.map(c => '- "' + c.claim + '" — ' + c.sourceUrl)
 const coverBlock = coverage.map(c => '- ' + c.title + ': ' + c.claims + ' claims / ' + c.urls + ' sources' + (c.recovered ? ' [recovered]' : (c.degraded ? ' [degraded]' : '')) + (c.companiesChecked
@@ -1348,7 +1616,7 @@ const missBlock = windowMisses.length ? '\n## 窗口外参考（次要超窗项�
 
 const report = synthAllowed ? await safeAgent(reportPrompt({
   ...ctxP, confirmedVerifyCount: confirmedVerify.length, majorOutCount: majorOutClaims.length,
-  reportBody, killedCount: killed.length, refutedList, unverifiedCount: unverified.length, unverifiedList, missBlock, coverBlock,
+  reportBody: reportBodyWithCluster, killedCount: killed.length, refutedList, unverifiedCount: unverified.length, unverifiedList, missBlock, coverBlock,
 }), { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: 600000 }, 1) : null
 
 // ─── md 确定性渲染（report 成功 → 完整版；失败 → 降级版）。render-md.mjs，不再有 mdWriter 代理。───
@@ -1360,6 +1628,9 @@ if (missingBoardKeys.length > 0) degradedFlags.push('discovery_degraded:missing_
 else if (discoverRows.some(d => d.degraded)) degradedFlags.push('discovery_degraded')
 if (recoveredBoards.size > 0) degradedFlags.push('discovery_recovered:' + [...recoveredBoards].join('+'))
 if (budgetSkipped.length > 0) degradedFlags.push('budget_skipped:' + budgetSkipped.join('+'))
+// 8/23 第二十一项：linuxdo 组失败/降级 → linuxdo_degraded 独立降级旗标（no_cdp_host 跳过不算降级）。
+const linuxdoFailedRows = discoverRows.filter(d => d.linuxdoFailed)
+if (linuxdoFailedRows.length) degradedFlags.push('linuxdo_degraded' + (linuxdoFailedRows.some(d => d.linuxdoReason) ? ':' + linuxdoFailedRows.map(d => d.linuxdoReason).join('+').slice(0, 80) : ''))
 const reportErr = report ? null : 'report agent failed; reverting to raw archive'
 if (reportErr) degradedFlags.push('report_failed')
 // 归档 payload 数组（claimsJson 与降级 md 共用同一份同构数据，避免两处映射漂移）。
@@ -1389,6 +1660,10 @@ const metaJson = JSON.stringify({
   claims_verified: voted.length, confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, unverified: unverified.length, out_of_window_confirmed: outOfWindow.length,
   window_misses: windowMisses,
   url_dupes: dupes.length, fetches_dropped: budgetDropped.length, verify_agent_errors: toolError,
+  // 8/23 第二十一项：linuxdo 抓取统计——linuxdo_posts = 抓到的帖子总数，linuxdo_open_posts = 按配额
+  // 进 boardURLMap 的 URL 候选数（成功时补入）；linuxdo_degraded 是独立降级旗标（见 degradedFlags）。
+  linuxdo_posts: discoverRows.filter(d => d.linuxdoTopics).reduce((n, d) => n + (d.linuxdoPosts || 0), 0),
+  linuxdo_open_posts: discoverRows.filter(d => d.linuxdoTopics).reduce((n, d) => n + d.urls.length, 0),
   degraded: degradedFlags, report_error: reportErr,
   // md_written 语义（8/18 重构后）：report 是否成功（1=完整版 md 进 payloads.md，0=降级版 md 仍落盘）——不再是 workflow 写盘计数。
   md_written: report ? 1 : 0, artifacts_failed: [],

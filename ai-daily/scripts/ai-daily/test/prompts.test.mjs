@@ -36,3 +36,23 @@ test('reportPrompt §4.5：未核查项措辞硬约束在场（C.1 增量）', (
   assert.match(PROMPTS, /禁止用「已解决」「完成」「正式发布」「确认」等肯定完成态措辞/, '禁令完整列全')
   assert.match(PROMPTS, /有 vote 支撑，可正常陈述/, '已核查项不被迫弱化')
 })
+
+// ─── 2026-08-23 第二十一项：双轨聚类 prompt 纪律 ───
+
+test('reportPrompt §4.7：聚类纪律在场（同一事件只写 ONE 条 + 口径不一并陈）', () => {
+  assert.match(PROMPTS, /4\.7\..*聚类纪律/, '4.7 段标题在场')
+  assert.match(PROMPTS, /\[cluster 已合并 N 条\]/, '已聚类素材打标识别')
+  assert.match(PROMPTS, /只写 ONE 条标题正文，其他绝不重复/, '同一事件只写 ONE 条')
+  assert.match(PROMPTS, /口径不一/, '口径不一并陈要求')
+  assert.match(PROMPTS, /4\.25GW\/\$150-200B\/\$600B\/\$105B/, '并陈示例在场')
+  // 双标准判据（实体 token / 日期同域 / 数字字段重叠）
+  assert.match(PROMPTS, /共享 ≥1 个实体 token/, '判据①实体 token')
+  assert.match(PROMPTS, /日期同域/, '判据②日期同域')
+  assert.match(PROMPTS, /数字字段重叠（含数量级）/, '判据③数字字段重叠')
+})
+
+test('reportPrompt §3.2：同事件数字口径不一 → 直接并陈、不各自成条、提醒勿相加', () => {
+  assert.match(PROMPTS, /3\.2\..*数字口径/, '3.2 数字口径段在场')
+  assert.match(PROMPTS, /直接并陈不同口径、不各自成条、提醒勿相加/, '并陈不各自成条勿相加')
+  assert.match(PROMPTS, /4\.25GW\/\$150-200B\/\$600B\/\$105B/, '口径示例在场')
+})

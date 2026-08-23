@@ -21,8 +21,9 @@ const grp = (key, degraded = false) => ({ group: { key }, degraded })
 const ALL_KEYS = BOARDS.map(b => b.key)
 
 // 8/21 实况：media-cn 失败（无返回），其余 4 组成功，其中 labs 自报通道降级。
+// 8/23 linuxdo 接入：linuxdo 组始终有返回（默认 no_cdp_host 不降级），故真实行集合含 linuxdo。
 function rows821() {
-  return [grp('labs', true), grp('opensource'), grp('academic'), grp('media-en')]
+  return [grp('labs', true), grp('opensource'), grp('academic'), grp('media-en'), grp('linuxdo')]
 }
 
 test('8/21 实况：media-cn 失败 → 5 覆盖板全 degraded，missing 只留独占板', () => {
@@ -55,7 +56,7 @@ test('labs 通道降级保留：有返回 + degraded → degraded 但不 missing
 
 test('全组正常 → 任何板不降级/missing', () => {
   const rows = [
-    grp('labs'), grp('opensource'), grp('academic'), grp('media-cn'), grp('media-en'),
+    grp('labs'), grp('opensource'), grp('academic'), grp('media-cn'), grp('media-en'), grp('linuxdo'),
   ]
   const st = computeBoardStates(rows, ALL_KEYS)
   for (const k of ALL_KEYS) {
@@ -65,7 +66,7 @@ test('全组正常 → 任何板不降级/missing', () => {
 })
 
 test('媒体两组都失败 → 共享板 missing + degraded', () => {
-  const rows = [grp('labs'), grp('opensource'), grp('academic')]  // media-* 无返回
+  const rows = [grp('labs'), grp('opensource'), grp('academic'), grp('linuxdo')]  // media-* 无返回
   const st = computeBoardStates(rows, ALL_KEYS)
   for (const k of ['strategy', 'funding', 'policy', 'safety', 'people', 'products']) {
     assert.equal(st.get(k).degraded, true, `${k} 都应 degraded`)
@@ -111,7 +112,7 @@ test('recoveredKeys 为空时行为与无参数一致（向后兼容）', () => 
 })
 
 test('recovered 不影响完全成功的板（无失败组）', () => {
-  const rows = [grp('labs'), grp('opensource'), grp('academic'), grp('media-cn'), grp('media-en')]
+  const rows = [grp('labs'), grp('opensource'), grp('academic'), grp('media-cn'), grp('media-en'), grp('linuxdo')]
   const st = computeBoardStates(rows, ALL_KEYS, ['labs'])  // labs 本就成功，误传 recovered 不应打标记
   assert.equal(st.get('labs').degraded, false, 'labs 成功 → 不 degraded')
   assert.equal(st.get('labs').missing, false, 'labs 成功 → 不 missing')

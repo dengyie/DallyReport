@@ -389,3 +389,72 @@ test('完整版：windowMisses 全部已在 sections 时不出「窗口外参考
   const md = renderMarkdown({ date: 'd', window: 'w', report, coverage: [], windowMisses: [{ name: 'OpenAI 前沿模型零数据保留选项', date: '2026-08-14', note: 'n' }], degraded: [] })
   assert.ok(!md.includes('## 📎 窗口外参考'), '去重后为空 → 不渲染窗口外参考节')
 })
+
+// ─── 2026-08-23 第二十一项：事件驱动分节（信息熵契约——无内容板块整体不出现）───
+
+test('完整版：空 section（无 items）整体不渲染——标题不出现', () => {
+  const report = {
+    oneLiner: 'o', execSummary: 'e',
+    sections: [
+      { board: 'labs', title: '头部实验室·新模型', items: [
+        { title: '有内容的板', summary: 's', confidence: 'high', sources: ['https://x.ai/news'], vote: '—' },
+      ]},
+      { board: 'safety', title: '安全与伦理', items: [] },                    // 空 items
+      { board: 'people', title: '人才流动' },                                   // 无 items 字段
+    ],
+    caveats: [], openQuestions: [],
+  }
+  const md = renderMarkdown({ date: 'd', window: 'w', report, coverage: [], windowMisses: [], degraded: [] })
+  assert.ok(md.includes('### 头部实验室·新模型'), '有内容的板正常渲染')
+  assert.ok(!md.includes('### 安全与伦理'), '空 items 的 section 整体不出现（标题不在）')
+  assert.ok(!md.includes('### 人才流动'), '无 items 字段的 section 整体不出现')
+})
+
+test('降级版：覆盖矩阵空行（0 claims 且无 URL/公司三态）被跳过', () => {
+  const coverage = [
+    { board: 'labs', title: '头部实验室·新模型', claims: 3, urls: 2, degraded: false,
+      companiesChecked: [{ name: 'OpenAI', state: 'has_dynamic' }] },
+    // 无 claims、无 urls、无 companiesChecked → 空行，应被跳过
+    { board: 'safety', title: '安全与伦理', claims: 0, urls: 0, degraded: false },
+    { board: 'people', title: '人才流动', claims: 0, urls: 0, degraded: false, companiesChecked: [] },
+    // 全 unreached 公司（有公司三态 info）→ 不应被跳过（degraded 通道失败如实展示）
+    { board: 'policy', title: '政策监管', claims: 0, urls: 0, degraded: true,
+      companiesChecked: [{ name: '某公司', state: 'unreached', evidence: 'no_discover_agent' }] },
+    // no_news 公司（labs 形态有信息）→ 不应被跳过
+    { board: 'opensource', title: '开源与工具链', claims: 0, urls: 0, degraded: false,
+      companiesChecked: [{ name: 'HF', state: 'no_news' }] },
+  ]
+  const md = renderDegradedMarkdown({ date: 'd', window: 'w', confirmed: [], refuted: [], coverage, windowMisses: [], degraded: [], noNewsCompanies: [] })
+  // 空行不渲染（标题不出现）
+  assert.ok(!md.includes('| safety | 安全与伦理 |'), '空行 safety 不渲染')
+  assert.ok(!md.includes('| people | 人才流动 |'), '空行 people 不渲染')
+  // 有内容的行仍渲染
+  assert.ok(md.includes('| labs | 头部实验室·新模型 | 3 |'), '有 claims 的行渲染')
+  assert.ok(md.includes('| policy | 政策监管 | 0 |'), '全 unreached 公司的行渲染（通道降级如实展示）')
+  assert.ok(md.includes('| opensource | 开源与工具链 | 0 |'), 'no_news 公司的行渲染')
+  // 矩阵表头仍在（空表只有表头也是合法矩阵）
+  assert.ok(md.includes('| 板块 | 标题 | 覆盖 claim 数 | 备注 |'))
+})
+
+test('降级版 I1：算法校正成 no_dynamic 的板不是「真实空行」——枚举含 no_dynamic → 行保留并渲染「无动态」备注', () => {
+  // 8/23 第二十一项复核 I1：空矩阵行过滤枚举缺 no_dynamic。
+  // 8/22 第二十项 labs 花名册跨板块校正把全部 no_news 翻为 no_dynamic（无再命中报告的板），
+  // render 时 no_news 永不出现。枚举必须补 'no_dynamic'，否则经校正的 labs 板（0 claims、0 urls、
+  // 公司全 no_dynamic）会被误当作「真实空行」过滤——「已核查过这些公司、当日均无动态」的覆盖自检
+  // 信息（无动态 备注列）静默丢失（amnesia 类）。注意：是「不因空行被过滤掉」，而非「吞掉」。
+  const coverage = [
+    { board: 'labs', title: '头部实验室·新模型', claims: 0, urls: 0, degraded: false,
+      companiesChecked: [
+        // 8/22 校正后形态：no_news 都被翻为 no_dynamic（无 confirmed 命中别名）
+        { name: 'OpenAI', state: 'no_dynamic', evidence: 'labs' },
+        { name: 'NVIDIA', state: 'no_dynamic', evidence: 'labs' },
+      ] },
+    { board: 'safety', title: '安全与伦理', claims: 0, urls: 0, degraded: false },
+  ]
+  const md = renderDegradedMarkdown({ date: 'd', window: 'w', confirmed: [], refuted: [], coverage, windowMisses: [], degraded: [], noNewsCompanies: ['OpenAI', 'NVIDIA'] })
+  // no_dynamic 板不因「空行」被过滤 → 行在场，且公司无动态备注如实渲染（覆盖自检信息不丢）
+  assert.ok(md.includes('| labs | 头部实验室·新模型 | 0 |'), 'no_dynamic 板保留（0 claim 行，覆盖自检信息不丢——I1 枚举含 no_dynamic）')
+  assert.ok(md.includes('无动态：OpenAI、NVIDIA'), 'no_dynamic 公司进「无动态」备注列（信息熵契约：非空信息不吞）')
+  // 真正的空行（无 claims、无 urls、无公司三态）仍被过滤
+  assert.ok(!md.includes('| safety | 安全与伦理 |'), '真·空行 safety 仍被过滤')
+})
