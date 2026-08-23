@@ -91,17 +91,1061 @@ const WEB_BUDGET_PER = 2
 // 依赖序与 build.mjs MODULES 一致：url-polyfill 最先（注入 globalThis.URL，workflow realm 无 URL 全局，
 // 否则 dedup._hostnameOf / render-md.buildCitationMap 的 new URL() 抛错被 catch 吞 → 完整版 0 角标）；
 // date-utils(normURL) 必须在 boards(GROUPS_RAW.test 闭包) 与 dedup 前。
-/* @inline: url-polyfill */
-/* @inline: date-utils */
-/* @inline: schemas */
-/* @inline: boards */
-/* @inline: dedup */
-/* @inline: budget */
-/* @inline: fallback */
-/* @inline: prompts */
-/* @inline: render-md */
-/* @inline: cluster */
-/* @inline: linuxdo */
+// ─── inline: url-polyfill ───
+// workflow realm 缺失 URL 全局的最小 WHATWG URL polyfill（2026-08-22 实证根因）。
+// Workflow 脚本 realm 无 URL（typeof URL==='undefined'），dedup._hostnameOf / render-md.buildCitationMap /
+// render-md.citationBadges 的 `new URL(s)` 抛 ReferenceError 被 catch{continue/null} 静默吞：
+//  → buildCitationMap 空 → 完整版 0 [n] 角标、0 参考来源节、全项 [行业公认·无单一链接] 兜底（8/22 两次 run 实证）。
+// 本 polyfill 须在任何 inline 模块前注入（build MODULES 顺序：url-polyfill 第一）。
+// 仅覆盖 pipeline 实际用到的 .href / .hostname / protocol；非 URL 输入抛 TypeError（保留各处 catch 语义）。
+// 幂等：已存在全局 URL（node:test 直跑、或已注入）时不覆盖，保证宿主 URL 优先。
+// href 返回构造时原输入字符串（规范 URL 已归一），保证 buildCitationMap 建图与 citationBadges 查图
+// 用同一 polyfill、同一 key（map.get 命中）。
+
+const installUrlPolyfill = () => {
+  if (typeof globalThis === 'undefined') return false
+  if (typeof globalThis.URL !== 'undefined') return false
+  const MinURL = class URL {
+    constructor(input) {
+      const s = String(input)
+      const m = s.match(/^(https?):\/\/([^\/?#]+)([^?#]*)(\?[^#]*)?(#.*)?$/i)
+      if (!m) throw new TypeError('invalid url: ' + s)
+      this._href = s
+      this.protocol = m[1].toLowerCase() + ':'
+      this.hostname = m[2].toLowerCase()
+      this.pathname = m[3] || '/'
+    }
+    get href() { return this._href }
+  }
+  globalThis.URL = MinURL
+  return true
+}
+
+// 模块加载即注入（workflow realm inline 后于顶部执行；node:test 已有全局 URL 则跳过）。
+installUrlPolyfill()
+// ─── inline: date-utils ───
+// ai-daily 日期/URL/数组纯函数 — 与 workflow 内逐字节一致（claimWindow 改工厂注入，唯一签名变化）。
+
+const URL_HOST_PATTERN = /^[a-z][a-z0-9+.-]*:\/\/(?:[^/?#\\]*@)?(?:www\.)?([^/:?#@\\]+)(?::\d+)?([^?#]*)/i
+const normURL = u => { const m = String(u).match(URL_HOST_PATTERN); return m ? (m[1] + m[2].replace(/\/$/, '')).toLowerCase() : String(u).toLowerCase() }
+const hostOf = u => (String(u || '').match(URL_HOST_PATTERN)?.[1] || 'unknown').toLowerCase()
+
+const pad2 = n => String(n).padStart(2, '0')
+const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 }
+const normalizeDate = s => {
+  if (!s) return null
+  const str = String(s).trim()
+  let m
+  if ((m = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) return +(m[1] + pad2(+m[2]) + pad2(+m[3]))
+  if ((m = str.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})/))) return +(m[1] + pad2(+m[2]) + pad2(+m[3]))
+  if ((m = str.match(/^(\d{4})(\d{2})(\d{2})/))) return +m[0]
+  if ((m = str.match(/(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/))) return +(m[3] + pad2(+m[1]) + pad2(+m[2]))
+  const mm = MONTHS[str.slice(0, 3).toLowerCase()]
+  if (mm) {
+    if ((m = str.match(/(\d{1,2}),?\s*(\d{4})/))) return +(m[2] + pad2(mm) + pad2(+m[1]))
+    if ((m = str.match(/(\d{4}),?\s+(\d{1,2})/))) return +(m[1] + pad2(mm) + pad2(+m[2]))
+  }
+  return null
+}
+
+// 工厂化：现行 claimWindow 闭包依赖全局 WIN_FROM/WIN_TO，模块化后显式注入。返回的函数语义逐字不变。
+const makeClaimWindow = (WIN_FROM, WIN_TO) => c => {
+  const cands = [c.publishDate, c.date].map(normalizeDate).filter(x => x != null)
+  if (!cands.length) return 'unknown'
+  return cands.every(x => x >= WIN_FROM && x <= WIN_TO) ? 'in' : 'out'
+}
+
+// 日历天数差（reportDay − seedDay；正=seed 早于 report）。YYYYMMDD 数值→天数。
+// 纯算术、无 Date.now()/new Date()——Workflow realm 安全（realm 禁 Date）。
+const daysBetween = (seedDayNum, reportDayNum) => {
+  const isLeap = y => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0
+  const dom = (y, m) => [31, isLeap(y) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1]
+  const dayNum = (y, m, d) => { let n = 0; for (let Y = 1970; Y < y; Y++) n += isLeap(Y) ? 366 : 365; for (let M = 1; M < m; M++) n += dom(y, M); return n + d }
+  const p = n => ({ y: Math.floor(n / 10000), m: Math.floor(n / 100) % 100, d: n % 100 })
+  const a = p(seedDayNum), b = p(reportDayNum)
+  return dayNum(b.y, b.m, b.d) - dayNum(a.y, a.m, a.d)
+}
+
+// age gate：种子距 report 超 maxAgeDays，或日期不可解析（normalizeDate→null）→ 剔除。
+// fail-open：reportDateNum == null（未知）返回原数组，不因 gate 清空 major-out 节。
+const filterSeedsByAge = (seeds, reportDayNum, maxAgeDays) => {
+  if (reportDayNum == null) return seeds
+  return seeds.filter(s => {
+    const day = normalizeDate(s.date)
+    if (day == null) return false            // 无日期 → 超期剔除（调用方 SEED-AGE 日志可见）
+    return daysBetween(day, reportDayNum) <= maxAgeDays
+  })
+}
+
+const chunkArr = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out }
+// ─── inline: schemas ───
+// ai-daily schemas — 与 workflow 内逐字节一致（WRITE_RESULT_SCHEMA 已随 mdWriter 代理删除）。
+// 真源；build.mjs 剥 export inline 进 workflow。
+
+const DISCOVER_SCHEMA = {
+  type: 'object', required: ['urls', 'noNews'],
+  properties: {
+    // urlsMax 放宽到 10 供合组媒体代理使用（单板代理由 prompt 限 6）；board 为媒体组必填的归属板块。
+    urls: { type: 'array', maxItems: 10, items: {
+      type: 'object', required: ['url', 'title', 'found_via', 'date'],
+      properties: { url: { type: 'string' }, title: { type: 'string' }, found_via: { type: 'string' }, date: { type: 'string' }, board: { type: 'string' } },
+    }},
+    noNews: { type: 'array', items: { type: 'string' } },
+    nearWindow: { type: 'array', items: { type: 'object', required: ['name', 'note'], properties: { name: { type: 'string' }, date: { type: 'string' }, note: { type: 'string' } } } },
+    // majorOutOfWindow url 可选（2026-08-22 B.2）：有官方/一手可溯源页才带，无则不带（降级 C 兜底标 [行业公认·无单一链接]）。
+    majorOutOfWindow: { type: 'array', items: { type: 'object', required: ['name', 'date', 'note'], properties: { name: { type: 'string' }, date: { type: 'string' }, note: { type: 'string' }, url: { type: 'string' } } } },
+    degraded: { type: 'boolean' },
+  },
+}
+// 批量 Harvest schema：一个代理可覆盖多 feed，每条条目带 feed 字段（来源 Feed URL，原样回填）供归栈。
+const HARVEST_SCHEMA = {
+  type: 'object', required: ['entries', 'recent'],
+  properties: {
+    entries: { type: 'array', maxItems: 100, items: {
+      type: 'object', required: ['date', 'title', 'url'],
+      properties: { date: { type: 'string' }, title: { type: 'string' }, url: { type: 'string' }, feed: { type: 'string' } },
+    }},
+    recent: { type: 'array', maxItems: 30, items: {
+      type: 'object', required: ['date', 'title', 'url', 'note'],
+      properties: { date: { type: 'string' }, title: { type: 'string' }, url: { type: 'string' }, note: { type: 'string' }, feed: { type: 'string' } },
+    }},
+    failed: { type: 'boolean' },
+  },
+}
+const EXTRACT_SCHEMA = {
+  type: 'object', required: ['claims', 'sourceQuality'],
+  properties: {
+    sourceQuality: { enum: ['primary', 'secondary', 'blog', 'forum', 'unreliable'] },
+    publishDate: { type: 'string' },
+    claims: { type: 'array', maxItems: 3, items: {
+      type: 'object', required: ['claim', 'quote', 'importance'],
+      properties: { claim: { type: 'string' }, quote: { type: 'string' }, importance: { enum: ['central', 'supporting', 'tangential'] } },
+    }},
+  },
+}
+const VERDICT_SCHEMA = {
+  type: 'object', required: ['refuted', 'evidence', 'confidence'],
+  properties: {
+    refuted: { type: 'boolean' },
+    evidence: { type: 'string' },
+    confidence: { enum: ['high', 'medium', 'low'] },
+  },
+}
+const REPORT_SCHEMA = {
+  type: 'object', required: ['oneLiner', 'execSummary', 'sections', 'caveats', 'openQuestions'],
+  properties: {
+    oneLiner: { type: 'string' },
+    execSummary: { type: 'string' },
+    sections: { type: 'array', items: {
+      type: 'object', required: ['board', 'title', 'items'],
+      properties: {
+        board: { type: 'string' }, title: { type: 'string' },
+        items: { type: 'array', items: {
+          type: 'object', required: ['title', 'summary', 'confidence', 'sources'],
+          properties: {
+            title: { type: 'string' }, summary: { type: 'string' }, confidence: { enum: ['high', 'medium', 'low'] },
+            // 2026-08-22 C.3 收口：status 枚举字面量（render 依赖精确值判定；容错在 render 侧做，源头仍须规范）。
+            status: { enum: ['已核查 2-0', '已核查 2-1', '[窗口外·重大]', '未核查', '已否决'] },
+            sources: { type: 'array', items: { type: 'string' } }, vote: { type: 'string' },
+          },
+        }},
+      },
+    }},
+    caveats: { type: 'array', items: { type: 'string' } },
+    openQuestions: { type: 'array', items: { type: 'string' } },
+  },
+}
+// ─── inline: boards ───
+// ai-daily 花名册与静态配置 — 与 workflow 内逐字节一致。真源；加厂商/改种子只改此文件。
+
+// ─── Deterministic coverage: 9 boards × roster ───
+const BOARDS = [
+  { key: 'labs', title: '头部实验室·新模型', focus: '旗舰实验室本周新模型、新版本、重大模型能力发布（必须逐家核）', degradeNotes: 'X/Grok、OpenAI 等官方 X 通道优先；WebSearch 不可用时以官方渠道覆盖为主。',
+    companies: [
+      { name: 'OpenAI',        x: 'OpenAI' },
+      { name: 'Google DeepMind', x: 'GoogleDeepMind', feed: 'https://research.google/blog/rss/' },
+      { name: 'Anthropic',     x: 'AnthropicAI',      feed: 'https://www.anthropic.com/news' },
+      { name: 'xAI',           x: 'xai',              feed: 'https://x.ai/news' },
+      { name: 'NVIDIA',        x: 'NVIDIA_AI',        feed: 'https://blogs.nvidia.com/feed/' },
+      { name: 'Meta AI',       x: 'AIatMeta',         feed: 'https://ai.meta.com/blog/' },
+      { name: 'Amazon AWS',    x: 'AWSNewsBlog' },
+      { name: 'Apple',         x: 'Apple' },
+      { name: 'Microsoft',     x: 'MSFTResearch' },
+      { name: 'Mistral',       x: 'MistralAI' },
+      { name: 'Cohere',        x: 'CohereAI' },
+      { name: 'DeepSeek',      x: 'deepseek_ai' },
+      { name: 'Alibaba Qwen',  x: 'Alibaba_Qwen' },
+      { name: 'Moonshot Kimi', x: 'MoonshotAI' },
+      { name: 'MiniMax',       x: 'MiniMax_AI' },
+      { name: 'Baidu',         x: 'BaiduResearch' },
+      { name: 'Tencent',       x: 'Tencent_AI_Lab' },
+      { name: 'ByteDance',     x: 'ByteDance' },
+      { name: 'Zhipu GLM',     x: 'zhipu_ai' },
+      { name: 'StepFun',       x: 'StepFun' },
+      { name: 'Kuaishou',      x: 'Kuaishou' },
+      { name: 'Midjourney',    x: 'midjourney' },
+      { name: 'Stability AI',  x: 'StabilityAI' },
+    ] },
+  { key: 'strategy', title: '重磅头条·战略', focus: '重大战略/资本/基础设施新闻：大额融资平台、星际之门类项目、并购、行业地位变动', feeds: ['https://www.qbitai.com/', 'https://techcrunch.com/category/artificial-intelligence/'] },
+  { key: 'products', title: '产品与硬件', focus: '消费级 AI 产品、AI 硬件、设备发布、机器人、新品落地', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.theverge.com/ai-artificial-intelligence/', 'https://www.qbitai.com/'] },
+  { key: 'opensource', title: '开源与工具链', focus: '开源权重发布、HF 趋势、GitHub 趋势、Agent 框架与工具', feeds: ['https://huggingface.co/blog/feed.xml', 'https://huggingface.co/papers'], xHandles: ['huggingface', 'OpenSourceModels'] },
+  { key: 'academic', title: '学术研究', focus: 'arXiv 新提交、HF Daily Papers 论文、研究突破', feeds: ['https://export.arxiv.org/api/query?search_query=%28cat%3Acs.AI+OR+cat%3Acs.CL%29+AND+submittedDate%3A%5B{{WFROM}}0000+TO+{{WTO}}2359%5D&start=0&max_results=50', 'https://huggingface.co/papers'] },
+  { key: 'funding', title: '融资并购', focus: '融资轮次、估值、并购、投资动态', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://36kr.com/', 'https://www.qbitai.com/'] },
+  { key: 'policy', title: '政策监管', focus: '政府/监管/法院/标准组织对 AI 的动作', feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.qbitai.com/'] },
+  { key: 'safety', title: '安全与伦理', focus: '对齐、安全、滥用、水印、系统卡、攻击事件', feeds: ['https://www.qbitai.com/', 'https://techcrunch.com/category/artificial-intelligence/'] },
+  { key: 'people', title: '人才流动', focus: '重要人物离职/跳槽/创业/任命', feeds: ['https://www.qbitai.com/', 'https://techcrunch.com/category/artificial-intelligence/'] },
+  // 8/23 第二十一项：linuxdo 前沿快讯板（登录态 CDP 独立发现组产物落此板，urls 进 Fetch/Verify 既有流水线）
+  { key: 'linuxdo', title: 'linux.do 前沿快讯', focus: 'linux.do 论坛前沿快讯（登录态，同窗最新 AI 帖子）', feeds: ['https://linux.do/c/news/34'] },
+]
+
+const OFFICIAL_FEEDS = [
+  { url: 'https://openai.com/news/rss.xml', label: 'OpenAI News' },
+  { url: 'https://www.anthropic.com/news', label: 'Anthropic News' },
+  { url: 'https://x.ai/news', label: 'xAI News' },
+  { url: 'https://research.google/blog/rss/', label: 'Google Research Blog' },
+  { url: 'https://blogs.nvidia.com/feed/', label: 'NVIDIA Blog' },
+  { url: 'https://ai.meta.com/blog/', label: 'Meta AI Blog' },
+]
+
+// 种子"重大超窗事实"（行业里程碑级公认事件，即使不在窗口也应出现在正文，标注 [窗口外·重大]）：
+// 发现代理通过 majorOutOfWindow 字段上报更多此类事实。
+const KNOWN_MAJOR_OUT = [
+  // 种子 url 字段可选（2026-08-22 B.1）：有官方一手页可溯源才加；纯媒体口径预告无官方页不加（降级 C 兜底标 [行业公认·无单一链接]）。
+  // Astra 是媒体口径预告、无 OpenAI 官方一手页 → 不加 url；DeepSeek V4-Pro 官方 news 页可溯源 → 加 url。
+  { name: 'OpenAI 预告 Astra 旗舰模型（解决 10 个长期开放数学难题）', date: '2026-08-02', note: 'OpenAI 公开预告下一个旗舰模型 Astra，宣称已解决 10 个长期开放数学难题，具体发布日期待官方确认（来源：多家媒体 2026-08-02，日期为预告日）。' },
+  { name: 'DeepSeek V4-Pro 正式版上线（Agent 能力增强）', date: '2026-08-13', note: 'DeepSeek 官方 news 页登记 DeepSeek-V4-Pro 正式版上线 2026/08/13，App/网页/API 全面开放，强化 Agent 能力并引入分时段峰值定价；网易 08-16 报道印证 2026-08-17 价格生效（双源）。', url: 'https://api-docs.deepseek.com/news/' },
+]
+
+// labs 花名册跨板块校正别名表：发现代理可能过报 no_news，已确认声明/来源标题命中别名即翻转 has_dynamic。
+const LABS_ALIASES = [
+  ['OpenAI', ['OpenAI']], ['Google DeepMind', ['Google', 'DeepMind']], ['Anthropic', ['Anthropic', 'Claude']],
+  ['xAI', ['xAI', 'Grok']], ['NVIDIA', ['NVIDIA', '英伟达']], ['Meta AI', ['Meta', 'Facebook']],
+  ['Amazon AWS', ['AWS', 'Amazon Web Services']], ['Apple', ['Apple']], ['Microsoft', ['Microsoft', '微软']],
+  ['Mistral', ['Mistral']], ['Cohere', ['Cohere']], ['DeepSeek', ['DeepSeek', '深度求索']],
+  ['Alibaba Qwen', ['Qwen', '通义']], ['Moonshot Kimi', ['Kimi', '月之暗面']], ['MiniMax', ['MiniMax']],
+  ['Baidu', ['Baidu', '百度']], ['Tencent', ['Tencent', '腾讯', '混元']], ['ByteDance', ['ByteDance', '字节', '豆包']],
+  ['Zhipu GLM', ['GLM', '智谱']], ['StepFun', ['StepFun', '阶跃']], ['Kuaishou', ['Kuaishou', '快手']],
+  ['Midjourney', ['Midjourney', 'MJ']], ['Stability AI', ['Stability', 'StabilityAI', 'Stable Diffusion']],
+]
+
+// 批量 Harvest 分组（8/15 第九项优化）：14 个独立 feed 并行代理 → 5 个分组代理。
+const GROUPS_RAW = [
+  { key: 'official', label: '官方实验室（OpenAI/Anthropic/xAI/Google/NVIDIA/Meta）', test: u => OFFICIAL_FEEDS.some(f => normURL(f.url) === normURL(u)) },
+  { key: 'cn-media', label: '中文媒体（量子位/36氪）', test: u => /qbitai|36kr/i.test(u) },
+  { key: 'en-media', label: '英文媒体（TechCrunch/The Verge）', test: u => /techcrunch|theverge/i.test(u) },
+  { key: 'opensource', label: '开源/模型仓库（HuggingFace）', test: u => /huggingface/i.test(u) },
+  { key: 'academic', label: '学术（arXiv）', test: u => /arxiv/i.test(u) },
+]
+
+// 分组发现（8/15 第九项优化）：labs / opensource / academic 单板专代理；6 个媒体/垂类板合并为
+// media-cn 与 media-en 两组。
+const DISCOVER_GROUPS_ALL = [
+  { key: 'labs', label: '头部实验室', boards: ['labs'], xBudget: 5 },
+  { key: 'opensource', label: '开源与工具链', boards: ['opensource'], xBudget: 3 },
+  { key: 'academic', label: '学术研究', boards: ['academic'], xBudget: 3 },
+  { key: 'media-cn', label: '中文媒体（量子位/36氪）', boards: ['strategy', 'funding', 'policy', 'safety', 'people'],
+    feeds: ['https://www.qbitai.com/', 'https://36kr.com/'], xBudget: 4 },
+  { key: 'media-en', label: '英文媒体（TechCrunch/The Verge/qbitai）', boards: ['strategy', 'products', 'funding', 'policy'],
+    feeds: ['https://techcrunch.com/category/artificial-intelligence/', 'https://www.theverge.com/ai-artificial-intelligence/', 'https://www.qbitai.com/'], xBudget: 4 },
+  // 8/23 第二十一项：linuxdo 接入——独立发现组，走 9222 登录态 Chrome 抓 news/34.json（Discover 阶段每页
+  // 跑前调 fetchLinuxDoNews34）；产出 URL 进 Fetch/Verify 既有流水线，不改动对抗投票/状态机。组仅在
+  // boardKeysSel 含 linuxdo 时激活；linuxdoCdpHost 为 null（默认）时组保留但 urls=[] 不降级（命令行/手动补跑
+  // 默认不启用时板不崩）。boards 数组与 groupKeyByBoard 反向映射均运行时从本表派生，无需手改映射表。
+  { key: 'linuxdo', label: 'linux.do 前沿快讯（登录态 CDP）', boards: ['linuxdo'], feeds: [], xBudget: 3,
+    cdp: true, cdpPage: 'https://linux.do/c/news/34.json' },
+]
+
+// ─── 板级降级判定（按板归属组统一，8/22 修复）───
+// 背景 bug（8/21 全量实测）：media-cn 组失败（disc:media-cn null → DISCOVER-FAIL）时，
+//   只有 media-cn 独占的 safety/people 被判 failed（missing_*），而同样被 media-cn 覆盖、
+//   但有 media-en 兜底的 strategy/funding/policy 既不被标 missing 也不被标 [degraded]——同一失败组共享板全静默。
+// 修复：板 degraded = 任一归属组失败（无返回）或 返回的组自报 degraded；
+//       板 missing   = 所有归属组全部无返回（无任何发现覆盖）。
+//   media-cn 失败 → strategy/funding/policy/safety/people 全 degraded；missing 只留 safety/people。
+
+// 板 → 归属组 key 集（从 DISCOVER_GROUPS_ALL 反向建立；单板组/独立组也是一组）
+const groupKeyByBoard = new Map()
+for (const g of DISCOVER_GROUPS_ALL) for (const b of g.boards) {
+  if (!groupKeyByBoard.has(b)) groupKeyByBoard.set(b, new Set())
+  groupKeyByBoard.get(b).add(g.key)
+}
+
+/**
+ * 计算每个选中板的降级状态（纯函数，供覆盖自检/降级上报）。
+ * @param {Array<{group:{key:string}, degraded?:boolean}>} rows 发现组返回行（safeAgent.then 产物；失败组无行）
+ * @param {string[]} boardKeys 参与判定的板块 key 列表（通常 = boards.map(b=>b.key)，冒烟可子集）
+ * @param {Iterable<string>} [recoveredKeys] 兜底救回的板（disc 失败但 harvest entries 已补进 boardURLMap，8/22 第二十项）
+ * @returns {Map<string,{degraded:boolean, missing:boolean, recovered?:boolean}>}
+ */
+const computeBoardStates = (rows, boardKeys, recoveredKeys) => {
+  const returnedGroups = new Set((rows || []).map(r => r?.group?.key).filter(Boolean))
+  const degradedGroups = new Set((rows || []).filter(r => r?.degraded).map(r => r.group.key))
+  const recoveredSet = recoveredKeys ? new Set(recoveredKeys) : new Set()
+  const m = new Map()
+  for (const key of boardKeys) {
+    const groups = groupKeyByBoard.get(key) || new Set()
+    const anyReturned = [...groups].some(g => returnedGroups.has(g))
+    const anyFailedGroup = [...groups].some(g => !returnedGroups.has(g))
+    const anyDegradedGroup = [...groups].some(g => degradedGroups.has(g))
+    const inRecovery = recoveredSet.has(key)
+    // recovered 仅当该板确属失败/降级路径（有失败组 或 返回组自降级）才标——成功板误传 recoveredKeys 不打标记。
+    const recovered = inRecovery && (anyFailedGroup || anyDegradedGroup)
+    // missing = 所有归属组全部失败 且 未被兜底救回（兜底补了 URL 即有覆盖，不再标 missing/unreached）。
+    // degraded = 任一组失败 或 返回组自降级；兜底救回仍属「通道失败」→ 保留 degraded 供如实降级上报。
+    const missing = groups.size > 0 && !anyReturned && !inRecovery
+    const degraded = anyFailedGroup || anyDegradedGroup
+    m.set(key, { degraded, missing, ...(recovered ? { recovered: true } : {}) })
+  }
+  return m
+}
+
+// normURL 在 date-utils.mjs；boards.mjs 的 GROUPS_RAW.test 闭包需要它，这里前向声明由 build.mjs 整时保证顺序。
+// 直接 import 供 node 环境用；build.mjs inline 时剥掉 import 行（workflow 内 normURL 已在上文定义）。
+// ─── inline: dedup ───
+// ai-daily 指纹去重 + 轮询公平分配 — 三个历史 bug 在此固化（测试锁定）。
+
+// 同一事实的关键词指纹（取公司/产品名）：发现代理上报与 KNOWN 种子若指同一事件只保留一份。
+// 顺序锁定：hassabis 必须在 jeff-dean 前（8/16 bug：含两人的条目被误并入 jeff-dean）。
+const majorKey = name => {
+  const t = String(name).toLowerCase()
+  if (/v4\s*(pro|flash)|(?:deepseek|深度求索)\s*v4/.test(t)) return 'deepseek-v4'
+  if (/harness/.test(t)) return 'deepseek-harness'
+  if (/grok\s*4\.6|4\.6/.test(t) && /grok/.test(t)) return 'grok-4.6'
+  if (/muse\s*glimmer/.test(t)) return 'muse-glimmer'
+  if (/hassabis|哈萨比斯/.test(t)) return 'hassabis'
+  if (/jeff\s*dean|杰夫/.test(t)) return 'jeff-dean'
+  if (/gemini/.test(t)) return 'gemini'
+  // 8/16 实测补漏：GPT-5.6 与 Fable 联手攻克悬置 25 年数学难题，两个发现组表述不同走不进兜底指纹 → 重复入稿。
+  if (/gpt-?5\.6/.test(t) && /fable/.test(t) && /数学|math/.test(t)) return 'gpt5.6-math'
+  // 兜底：剥离括号限定词后按实体指纹合并
+  return String(name).toLowerCase().replace(/[（(].*?[)）]/g, '').replace(/\s+/g, '')
+}
+
+// hostname 提取（本地实现，不 import render-md——render-md 是末模块，会循环依赖）。
+// 种子带可选 url 字段：有 url 的 major-out 项 sourceUrl 是真 URL → buildCitationMap 正常编号挂 [n] 角标。
+// (与 render-md buildCitationMap 的 hostname 逻辑复刻一致；两模块都不 import 对方)
+const _hostnameOf = s => {
+  try { return new URL(s).hostname } catch { return null }
+}
+
+const _mkMajor = (m, board) => {
+  const host = _hostnameOf(m.url)
+  return {
+    claim: m.name + '：' + m.note, quote: m.note,
+    sourceUrl: m.url || '(多源公认)',
+    sourceTitle: host || '行业客观公认事实',
+    date: m.date, board: board, publishDate: m.date, sourceQuality: 'primary', importance: 'central',
+    verdicts: [], refutedCount: 0, erroredCount: 0, survives: true, isRefuted: false, isMajorOut: true, vote: '—',
+    // verifiedByVote:false —— [窗口外·重大] 未经过窗口内对抗投票，reportBody 统一渲染 Vote: —（未投票），不得冒充 3-0。
+  }
+}
+
+// 工厂返回 _addMajor(m, board)，语义同现行：全 claim 与首段各测一次指纹（8/16 xAI 前缀 bug 修复）；日期更具体者覆盖。
+const makeAddMajor = majorOutClaims => (m, board) => {
+  const k = majorKey(m.name)
+  const ex = majorOutClaims.find(x => majorKey(x.claim || '') === k || majorKey(String(x.claim || '').split('：')[0]) === k)
+  if (ex) {
+    const exHasDay = /\d{4}-\d{2}-\d{2}/.test(ex.date || ''); const newHasDay = /\d{4}-\d{2}-\d{2}/.test(m.date || '')
+    if (newHasDay && !exHasDay) { ex.date = m.date; ex.publishDate = m.date; ex.claim = m.name + '：' + m.note; ex.quote = m.note }
+    return
+  }
+  majorOutClaims.push(_mkMajor(m, board))
+}
+
+// 轮询公平分配 fetch 预算：每轮每板块至多取 1 个未抓 URL，直到 maxFetch 耗尽——保证晚序板块不被挤掉。
+// boardURLMap: Map<boardKey, urlObj[]>（urlObj 带 url 字段；函数内补 board 字段）。
+// 返回 { fetchTargets, dupes, budgetDropped }，与现行编排内逻辑逐字对齐。
+const allocateFetchBudget = (boardURLMap, MAX_FETCH) => {
+  const dupes = []
+  const budgetDropped = []
+  const seen = new Map()
+  let fetchSlots = MAX_FETCH
+  const fetchTargets = []
+  const boardURLs = [...boardURLMap.entries()].map(([board, urls]) => ({ board, urls }))
+  let progressed = true
+  while (progressed && fetchSlots > 0) {
+    progressed = false
+    for (const b of boardURLs) {
+      if (fetchSlots <= 0) break
+      for (const u of b.urls) {
+        const key = normURL(u.url)
+        if (seen.has(key)) continue
+        seen.set(key, true); u.board = b.board
+        fetchTargets.push(u); fetchSlots--; progressed = true
+        break  // 每板块每轮至多一个名额
+      }
+    }
+  }
+  for (const b of boardURLs) for (const u of b.urls) if (!seen.has(normURL(u.url))) budgetDropped.push({ url: u.url, board: b.board })
+  const keyCount = new Map()
+  for (const b of boardURLs) for (const u of b.urls) { const k = normURL(u.url); keyCount.set(k, (keyCount.get(k) || 0) + 1) }
+  for (const b of boardURLs) for (const u of b.urls) { const k = normURL(u.url); if ((keyCount.get(k) || 0) > 1) { dupes.push({ url: u.url, board: b.board }); keyCount.set(k, 0) } }
+  return { fetchTargets, dupes, budgetDropped }
+}
+// ─── inline: budget ───
+// ai-daily 阶段墙钟预算 — 第十四项语义的可测试化。
+// 切片(BUDGET_MS)是用户输入、累计死线(PHASE_DEADLINES)是内部状态，混用即 bug（见 memory ai-daily-budget-deadline-semantics）。
+
+// 累计死线：各阶段切片相加；Verify 在切片和后另减 verifyInflightBuffer（为最后一批在飞票固定 AGENT_TIMEOUT_MS 留空间），
+// 墙钟仅为软目标——极端尾批可超 totalLimit 约 300s，由 synthAllowed 绝对闸门 + render-md 降级兜底。
+const computePhaseDeadlines = ({ harvest, discover, fetch, verify, verifyInflightBuffer, totalLimit }) => ({
+  Harvest: harvest,
+  Discover: harvest + discover,
+  Fetch: harvest + discover + fetch,
+  Verify: harvest + discover + fetch + verify - verifyInflightBuffer,
+  Synthesize: totalLimit,
+})
+
+// 工厂：elapsedFn 注入时钟（workflow 里 _wallMs 累加器，测试里 mock）——realm 时钟限制的正确解耦点。
+// onSkip(stage) 回调用于 budgetSkipped 记账 + log；同一 stage 越线只记一次（由调用方 includes 判断，见 workflow）。
+const makeBudgetGate = (deadlines, elapsedFn, onSkip) => {
+  const skipped = []
+  const budgetGate = stage => {
+    const e = elapsedFn()
+    const dl = deadlines[stage]
+    const ok = e <= dl
+    if (!ok && !skipped.includes(stage)) { skipped.push(stage); if (onSkip) onSkip(stage, e, dl) }
+    return { ok, roomMs: Math.max(0, dl - e) }
+  }
+  budgetGate.skipped = skipped  // 暴露记账数组供 degraded 标记读取（对应现行 budgetSkipped）
+  return budgetGate
+}
+// ─── inline: fallback ───
+// ai-daily discover 兜底构造器 — 纯函数，供 template inline 与测试直调。
+// 8/22 第二十项：disc 失败的组，从 harvest 已抓到的 digestByKey entries 补 URL 候选进 boardURLMap，
+// 不重跑代理（省墙钟、不烧 token）。本模块抽出兜底构造逻辑为纯函数，消除"测试复刻修复逻辑"的 forward-test 缺陷
+// （测试直调此函数，断言真实兜底行为，而非 grep 模板源码）。
+//
+// 依赖注入（template inline 后这些都在闭包内可见）：normURL、claimWindow。
+// claimWindow = makeClaimWindow(...) 返回的函数 c => 'in'|'out'|'unknown'，判 !== 'out'（含 in 与无日期 unknown）。
+
+/**
+ * 从 harvest digest 构造兜底 URL 候选。
+ * @param {Map} digestByKey key=normURL(feed.url) → {feed, entries, recent, failed}
+ * @param {Array<{key:string,boards:string[],feeds?:string[]}>} failedGroups discover 失败的组
+ * @param {(c:{date?:string})=>string} claimWindow 窗口判定函数（!== 'out' 即纳入）
+ * @param {(u:string)=>string} normURL URL 归一化（去 query/hash，与 digestByKey 存键一致）
+ * @returns {{fallbackByUrl:Array, recoveredBoards:Set<string>}}
+ *   fallbackByUrl 每项 {url,title,date,board,found_via:'harvest-fallback'}；recoveredBoards 记救回的板。
+ */
+const buildFallback = (digestByKey, failedGroups, claimWindow, normURL) => {
+  const fallbackByUrl = []
+  const recoveredBoards = new Set()
+  for (const g of failedGroups) {
+    // srcUrls：合组走 g.feeds（硬编码组源），单板组从组 boards 派生订阅源（feeds+companies feed+labs 官方源）。
+    // 注意：srcUrls 的来源由调用方（template）构造后传入更合适，但为保持纯函数自包含，这里接收 failedGroups
+    // 已带 srcUrls 的形态——template 在调用前把 srcUrls 预算进 g（见 template inline 版本，下方兼容 g.feeds）。
+    const srcUrls = g.srcUrls || g.feeds || []
+    for (const su of [...new Set(srcUrls.map(normURL))]) {
+      const h = digestByKey.get(su)
+      if (!h || h.failed) continue
+      // feed.boards 是该 feed 被订阅的全部板（feedMap 记录）；与失败组 boards 求交 = 真正归属板。
+      const feedBoards = (h.feed && h.feed.boards) ? [...h.feed.boards].filter(b => g.boards.includes(b)) : []
+      // 空交集说明该 feed 不属于当前失败组的任何板（冒烟子集：feed 订阅板被 BOARDS_SELECTED 过滤掉）。
+      // 跳过该 entry 更诚实，不制造错误归属（首板被灌满、真实板 0 claim）。
+      if (!feedBoards.length) continue
+      for (const e of (h.entries || [])) {
+        if (!(e && e.url && claimWindow({ date: e.date }) !== 'out')) continue
+        for (const b of feedBoards) {
+          fallbackByUrl.push({ url: e.url, title: e.title || e.url, date: e.date, board: b, found_via: 'harvest-fallback' })
+          recoveredBoards.add(b)
+        }
+      }
+    }
+  }
+  return { fallbackByUrl, recoveredBoards }
+}
+// ─── inline: prompts ───
+// ai-daily prompt 模板 — 与 workflow 内逐字节一致；闭包依赖收敛为 ctx 显式注入。
+// ctx = { WINDOW_LABEL, WFROM, WTO, DATE, GROK_DIR, MAX_URLS_PER_BOARD, WEB_BUDGET_TOTAL, WEB_BUDGET_PER, feedMaxChars }
+// build.mjs inline 后在 workflow 顶部构造同名常量 ctx 传入。
+
+const harvestPrompt = (g, ctx) =>
+  '## 共享源 Harvest（批量 ' + g.key + '）\n\n窗口：' + ctx.WINDOW_LABEL + '。依次抓取下面每个 feed 并提炼紧凑摘要：\n\n' +
+  g.feeds.map(f => '- **' + (f.label || f.url) + '**\n  URL: ' + f.url).join('\n') + '\n\n' +
+  '## 执行（对每个 feed 必须独立执行抓取，逐条做出来再进入下一个）\n' +
+  g.feeds.map((f, i) =>
+    'Step ' + (i + 1) + '：cd ' + ctx.GROK_DIR + " && ./scripts/fetch.js --max-chars " + ctx.feedMaxChars(f) + " --provider " + (/export\.arxiv\.org\/api\/query/i.test(f.url) ? 'direct' : 'auto') + " '" + f.url + "'\n" +
+    '   **arXiv 官方 API 源：输出为 Atom XML（`<entry>` 为单篇，含 title/summary/updated/id 链接）。feed 字段必须用**本条目的来源 Feed URL（原样，勿改）**。**\n' +
+    '   **只看返回 sources 里的 url/title/date 卡片，不看 answer.text（模型旧知识，不可作新闻依据）。**\n' +
+    '   保留日期落在 [' + ctx.WFROM + ', ' + (ctx.WTO || ctx.DATE) + '] 内的条目，最多 15 条写入 entries；这些条目必须带 feed 字段 = **本条目的来源 Feed URL（原样，勿改）**，否则无法归栈。\n' +
+    '   日期在窗口前（窗口首日前约 7 天内）但属**重大发布/官宣**（行业里程碑级）的，挑最多 4 条写入 recent（同样带 feed 字段，note 一句话说明为何重大）。普通旧新闻不写。\n' +
+    '   该 feed 抓取失败/空源/全部无关 → 跳过它继续下一个，不要中断整组。'
+  ).join('\n') + '\n' +
+  '汇总：entries/recent 是**全部 feed 的合集**（每条带各自 feed 标签）。所有 feed 均失败才置 failed:true；部分失败则继续正常返回其余。\n' +
+  '纪律：严格使用命令里给定的 --max-chars，禁止改大或去掉；禁止传递 --full-path（防止泄露完整文件路径）；禁止读取 .cache/grok-search/outputs/ 下的任何完整文件；每个 feed 只抓一次，不反复重抓；不要逐条打开链接。\n\nStructured output only.'
+
+// discoverPrompt 需要 BOARDS/digestForBoard/digestForFeeds（编排层函数），通过 ctx 传入：
+// ctx.BOARDS / ctx.digestForBoard / ctx.digestForFeeds 由 workflow 编排层提供。
+const discoverPrompt = (g, ctx) => {
+  const bds = g.boards.map(k => ctx.BOARDS.find(b => b.key === k))
+  const multi = bds.length > 1
+  const coverLine = multi
+    ? '本代理负责以下 ' + bds.length + ' 个板块（每条 URL 必须标 board，选本组板块之一）：\n' + bds.map(b => '- **' + b.key + '**（' + b.title + '）：' + b.focus).join('\n')
+    : '板块定义：\n' + JSON.stringify({ focus: bds[0].focus, companies: bds[0].companies || null, feeds: bds[0].feeds || null, xHandles: bds[0].xHandles || null }, null, 1)
+  const digestBlock = multi ? ctx.digestForFeeds(g.feeds) : ctx.digestForBoard(bds[0])
+  return '## 板块发现代理' + (multi ? '（合组：' + g.label + '）' : '：' + bds[0].title) + '\n\n窗口：' + ctx.WINDOW_LABEL + '。为日报采集窗口内可信可核实的新闻 URL。\n' +
+    '⚠️ 关键纪律：搜索脚本的输出里 answer.text 是模型旧知识总结（训练截止点可能早于窗口！），绝不可作为新闻判断依据；只采信 sources 里的 URL 卡片（sources.grok / sources.merged 的 url/title/date）与下方**共享源摘要**（已由主流程预抓，可信）。官方渠道官宣的新模型/新发布通常不在模型知识里——要靠下方摘要与 X 官方源找到。\n\n' +
+    '⚠️ 收口框架（最终唯一出口——先记住这条再做下面的步骤）：本代理的最终动作**只能是调用 StructuredOutput 工具**返回 { urls, noNews, nearWindow, majorOutOfWindow, degraded }。思考过程中即使已得出全部 URL 与结论，**最后一步也是调用该工具，而不是 end_turn 输出文字解释**。任何"我在思考里已想清楚，现在说明一下结论"的文字输出都算失败——主流程判定为 null，本组所属板块整组降级、0 claim。正确流程：执行下方 1-6 步 → 调一次 StructuredOutput 工具填齐字段 → 结束。禁止在工具调用前先打一段总结文字。\n\n' +
+    coverLine + '\n\n' +
+    '## 共享源摘要（已预抓，直接采信；**禁止再运行 fetch.js**）\n' + digestBlock + '\n\n' +
+    '## 执行\n' +
+    '1)【主干·必做】通读上方共享源摘要，保留窗口 ' + ctx.WFROM + '~' + (ctx.WTO || ctx.DATE) + ' 内、有新闻价值的条目（标题/URL/日期已给全）。**不要运行 fetch.js**——feed 内容已内置于本 prompt。' +
+    (multi ? ' 按新闻主题给每条 URL 标归属板块 board（融资→funding / 监管法院标准→policy / 安全滥用水印→safety / 人事任命流动→people / 消费产品硬件→products / 战略资本基建→strategy）。' : (bds[0].key === 'labs' ? ' labs 板块必须逐家核厂商：先核对摘要里每家是否有动态；摘要未覆盖、或需 X 官宣确证的公司走第 2 步批量 X 搜索确认。' : ' 板块重点与摘要未覆盖的主题走第 2 步 X 搜索确认。')) + '\n' +
+    '【空摘要快速降级】若上方共享源摘要全部为空/全部"抓取失败"（0 条 entries），说明 harvest 阶段未抓到任何 feed——此时 X 搜索 ≤2 次（本组 2 次，labs 3 次）仍无可用 URL 卡片，**立即返回 urls:[] + degraded:true**，不再尝试 WebSearch/WebFetch/多次 X 搜索。空摘要时死磕搜索只会烧 token 和墙钟，快速降级让主流程如实标记 missing_*。\n' +
+    '2)【X 搜索·补充】对摘要未覆盖、或需官方发布确证的公司/主题：cd ' + ctx.GROK_DIR + " && ./scripts/search.js --days 3 --extra 4 --source-chars 300 --max-chars 5000 --responses-x-search --responses-allowed-x-handles '<handle,逗号,串联>' '<公司/主题> 发布/官宣 '" + '；只看返回的 URL 卡片（**优先 sources.grok，其次 sources.extra/sources.merged** 里的 url/title/date，只看 str 非空卡片），不看 answer.text。**批量优先**：每次查询携带 4-6 个 allowed-x-handles（逗号串联）一次覆盖多家/多主题，' + (multi ? '跨板块共用。' : 'labs 板块用 5 次以内批量查询覆盖所有摘要未覆盖的公司。') + ' 本组 X 搜索 ≤' + g.xBudget + ' 次。\n' +
+    '3)【WebSearch 补充】仍缺的：WebSearch `<公司/关键词> 新闻 ' + ctx.WTO + '`（全流水合计 ≤' + ctx.WEB_BUDGET_TOTAL + ' 次、本组 ≤' + ctx.WEB_BUDGET_PER + ' 次；不可用就跳过，勿失败）。\n' +
+    '4) 只保留事件日期落在 [' + ctx.WFROM + ', ' + (ctx.WTO || ctx.DATE) + '] 内的；优先一手官方源；跳过无日期/明显陈旧/SEO/内容农场/常青帮助文档页。URL 写完整。\n' +
+    '最多返回 ' + (multi ? 10 : ctx.MAX_URLS_PER_BOARD) + ' 条 url/title/found_via/date' + (multi ? ' + board（必填，本组板块之一）' : '') + '。' + (bds[0].key === 'labs' ? 'labs 板块逐家核厂商——确认窗口内无任何动态的，把公司名放 noNews。' : '') +
+    '5) 若某公司/主题本窗口无动态、但近 2 周内有重大发布/官宣/可信事实（如 DeepSeek V4 开源、Grok 4.6 发布、DeepSeek Harness 这类**行业客观公认事实**），将其列入 majorOutOfWindow（name/date/note），供日报正文以「[窗口外·重大]」标签呈现。注意：majorOutOfWindow 只放**客观事实**（非传闻、非推测），且必须是**行业里程碑级**——如果是普通更新或次要动态，放 nearWindow 供窗口外参考节引用即可。若该事实有可溯源的官方/一手 URL，尽量在 `url` 字段带上（可选，无则不带）。' +
+    '6)【预算·硬性纪律】X 搜索本组 ≤' + g.xBudget + ' 次，一家/一个主题一次尝试、无果即放过、不反复深挖；WebSearch 全流水合计 ≤' + ctx.WEB_BUDGET_TOTAL + ' 次、本组 ≤' + ctx.WEB_BUDGET_PER + ' 次，不可用即跳过、勿失败。**发现阶段禁止运行 fetch.js**，也禁止 WebFetch 连续深挖单公司官网新闻页（官网正文抓取是 fetch 阶段职责，发现阶段只需给出 URL 候选；官网首页一次快速确认至多 1 次）。输出只保留用于抓取/核查的高置信候选，超过上限按重要性截断。' +
+    'degraded 语义：仅当本（组/板块）的【主源/官方通道】整体一无所获（摘要 + X 搜索均返回零个可用 URL）时才置 true；个别补充源（GitHub trending、WebSearch、某一 X 搜索等）失败不算 degraded，正常返回即可。尽力用可用渠道，不要整任务失败。' +
+    '\n\n⚠️ 最终收口（呼应开头条目）：执行完上述步骤后，立即调用 StructuredOutput 工具返回结构化对象。**严禁 end_turn 返回纯文本**——这是最常见的失败模式（思考里说"我来调用 StructuredOutput"却以文字结束）。调工具即结束，勿在工具调用前/后铺垫文字。Structured output only.'
+}
+
+const fetchPrompt = (src, ctx) =>
+  '## Source Extractor\n\n窗口：' + ctx.WINDOW_LABEL + '。抓取并提取该来源的可证伪声明：\n' +
+  '**URL:** ' + src.url + '\n**Title:** ' + src.title + '\n**Found via:** ' + src.board + ' / ' + src.found_via + '\n\n' +
+  '## Task\n' +
+  '1. 用 WebFetch 抓取页面。\n2. 判定来源质量：primary(官方/一手) / secondary(主流媒体报道) / blog / forum / unreliable。\n' +
+  '3. 提取 2-3 条与本板块日报问题相关、可核实、具体的声明（非空泛结论）；每条必须带原文引语 quote（**逐字抄录支撑该声明的完整原句，≤220 字，且必须包含声明中的全部具体细节——日期/数字/机构名/对比结论**，只截 40 字短句会导致核查票无据可依而误否决）、重要性 central/supporting/tangential。\n' +
+  '4. 注明页面/事件日期 publishDate（YYYY-MM-DD 或 MM-DD）；无日期则空。\n' +
+  '5. 页面较长时只精读与日报相关且日期在窗口内的部分，其余快速略读；抓取失败/付费墙/无关页面 → 返回 claims:[] 且 sourceQuality:"unreliable"。\n\nStructured output only.'
+
+// verifyPrompt 需要 VOTES_PER_CLAIM/REFUTATIONS_REQUIRED，经 ctx 传入。
+const verifyPrompt = (c, ctx) =>
+  '## 对抗性核查票 ' + '(voter)\n\n' +
+  '请对下列声明持怀疑态度，尝试证伪。≥' + ctx.REFUTATIONS_REQUIRED + '/' + ctx.VOTES_PER_CLAIM + ' 票证伪即否决。\n\n' +
+  '窗口：' + ctx.WINDOW_LABEL + '。\n\n## 声明\n' + '"' + c.claim + '"\n\n来源：' + c.sourceUrl + ' (' + c.sourceQuality + ')，页面日期：' + (c.publishDate || '未知') + '，条目标注日期：' + (c.date || '未知') + '\n引语："' + c.quote + '"\n\n## 清单\n' +
+  '1. 引语是**逐字抄录的完整支撑句**（契约要求覆盖声明全部细节——日期/数字/机构/对比）。声明中的细节凡能在引语中逐字溯源即视为被支撑；仅当声明断言明显超出引语范围（引语只谈 X 却断言 Y）才算过度引申。引语不是全文≠证据不足，勿因引语未铺陈全背景而否决。\n2. 时效：**窗口为 [' + (ctx.WFROM || ctx.DATE) + ', ' + (ctx.WTO || ctx.DATE) + ']**。事件/发布日期明显在窗口外（数天前/数周前/上月）→ refuted=true；页面日期在窗口内但内容陈述的是旧事件，按**事件实际发生日**判定，日期明确超窗仍 → refuted=true；无法判定日期则不因时效否决。\n3. 来源质量与声明强度是否匹配？（惊人声明需一手源）\n4. 是否营销话术/吹嘘/标题党/论坛猜测？（→ refuted=true）\n\n5. **禁止使用 WebSearch/WebFetch 等外部搜索工具**——本核查只依据上面给出的引语/来源/日期/声明做内部一致性判断，外部搜索会烧掉大量 token。\n\n默认 refuted=true，除非证据充分支撑。\n\nStructured output only. Evidence 简短具体（≤80 字）。'
+
+// reportPrompt 需要编排层预拼的 reportBody/refutedList/unverifiedList/missBlock/coverBlock 与统计数，经 ctx 传入。
+const reportPrompt = ctx =>
+  "## 日报终稿 —— 新闻编辑简报\n\n窗口：" + ctx.WINDOW_LABEL + "。下面是一篇 AI 日报的原始素材：" + ctx.confirmedVerifyCount + " 条已核查声明（对抗式 2+1 票验证），" + ctx.majorOutCount + " 条行业公认重大事实（[窗口外·重大]，超窗未投票但可入正文）。\n\n" +
+  "你的任务：把它们写成一篇**真正可读的中文 AI 日报**。\n\n" +
+  "## 原始素材\n" + ctx.reportBody + "\n" +
+  (ctx.killedCount ? "\n## 被否决声明（不写入正文）\n" + ctx.refutedList : "") +
+  (ctx.unverifiedCount ? "\n## 未验证声明（核查代理故障，只能进“待核实”小节）\n" + ctx.unverifiedList : "") +
+  ctx.missBlock +
+  "\n## 覆盖自检\n" + ctx.coverBlock + "\n\n## 编辑要求\n" +
+  "0. **禁止调用任何工具**（禁 WebFetch、WebSearch、Read、curl 及一切工具调用）——只做纯推理合成；一旦发起工具调用即视为失败。\n\n" +
+  "1. **先筛选，再写稿**：通读全部素材，选出今天**真正值得报道的 2-3 条头条**。头条优先序：**新模型发布 > 模型能力重大突破 > 技术里程碑 > 开源重磅发布 > 研究突破 > 监管/官宣**。**融资/并购/收费/估值/商业动态永远不进头条**，只进对应板块正文。其余素材按板块归类，不重要的（小更新/营销话术/旧闻重复）**直接 discard 不进正文**。宁缺毋滥。\n\n" +
+  "2. **oneLiner（今日一句话）**：用一句话概括今天 AI 行业**技术层面**最重要的事——新模型、新能力、新突破，不是商业新闻。如果今天没有技术头条，才退而求其次选战略/产品新闻。\n\n" +
+  "3. **execSummary（执行摘要）**：3-5 句，按技术重要性排序，写成一个连贯段落（不是分点列项）。每句对应一条重要新闻，写清楚谁做了什么+结果。\n\n" +
+  "4. **sections / items**：\n" +
+  "   - title：**新闻式标题**（≤25字，主语+动词+结果/数字，例：GLM-5.3 开源，Coding 能力接近 Fable 5）。**不要前置 [窗口外·重大]/[2-0✓] 等标签**，不要长从句，不要括号解释。**按 status 分轨**：已核查项（`已核查 2-0`/`已核查 2-1`）title 可用肯定动词（发布、上线、开源、收购、突破）直接陈述事实；未核查项（`[窗口外·重大]`/`未核查`）title **必须**用不确定度措辞（「据报」「传」「称」「预告」「据媒体」之一开头或嵌入），**禁止**用「发布」「上线」「完成」「正式」「确认」等肯定完成态词——标题与正文 summary 的不确定度纪律（4.5）必须一致，不能标题断言事实而正文又改口。例：`据报 xAI 发布 Grok 4.6，聚焦长时 Agent`（未核查）；`LFM2.5 草稿模型推理提速 3.18 倍`（已核查 2-1）。\n" +
+  "   - summary：**一段新闻正文**（2-3 句），写清楚发生了什么、为什么重要，不是重复 title。\n" +
+  "   - status：核查状态，**必须**是以下枚举之一（机器消费、精确匹配，不加括号/空格变体）：`已核查 2-0` / `已核查 2-1` / `[窗口外·重大]` / `未核查` / `已否决`。窗口外重大项**必须**写 `[窗口外·重大]`（含方括号）；（render 会按该值在标题后加徽标，写错字面量会漏标未核查徽标）\n" +
+  "   - 多个 sources 时只保留最权威的 1-2 个 URL。\n\n" +
+  "4.5. **不确定度如实标注**（与 AI.md 风格一致）：summary 中若素材存在不确定性（单源/社区传闻/灰度状态/未官方确认），用「有用户称」「据讨论」「现有资料未说明」「暂不能确认」等措辞如实标注，不假装确定性；社区传闻与官方动态须用不同措辞区分。**对 status 为 `[窗口外·重大]` 或 `未核查` 的 item（未经窗口内对抗投票验证），summary 必须用不确定度措辞（「据报」「有媒体称」「宣称」「待官方确认」「暂不能确认」之一）描述其事项，禁止用「已解决」「完成」「正式发布」「确认」等肯定完成态措辞**。已核查项（status 为 `已核查 2-0`/`已核查 2-1`）有 vote 支撑，可正常陈述。社区传闻与官方动态须用不同措辞区分。\n\n" +
+  "4.6. **窗口外参考节由编排器统一渲染**：素材里「## 窗口外参考」的**次要超窗项（nearWindow）不要自己合成进 sections**——不要写独立的「窗口外参考」section，也不要把这些条目拼进任何板块 item；编排器会在文末统一渲染「## 📎 窗口外参考」节。你只负责**窗口内** + **[窗口外·重大]（major-out）** 的合成。分工与 discover 阶段一致：major-out（行业里程碑级客观事实）进正文并带 `[窗口外·重大]` 状态；nearWindow（普通更新/次要动态）只供参考节引用。\n\n" +
+  "4.7.【聚类纪律】素材里「## 原始素材」开头的**「## 已聚类」区**（源自 fetch 阶段、被编排器标 `[cluster 已合并 N 条]` 的合并主视图）：\n" +
+  "  - 同一事件出现于多条已聚类素材 → 只写 ONE 条标题正文，其他绝不重复（不并排、不\"此外\"再造一条）。若不同条沿用不同口径数字，直接写\"M 为 X、N 为 Y，口径不一\"，不再分别作文。\n" +
+  "  - 判定两条是同一事件的双重标准（全部满足）：①共享 ≥1 个实体 token（组织/人名）；②日期同域（≥2 天内）；③数字字段重叠（含数量级）。\n" +
+  "  - 判定后你的摘要正文即为主合并 + 数字/口径自然呈现（如 4.25GW/$150-200B/$600B/$105B 并陈）。\n\n" +
+  "5. **板块组织**：不要机械按来源分板。**labs（新模型/模型能力）板块如果有内容，必须放在第一个板块**。如果某板块今天无重要新闻，该板块可以不出现在正文（但保留 coverage 自检）。重磅新闻放在最靠前的板块下。\n\n" +
+  "3.2. **数字口径**：同事件多条素材数字口径不一（如 4.25GW/$150-200B/$600B/$105B）时，直接并陈不同口径、不各自成条、提醒勿相加。\n\n" +
+  "6. **caveats**：注明弱来源/厂商口径/时间敏感。openQuestions 2-4 个。\n\n" +
+  "7. 如果素材大部分是超窗重大项（major-out）而窗口内几乎为空，则 oneLiner 和 execSummary 如实反映这一情况，优先报道 major-out 中最重要的 1-2 条。\n\n" +
+  "Structured output only. 输出格式：{ sections, oneLiner, execSummary, caveats, openQuestions } 其中 sections 为 [{ board, title, items: [{ title, summary, confidence, sources, vote, status }] }]"
+// ─── inline: render-md ───
+// ai-daily 确定性 md 渲染 — mdWriter 代理的替代。
+// report 成功 → renderMarkdown（完整版）；report 失败 → renderDegradedMarkdown（降级版，原冒烟 compose 脚本正式化）。
+// 两者输出都进 payloads.md 由 orchestrator 逐字节落盘，md 产出不再受网关波动影响。
+// 2026-08-22 风格优化（spec 2026-08-22-ai-daily-report-style-design.md）：
+//   A. 来源角标化（buildCitationMap + 正文 [n] + 末尾「### 参考来源」节）
+//   B. renderMarkdown 可选 meta → Obsidian frontmatter + 素材窗口横幅 + 低素材提示
+//   D. 降级版修 reportError 硬编码 + 来源角标化 + windowMisses 与 major-out 去重
+
+// workflow realm 缺失 URL 全局的最小 polyfill（见 url-polyfill.mjs；build inline 后自动注入）。
+// node:test 直跑时全局 URL 已存在，installUrlPolyfill 幂等跳过。
+installUrlPolyfill()
+// 供 test/realm-url.test.mjs 模拟 realm（删 globalThis.URL）后重新注入用。
+const setUrlPolyfillForRealm = () => { installUrlPolyfill() }
+
+const CONF_ZH = { high: '高', medium: '中', low: '低' }
+
+// C.3(2026-08-22): 状态标签规范化——把代理产出的 status 各种写法归一后判定是否「未核查」类（未经窗口内对抗投票）。
+// 归一：全半角括号（[]()（）［］）→ 去掉、全角空白→半角、两端去空白、去内部空白、去全角·→. 后比较。
+// 真值（标未核查徽标）：[窗口外·重大] / 窗口外·重大 / 窗口外重大 / 未核查；已核查/已否决不算。
+const normalizeStatus = s => String(s || '')
+  .replace(/[［【\[]/g, '[').replace(/[］】\]]/g, ']')  // 全角括号归一为半角
+  .replace(/[（）]/g, '(').replace(/[）]/g, ')')
+  .replace(/[\s]+/g, '')               // 去所有空白
+  .replace(/[·．]/g, '·')              // 全角点·点归一半角
+const isUncheckedStatus = s => {
+  const n = normalizeStatus(s)
+  return n === '[窗口外·重大]' || n === '窗口外·重大' || n === '窗口外重大' || n === '未核查'
+}
+
+// 跨 section 唯一 URL 引用图：按「首次出现序」给每个唯一 URL 分配 1-based 编号（spec A.1）。
+// 非 URL 来源（如 (多源公认)）不参与编号——正文不挂角标、不进参考列表。
+// 返回 { map: Map<href, n>, list: [{ n, url, title }] }；list 即「### 参考来源」节的数据源，title 取 hostname。
+const buildCitationMap = sections => {
+  const map = new Map()
+  const list = []
+  const hostname = s => { try { return new URL(s).hostname } catch { return s } }
+  for (const sec of sections || []) {
+    for (const it of (sec.items || [])) {
+      for (const s of (it.sources || [])) {
+        let url
+        try { url = new URL(s).href } catch { continue }
+        if (!map.has(url)) {
+          map.set(url, list.length + 1)
+          list.push({ n: list.length + 1, url, title: hostname(url) })
+        }
+      }
+    }
+  }
+  return { map, list }
+}
+
+// item/claim 的来源 → 该条正文末尾的角标串，如 ' [1][3]'（按编号升序、跨来源去重）。
+// 无 URL 来源或图里无对应 → ''（不挂角标）。
+const citationBadges = (sources, citeMap) => {
+  if (!sources || !sources.length || !citeMap) return ''
+  const ns = []
+  for (const s of sources) {
+    let url
+    try { url = new URL(s).href } catch { continue }
+    const n = citeMap.map.get(url)
+    if (n != null) ns.push(n)
+  }
+  if (!ns.length) return ''
+  return ' ' + [...new Set(ns)].sort((a, b) => a - b).map(n => '[' + n + ']').join('')
+}
+
+const itemBlock = (it, citeMap) => {
+  const tag = it.status ? ' `' + it.status + '`' : ''
+  const conf = (CONF_ZH[it.confidence] || it.confidence) ? '可信度：' + (CONF_ZH[it.confidence] || it.confidence) : ''
+  const badges = citationBadges(it.sources, citeMap)
+  // B.5: sources 存在但全是非 URL 文字描述（buildCitationMap 没给编号）→ 诚实标注无单一链接
+  const hasSrc = it.sources && it.sources.length > 0
+  const noUrl = hasSrc && !badges
+  // C.2: 未核查项（status 为 [窗口外·重大] 或 未核查）→ 机器徽标双保险，不依赖代理措辞。
+  // C.3(2026-08-22): 状态标签容错——8/22 生产 run 实证 major-out 条目 status 有 `[窗口外·重大]`/`窗口外重大`
+  // （无方括号）等写法，精确匹配漏判 6/7 条。规范化（去 []／""、空白、全半角）后统一判定，真值走正常。
+  const unchecked = isUncheckedStatus(it.status)
+  const tail = badges + (noUrl ? ' [行业公认·无单一链接]' : '') + (unchecked ? ' *[未核查·待证实]*' : '')
+  const lines = []
+  lines.push('**' + it.title + '**' + tag)
+  lines.push('')
+  lines.push(it.summary + tail + (conf ? '\n\n*' + conf + '*' : ''))
+  return lines.join('\n')
+}
+
+// 完整版 optionally 带 meta 时输出 Obsidian frontmatter（spec B.1）。字段全来自 meta，无新数据。
+const frontmatterLines = (meta, date, window) => {
+  if (!meta) return []
+  const st = meta.stats && typeof meta.stats === 'object' ? meta.stats : {}
+  const num = v => (typeof v === 'number' ? v : null)
+  const L = ['---']
+  L.push('date: ' + (meta.date || date))
+  L.push('window: ' + (meta.window || window))
+  L.push('generator: ai-daily')
+  L.push('model: deepseek-v4-flash')
+  L.push('tags: [日报, AI]')
+  const statsParts = []
+  if (num(st.confirmed) != null) statsParts.push('confirmed:' + st.confirmed)
+  if (num(st.major_out) != null) statsParts.push('major_out:' + st.major_out)
+  if (num(st.killed) != null) statsParts.push('killed:' + st.killed)
+  if (num(st.urls_fetched) != null) statsParts.push('urls_fetched:' + st.urls_fetched)
+  if (statsParts.length) L.push('stats: {' + statsParts.join(', ') + '}')
+  L.push('---')
+  return L
+}
+
+// 完整版：report 代理产出 sections 后的确定性排版。
+// 输入即现行 mdWriter prompt 里 reportJson 的同构数据。
+// meta 为可选参数：{ date, window, stats:{confirmed,major_out,killed,urls_fetched,urls_discovered}, generated_by, degraded }；
+// 缺失时退化（无 frontmatter/横幅），向后兼容旧调用。
+const renderMarkdown = ({ date, window, report, coverage, windowMisses, degraded, meta }) => {
+  const L = []
+  for (const fl of frontmatterLines(meta, date, window)) L.push(fl)
+  L.push('# 🤖 AI 日报 · ' + date)
+  L.push('')
+  // 素材窗口横幅（meta 提供时，标题后、覆盖行前，AI.md 风格）。N=当日素材(窗口内 confirmed)，M=近几日来源(全部 urls_discovered)。
+  const st = meta && meta.stats && typeof meta.stats === 'object' ? meta.stats : {}
+  if (meta) {
+    const N = typeof st.confirmed === 'number' ? st.confirmed : null
+    const M = typeof st.urls_discovered === 'number' ? st.urls_discovered : (typeof meta.urls_discovered === 'number' ? meta.urls_discovered : null)
+    if (N != null || M != null) {
+      L.push('> **素材窗口**：当日素材 ' + (N != null ? N : '?') + ' 条；近几日来源 ' + (M != null ? M : '?') + ' 条。')
+    }
+    const hard = (typeof st.confirmed === 'number' ? st.confirmed : 0) + (typeof st.major_out === 'number' ? st.major_out : 0)
+    if (hard < 8) L.push('> ⚠️ **低素材提示**：当日硬源不足 8 条，正文以近期趋势为主，请注意时效。')
+  }
+  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（deepseek-v4-flash）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
+  L.push('')
+  L.push('## 📌 今日一句话')
+  L.push('')
+  L.push(report.oneLiner)
+  L.push('')
+  L.push('## 📄 执行摘要')
+  L.push('')
+  L.push(report.execSummary)
+  L.push('')
+  const citeMap = buildCitationMap(report && report.sections)
+  // 8/23 第二十一项：事件驱动分节——无内容的板块整体不出现（信息熵契约：不摆空骨架）。
+  for (const sec of report.sections || []) {
+    const items = (sec.items || []).filter(Boolean)
+    if (!items.length) continue
+    L.push('### ' + sec.title)
+    L.push('')
+    for (const it of items) { L.push(itemBlock(it, citeMap)); L.push('') }
+    L.push('')
+  }
+  if (report.caveats && report.caveats.length) {
+    L.push('## ⚠️ 未验证与局限')
+    L.push('')
+    for (const c of report.caveats) L.push('- ' + c)
+    L.push('')
+  }
+  // 层 1 去重：过滤已在 report.sections items 标题中出现的窗口外项（对齐降级版 D.3，2026-08-22）。
+  const majFromSections = (report.sections || []).flatMap(s => s.items || []).map(it => ({ claim: it.title }))
+  const windowMissesDedup = windowMisses ? dedupWindowMisses(windowMisses, majFromSections) : []
+  if (windowMissesDedup.length) {
+    L.push('## 📎 窗口外参考')
+    L.push('')
+    for (const w of windowMissesDedup) L.push('- ' + w.name + '（' + (w.date || '日期未知') + '）：' + w.note)
+    L.push('')
+  }
+  if (report.openQuestions && report.openQuestions.length) {
+    L.push('## ❓ 开放问题')
+    L.push('')
+    for (const q of report.openQuestions) L.push('- ' + q)
+    L.push('')
+  }
+  L.push('## ✅ 覆盖自检')
+  L.push('')
+  for (const c of coverage || []) {
+    L.push('- **' + c.title + '**：' + c.claims + ' claims / ' + c.urls + ' sources' + (c.degraded ? ' `[degraded]`' : ''))
+  }
+  L.push('')
+  // 参考来源节（md 末尾，AI.md 风格 [n] → 编号参考列表，跨 section 全文唯一）
+  if (citeMap.list.length) {
+    L.push('### 参考来源')
+    L.push('')
+    for (const c of citeMap.list) L.push('- [' + c.n + '] [' + c.title + '](<' + c.url + '>)')
+    L.push('')
+  }
+  return L.join('\n')
+}
+
+// 降级版：report 代理失败时由编排数据确定性合成——可读快讯，不再是原始数据转储。
+// 8/22 改为新闻快讯风格：按窗口内/窗口外/否决分节，每条 claim 写为完整句子，附加核查徽标；
+// 2026-08-22 再改：来源角标化对齐完整版 + 修 reportError 硬编码 + windowMisses 与 major-out 去重。
+
+// windowMisses 去重：过滤已在 major-out 出现的 name（spec D.3）。
+// 判定：完全包含 或 共享区分性拉丁实体 token（如 Grok、Qwen3.8-27B）——8/21 实况「Grok 4.6 in Copilot」与「Qwen3.8-27B edge model」即靠实体 token 命中。
+const STOP_TOKENS = new Set(['news', 'note', 'report', 'model', 'models', 'open', 'new', 'blog', 'post', 'api', 'app', 'apps', 'ai', 'pro', 'free', 'beta', 'tool', 'tools', 'official', 'release', 'update'])
+const tokenize = s => (String(s || '').toLowerCase().match(/[a-z0-9][a-z0-9.%\-]*/g) || []).filter(t => t.length >= 4 && !STOP_TOKENS.has(t))
+const dedupWindowMisses = (windowMisses, maj) => {
+  if (!windowMisses.length || !maj.length) return windowMisses
+  const majClaims = maj.map(m => String(m.claim || '').replace(/\s+/g, ' ').trim())
+  const majTokens = new Set()
+  for (const c of majClaims) for (const t of tokenize(c)) majTokens.add(t)
+  return windowMisses.filter(w => {
+    const name = String(w.name || '').trim()
+    if (!name) return true
+    if (majClaims.some(c => c.includes(name))) return false
+    if (tokenize(name).some(t => majTokens.has(t))) return false
+    return true
+  })
+}
+
+const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, windowMisses, degraded, noNewsCompanies, reportError }) => {
+  const S = s => String(s || '').replace(/\s+/g, ' ').trim()
+  const voteTag = x => x.verifiedByVote ? '`✓' + (x.vote || '?') + '`' : '`◇' + (x.vote || '?') + '`'
+  // 降级版来源形态为单 URL x.source（非数组），统一走 buildCitationMap 角标化（spec D.2）。
+  const citeMap = buildCitationMap([
+    { items: (confirmed || []).map(x => ({ sources: x.source ? [x.source] : [] })) },
+    { items: (refuted || []).map(x => ({ sources: x.source ? [x.source] : [] })) },
+  ])
+  const badge = x => citationBadges(x.source ? [x.source] : [], citeMap)
+  const inW = (confirmed || []).filter(x => x.window === 'in')
+  // 8/24 修复：maj 过滤改为 `x.window !== 'in'`——此前只收 'major-out'，window 为 'out'/'unknown'
+  // 的已确认项既不进 inW 也不进 maj，静默丢失。现在非 in 的已确认项都归入窗口外节，不再消失。
+  const maj = (confirmed || []).filter(x => x.window !== 'in')
+  // 修 reportError 硬编码（spec D.1）：null/空不抹成 'report agent failed'，如实描述。
+  const reason = reportError ? String(reportError).replace(/\s+/g, ' ').trim() : 'report 代理未产出完整版合成结构'
+  const L = []
+  L.push('# 🤖 AI 日报 · ' + date)
+  L.push('')
+  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（deepseek-v4-flash）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
+  L.push('')
+  L.push('## ⚠️ 本日报为**降级快讯**（report 合成代理未产出，由编排器据已核查归档拼合）')
+  L.push('')
+  L.push('降级原因：' + reason + '。以下内容依核查结果逐条拼合，无合成代理润色编排。')
+  L.push('')
+  L.push('### 窗口内新闻（' + inW.length + ' 条，对抗式核查确认）')
+  L.push('')
+  for (const x of inW) {
+    L.push('- ' + voteTag(x) + ' ' + S(x.claim) + badge(x) + ' — *（' + (x.sourceQuality || '?') + '）*' + (x.erroredCount ? ' ⚠️' + x.erroredCount + ' 票异常' : ''))
+  }
+  L.push('')
+  if (maj.length) {
+    L.push('### 窗口外·已确认（' + maj.length + ' 条，未经窗口内投票）')
+    L.push('')
+    for (const x of maj) {
+      L.push('- ' + S(x.claim) + '（' + (x.date || '?') + '）')
+    }
+    L.push('')
+  }
+  if (refuted && refuted.length) {
+    L.push('### 已否决的提案（' + refuted.length + ' 条，对抗式核查未通过）')
+    L.push('')
+    for (const x of refuted) {
+      L.push('- ~~' + S(x.claim) + '~~ → 否决 `' + (x.vote || '?') + '`' + badge(x) + (x.erroredCount ? ' ⚠️' + x.erroredCount + ' 票异常' : ''))
+    }
+    L.push('')
+  }
+  const wm = dedupWindowMisses(windowMisses || [], maj)
+  if (wm.length) {
+    L.push('### 📎 窗口外参考')
+    L.push('')
+    for (const w of wm) L.push('- ' + w.name + '（' + (w.date || '日期未知') + '）：' + w.note)
+    L.push('')
+  }
+  L.push('### ✅ 覆盖矩阵')
+  L.push('')
+  L.push('| 板块 | 标题 | 覆盖 claim 数 | 备注 |')
+  L.push('|---|---|---|---|')
+  for (const b of coverage || []) {
+    // 8/23 第二十一项：事件驱动分节——无 claims 且无 URL 来源且公司三态均为空态之外的板：空矩阵行不渲染。
+    // 8/23 I1 复核修复：模板 8/22 第二十项 labs 花名册跨板块校正已把全部 no_news 翻转为 no_dynamic，
+    // render 时 no_news 永不出现。若枚举仍缺 no_dynamic，经校正的板（0 claims、0 urls、公司全
+    // no_dynamic）会被误判成空行跳过——「已核查这些公司、当日均无动态」的覆盖自检信息（无动态 备注列）
+    // 静默丢失（amnesia 类）。枚举补 'no_dynamic' → 该行保留渲染。真正空行仍是
+    // 「0 claims 且无 urls 且无任何公司三态信息」（无 companiesChecked 或全空态）。
+    if ((b.claims || 0) === 0 && !(b.urls || 0) && !(b.companiesChecked || []).some(c => ['has_dynamic', 'no_news', 'unreached', 'no_dynamic'].includes(c.state))) continue
+    const note = b.board === 'labs'
+      ? (noNewsCompanies && noNewsCompanies.length ? '无动态：' + noNewsCompanies.join('、') : (b.degraded ? 'degraded' : ''))
+      : (b.degraded ? 'degraded' : '')
+    L.push('| ' + b.board + ' | ' + b.title + ' | ' + b.claims + ' | ' + note + ' |')
+  }
+  L.push('')
+  if (citeMap.list.length) {
+    L.push('### 参考来源')
+    L.push('')
+    for (const c of citeMap.list) L.push('- [' + c.n + '] [' + c.title + '](<' + c.url + '>)')
+    L.push('')
+  }
+  return L.join('\n')
+}
+// ─── inline: cluster ───
+// ai-daily 确定性聚类（verify → report 之间的纯函数去重，2026-08-23 第二十一项）。
+// 只做"主视图"聚类不放行：被合并的冗余 item 仍保留在 confirmed/claimsJson 归档，cluster 只影响
+// reportBody 的「已聚类」呈现与正文去重（report prompt 4.7 纪律据此写）。
+// clusterTokenize/clusterStopTokens 与 render-md 同款（正则 `/[a-z0-9][a-z0-9.%\-]*/g`、长度≥4、过滤
+// clusterStopTokens），但**必须用不同词法名**——build.mjs 整文件 inline 会让 render-md 的同名未导出
+// `tokenize`/`STOP_TOKENS` 与本文件的导出在同一顶层作用域 → 宿主 new Function 加载必抛
+// `Identifier 'tokenize' has already been declared` SyntaxError（产物 C1 溃败；node --check 是假绿）。
+// 双轨各自留副本（render-md 内 dedupWindowMisses 是私有函数、用户明令不改，不抽公共模块），仅为改名。
+
+// 8/23 C1 复核修复：原名 STOP_TOKENS/tokenize 与 render-md 顶层同名冲突 → 改 clusterStopTokens/clusterTokenize。
+const clusterStopTokens = new Set(['news', 'note', 'report', 'model', 'models', 'open', 'new', 'blog', 'post', 'api', 'app', 'apps', 'ai', 'pro', 'free', 'beta', 'tool', 'tools', 'official', 'release', 'update', 'announce', 'launch', 'said'])
+const clusterTokenize = s => (String(s || '').toLowerCase().match(/[a-z0-9][a-z0-9.%\-]*/g) || []).filter(t => t.length >= 4 && !clusterStopTokens.has(t))
+
+// 聚为 unordered 对：a 与 b 的 claim/claims 任一共享 ≥1 token 即成对。
+// keyOf/unionTokens 供 clusterClaims 内部使用：claim 优先，次 title。
+const unionTokens = (c, f) => new Set([...(c.claim ? clusterTokenize(c.claim) : []), ...(c.title ? clusterTokenize(c.title) : [])])
+
+/**
+ * 把共享实体 token 的声明聚成簇。
+ * @param {Array} claims 声明数组，每项可含 claim/title/summary/sources/status/quote 等
+ * @returns {Array<{key:string, items:Array}>} 簇：key 取首条 title/claim，items 为簇内声明（原样）
+ * 确定性：按输入序首现注册 token，无随机性。
+ */
+const clusterClaims = claims => {
+  if (!claims || !Array.isArray(claims)) return []
+  const clusters = []
+  const seen = new Map()   // token → cluster index（首现注册）
+  for (const c of claims) {
+    const ts = unionTokens(c)
+    let idx = -1
+    for (const t of ts) if (seen.has(t)) { idx = seen.get(t); break }
+    if (idx < 0) {
+      clusters.push({ key: c.title || c.claim, items: [c] })
+      for (const t of ts) if (!seen.has(t)) seen.set(t, clusters.length - 1)
+      continue
+    }
+    clusters[idx].items.push(c)
+    for (const t of ts) if (!seen.has(t)) seen.set(t, idx)
+  }
+  return clusters
+}
+
+// 数字口径冲突由 report prompt 4.7 / 3.2 在文案层处置（聚类层不主动判定——保守设计，YAGNI）。
+// 保留 detectNumericConflict 导出供 test 锁定保守语义，但 mergeCluster 不再消费其返回值（死分支已清理）。
+const detectNumericConflict = items => false
+
+const distinctByClaim = claims => { const m = new Map(); for (const c of claims) m.set((c.claim || '').trim(), c); return [...m.values()] }
+
+const honestMergeSummary = items => {
+  // 取 items 摘要拼接（中文顿号分隔）。数字口径冲突由 report prompt 4.7/3.2 文案层处置，聚类层不标注。
+  const parts = items.map(c => (c.summary || c.quote || '').trim()).filter(Boolean)
+  if (!parts.length) return ''
+  return parts.join('；')
+}
+
+/**
+ * 合并同一簇：nodup 计算 -> 数字冲突解析 -> merge。
+ * 返回编排同构输入（claim/title/summary/sources/status 齐），report prompt 依然只吃原始 resolved 输入。
+ * @param {Array} items 同一簇的声明（原样，可能含重复 claim）
+ * @param {string} [dateLabel] 保留位（合并主视图可带日期标注）
+ * @param {Object} [majorOutMap] 保留位（major-out 映射，本实现不使用）
+ * @returns {Object} { ...首条, claim: key, summary, sources, status?, mergedCount, numericConflict? }
+ */
+const mergeCluster = (items, dateLabel, majorOutMap) => {
+  const total = items.length
+  const distinct = distinctByClaim(items)
+  const key = distinct.map(c => c.claim || c.title).join('\n')   // 编排 key（信息熵契约新 claim）
+  const sources = [...new Set(distinct.flatMap(c => c.sources || []))]
+  const vote = distinct[0] && distinct[0].status ? distinct[0].status : null
+  const summary = honestMergeSummary(distinct)
+  const out = { ...distinct[0], claim: key, summary, sources, ...(vote ? { status: vote } : {}), mergedCount: total }
+  return out
+}
+// ─── inline: linuxdo ───
+// ai-daily linux.do 登录态抓取（2026-08-23 第二十一项 §A）——纯导出零调用模块，自身零副作用。
+// 背景（已核实）：Cloudflare cf_clearance 绑定浏览器 TLS 指纹，裸 fetch 必 403，唯一可靠客户端是
+// 9222 真 Chrome（登录态）。经 CDP 开启临时标签 → 等 .json 文档在 Chrome 内渲染为 body 文本 → 读回。
+// 两条路径都覆盖：环境已有 globalThis.WebSocket（Node v26 是 function）→ 真 WebSocket 走
+// Runtime.evaluate 轮询 body.innerText；无 WebSocket 全局（workflow realm 降级保险）→ CDP HTTP-only
+// polling（每片轮询等价于"关旧标签+开新标签+读 body"的幂等快照）。
+// 不启动任何进程；fetch/AbortSignal/setTimeout/WebSocket 都是环境已有全局，直接引用。
+// build.mjs 只能把纯 float/纯导出 inline 进产物（workflow realm 自包含），本文件满足该约束。
+
+const CDP_DEFAULTS = {
+  cdpHost: '127.0.0.1:9222',
+  maxPages: 4,          // news/34.json 分页安全上限（多为 1-3 页）
+  perPageDeep: 3,       // 每页首页 JSON 字段已带 1 段文本摘要，topic 深抓仅少量(3)
+  requestTimeoutMs: 15000,
+  pollIntervalMs: 500,
+  pollMaxMs: 15000,
+}
+
+// 判断当前环境是否有真 WebSocket（Node v26 全局即 function；workflow realm 无 → HTTP polling 保险路径）。
+const hasW = () => (typeof globalThis !== 'undefined' && 'WebSocket' in globalThis) || typeof WebSocket === 'function'
+
+// CDP HTTP：开标签 → 读 body 文本 → 关标签。
+// 真 WebSocket：Runtime.evaluate 轮询 body.innerText（复用用户另一生成器的 polling 形态）。
+// 无 WebSocket（workflow realm）：CDP HTTP-only polling——每片轮询都等价于"关旧标签+开新标签+读 body"的幂等快照。
+// 关闭 CDP 临时标签（浏览器 tab，非仅 debugger Socket）——WS 路径必须补这步，否则每个被抓 URL 都泄漏一个标签到用户 9222 Chrome。
+async function closeTab(host, targetId) {
+  try { await fetch(`http://${host}/json/close/${targetId}`, { method: 'PUT', signal: AbortSignal.timeout(3000) }) } catch {}
+}
+
+async function readBodyText(host, url) {
+  const res = await fetch(`http://${host}/json/new?${encodeURIComponent(url)}`, { method: 'PUT', signal: AbortSignal.timeout(CDP_DEFAULTS.requestTimeoutMs) })
+  // 8/23 复核修复：/json/new 非 2xx 时 target 未建立、无标签可关，直接 throw（无泄漏，无需 closeTab）。
+  if (!res.ok) throw new Error('open-tab HTTP ' + res.status)
+  // 8/23 复核边界说明（pre-existing 不可达路径，非本修复缺口）：CDP 对 200 必回含 id 的 target JSON，
+  // 故 target.id 解析失败/缺失只存在于理论中——若真发生，该 tab 将无法定位关闭（拿不到 id 就关不掉）。
+  // 同理 json/new 请求被 AbortSignal 中断时服务端可能已建 tab 而客户端拿不到 targetId。两者均被
+  // try 前抛错/退出路径挡在"已建 tab 且拿得到 id"之外，其余任何路径下方的 finally 一概兜住。
+  const target = await res.json()
+  const targetId = target.id
+  try {
+    const wsUrl = target.webSocketDebuggerUrl
+    let text = null
+    if (hasW()) {
+      // 真 WebSocket：轮询内文取 JSON。
+      const ws = new WebSocket(wsUrl)
+      await new Promise((ok, no) => { ws.onopen = ok; ws.onerror = () => { ws.close(); no(new Error('ws open')) } })
+      let n = 0; const pend = new Map()
+      ws.onmessage = e => { const v = JSON.parse(e.data); if (v.id && pend.has(v.id)) { pend.get(v.id)(v); pend.delete(v.id) } }
+      const send = (method, params = {}) => new Promise((res, rej) => {
+        const id = ++n
+        pend.set(id, res)
+        ws.send(JSON.stringify({ id, method, params }))
+        // 超时防挂起：CDP 不回匹配 id 的消息时 reject + 清理 pend（挂起会卡住 readBodyText、finally 不触发）
+        setTimeout(() => { if (pend.has(id)) { pend.delete(id); rej(new Error('cdp send timeout: ' + method)) } }, CDP_DEFAULTS.requestTimeoutMs)
+      })
+      await send('Runtime.enable')
+      for (let i = 0; i < Math.ceil(CDP_DEFAULTS.pollMaxMs / CDP_DEFAULTS.pollIntervalMs); i++) {
+        const { result } = await send('Runtime.evaluate', { expression: 'document.body ? document.body.innerText : null', returnByValue: true })
+        const v = result?.result?.value
+        if (v && String(v).trimStart().startsWith('{')) { text = v; break }
+        await new Promise(r => setTimeout(r, CDP_DEFAULTS.pollIntervalMs))
+      }
+      ws.close()
+    } else {
+      // 无 WebSocket 全局（workflow realm）：CDP HTTP-only polling — 每片轮询都等价于
+      // "关旧标签+开新标签+读 body"的幂等快照。
+      await new Promise(r => setTimeout(r, CDP_DEFAULTS.pollIntervalMs))
+      for (let i = 0; i < Math.ceil(CDP_DEFAULTS.pollMaxMs / CDP_DEFAULTS.pollIntervalMs); i++) {
+        try {
+          const r2 = await fetch(`http://${host}/json/${targetId}`, { signal: AbortSignal.timeout(3000) })
+          if (r2.ok) { const j = await r2.json(); if (j.innerText) { text = j.innerText; break } }
+        } catch { /* poll */ }
+        await new Promise(r => setTimeout(r, CDP_DEFAULTS.pollIntervalMs))
+      }
+    }
+    return text && String(text).trimStart().startsWith('{') ? text : null
+  } finally {
+    // 8/23 复核修复：唯一关闭点用 finally 收敛 —— WS open 失败 / 中途抛错 / send 挂起超时被
+    // withDeadline 化前（workflow 召唤层）都能兜到底。只关本函数 json/new 自己开的 targetId，
+    // 绝不误关用户其它标签；关失败 try/catch 吞掉（标签已读完，关不上不影响抓取结果）。
+    await closeTab(host, targetId)
+  }
+}
+
+// 深抓单帖：GET https://linux.do/t/<id>.json 官方 JSON 接口（JSON 文档在 Chrome 内直接渲染为文本）。
+async function deepFetchTopic(host, id) {
+  return readBodyText(host, 'https://linux.do/t/' + id + '.json')
+}
+
+/**
+ * 抓取 linux.do 前沿快讯（news/34）分页，返回 posts。CDP 走 9222 登录态 Chrome。
+ * @param {{date?:string, cdpHost?:string}} opts date 为可空方言（抓取本身不强依赖日期窗口，只取最新分页）
+ * @returns {{ok:boolean, degraded:boolean, reason:string, pages:number, topics:number, posts:Array}}
+ *   posts 每项 { id, title, url, date, snippet, likeCount }
+ * no_cdp_host → ok:false 不降级（调用方选择不启用，板不崩）；其余失败 → ok:false + degraded:true。
+ */
+async function fetchLinuxDoNews34({ date, cdpHost }) {
+  const out = { ok: true, degraded: false, reason: '', pages: 0, topics: 0, posts: [] }
+  if (!cdpHost) { out.ok = false; out.reason = 'no_cdp_host'; return out }
+  try {
+    for (let page = 1; page <= CDP_DEFAULTS.maxPages; page++) {
+      const raw = await readBodyText(cdpHost, 'https://linux.do/c/news/34.json?page=' + page)
+      const topics = extractTopicsFromJson(raw)
+      if (!topics || !topics.length) break   // 空页即到底，不再翻
+      out.pages++; out.topics += topics.length
+      // 首页字段已带 topic excerpt（<200 字）→ 不算深抓；只对最前 perPageDeep 条补深抓正文片段。
+      for (const t of topics.slice(0, CDP_DEFAULTS.perPageDeep)) {
+        const deep = await deepFetchTopic(cdpHost, t.id)
+        const postText = extractPostTextFromJson(deep)
+        if (postText) t.snippet = postText.slice(0, 2400)
+      }
+      out.posts.push(...topics)
+    }
+    if (out.topics === 0) { out.ok = false; out.degraded = true; out.reason = 'empty_pages' }
+  } catch (e) {
+    out.ok = false; out.degraded = true; out.reason = String(e && e.message || e).slice(0, 120)
+  }
+  return out
+}
+
+// --- 轻量解析：从 Discourse JSON 提取 { id, title, url, date, snippet, likes } ---
+function extractTopicsFromJson(raw) {
+  if (!raw) return null
+  let obj; try { obj = JSON.parse(String(raw).trim()) } catch { return null }
+  if (!obj?.topic_list?.topics?.length) return null
+  return obj.topic_list.topics.map(t => ({
+    id: t.id, title: t.title, url: 'https://linux.do/t/topic/' + t.id,
+    date: t.created_at ? t.created_at.slice(0, 10) : '', snippet: t.excerpt || '', likeCount: t.like_count || 0,
+  }))
+}
+
+function extractPostTextFromJson(raw) {
+  if (!raw) return null
+  let obj; try { obj = JSON.parse(String(raw).trim()) } catch { return null }
+  const c = obj?.post_stream?.posts
+  const rawStr = c && c[0]?.cooked ? String(c[0].cooked).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : ''
+  return rawStr || null
+}
 
 // boards 由 BOARDS 花名册按选区派生（BOARDS 已 inline 就绪，此时访问无 TDZ）。
 const boards = BOARDS_SELECTED ? BOARDS.filter(b => BOARDS_SELECTED.has(b.key)) : BOARDS

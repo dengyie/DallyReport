@@ -214,7 +214,9 @@ export const renderDegradedMarkdown = ({ date, window, confirmed, refuted, cover
   ])
   const badge = x => citationBadges(x.source ? [x.source] : [], citeMap)
   const inW = (confirmed || []).filter(x => x.window === 'in')
-  const maj = (confirmed || []).filter(x => x.window === 'major-out')
+  // 8/24 修复：maj 过滤改为 `x.window !== 'in'`——此前只收 'major-out'，window 为 'out'/'unknown'
+  // 的已确认项既不进 inW 也不进 maj，静默丢失。现在非 in 的已确认项都归入窗口外节，不再消失。
+  const maj = (confirmed || []).filter(x => x.window !== 'in')
   // 修 reportError 硬编码（spec D.1）：null/空不抹成 'report agent failed'，如实描述。
   const reason = reportError ? String(reportError).replace(/\s+/g, ' ').trim() : 'report 代理未产出完整版合成结构'
   const L = []
@@ -233,7 +235,7 @@ export const renderDegradedMarkdown = ({ date, window, confirmed, refuted, cover
   }
   L.push('')
   if (maj.length) {
-    L.push('### 窗口外·行业里程碑（' + maj.length + ' 条，公认事实未经窗口内投票）')
+    L.push('### 窗口外·已确认（' + maj.length + ' 条，未经窗口内投票）')
     L.push('')
     for (const x of maj) {
       L.push('- ' + S(x.claim) + '（' + (x.date || '?') + '）')

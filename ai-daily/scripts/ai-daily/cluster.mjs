@@ -40,17 +40,17 @@ export const clusterClaims = claims => {
   return clusters
 }
 
-// 源码页的数字各自被 verify 阶段用什么字段注载——此为启发式：只在摘要文本中出现同一实体+数字差异
-// 才算真冲突；否则只是两则独立陈述。当前实现保守返回 false（由 report prompt 4.7 / 3.2 在文案层处置）。
+// 数字口径冲突由 report prompt 4.7 / 3.2 在文案层处置（聚类层不主动判定——保守设计，YAGNI）。
+// 保留 detectNumericConflict 导出供 test 锁定保守语义，但 mergeCluster 不再消费其返回值（死分支已清理）。
 export const detectNumericConflict = items => false
 
 const distinctByClaim = claims => { const m = new Map(); for (const c of claims) m.set((c.claim || '').trim(), c); return [...m.values()] }
 
-const honestMergeSummary = (items, conflict) => {
-  // 取 items 摘要拼接（中文顿号分隔），冲突时 + 一句「口径不一，勿相加」。
+const honestMergeSummary = items => {
+  // 取 items 摘要拼接（中文顿号分隔）。数字口径冲突由 report prompt 4.7/3.2 文案层处置，聚类层不标注。
   const parts = items.map(c => (c.summary || c.quote || '').trim()).filter(Boolean)
   if (!parts.length) return ''
-  return parts.join('；') + (conflict ? '（该事件多源数字口径不一，引用时勿叠加相加。）' : '')
+  return parts.join('；')
 }
 
 /**
@@ -65,11 +65,9 @@ export const mergeCluster = (items, dateLabel, majorOutMap) => {
   const total = items.length
   const distinct = distinctByClaim(items)
   const key = distinct.map(c => c.claim || c.title).join('\n')   // 编排 key（信息熵契约新 claim）
-  const numMismatch = detectNumericConflict(distinct)
   const sources = [...new Set(distinct.flatMap(c => c.sources || []))]
   const vote = distinct[0] && distinct[0].status ? distinct[0].status : null
-  const summary = honestMergeSummary(distinct, numMismatch)
+  const summary = honestMergeSummary(distinct)
   const out = { ...distinct[0], claim: key, summary, sources, ...(vote ? { status: vote } : {}), mergedCount: total }
-  if (numMismatch) out.numericConflict = true
   return out
 }

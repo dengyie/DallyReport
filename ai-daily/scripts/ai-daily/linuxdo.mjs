@@ -46,7 +46,13 @@ async function readBodyText(host, url) {
       await new Promise((ok, no) => { ws.onopen = ok; ws.onerror = () => { ws.close(); no(new Error('ws open')) } })
       let n = 0; const pend = new Map()
       ws.onmessage = e => { const v = JSON.parse(e.data); if (v.id && pend.has(v.id)) { pend.get(v.id)(v); pend.delete(v.id) } }
-      const send = (method, params = {}) => new Promise(res => { const id = ++n; pend.set(id, res); ws.send(JSON.stringify({ id, method, params })) })
+      const send = (method, params = {}) => new Promise((res, rej) => {
+        const id = ++n
+        pend.set(id, res)
+        ws.send(JSON.stringify({ id, method, params }))
+        // 超时防挂起：CDP 不回匹配 id 的消息时 reject + 清理 pend（挂起会卡住 readBodyText、finally 不触发）
+        setTimeout(() => { if (pend.has(id)) { pend.delete(id); rej(new Error('cdp send timeout: ' + method)) } }, CDP_DEFAULTS.requestTimeoutMs)
+      })
       await send('Runtime.enable')
       for (let i = 0; i < Math.ceil(CDP_DEFAULTS.pollMaxMs / CDP_DEFAULTS.pollIntervalMs); i++) {
         const { result } = await send('Runtime.evaluate', { expression: 'document.body ? document.body.innerText : null', returnByValue: true })

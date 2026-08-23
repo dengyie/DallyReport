@@ -114,7 +114,7 @@ test('降级版：标注降级原因 + 窗口内新闻/major-out/refuted 分节'
   assert.ok(md.includes('report agent failed'))
   assert.ok(md.includes('### 窗口内新闻（1 条'))
   assert.ok(md.includes('`✓2-0`'))
-  assert.ok(md.includes('### 窗口外·行业里程碑（1 条'))
+  assert.ok(md.includes('### 窗口外·已确认（1 条'))
   assert.ok(md.includes('~~被否决声明B~~ → 否决 `0-2`'))
   assert.ok(md.includes('无动态：OpenAI、NVIDIA'))
   assert.ok(md.includes('`report_failed`'))
@@ -260,7 +260,7 @@ test('降级版：windowMisses 过滤已在 major-out 出现的条目（去重�
       { name: 'Reproducing 2,200 ICML 论文', date: '2026-08-13', note: '复现项目' },
     ],
   })
-  assert.ok(md.includes('### 窗口外·行业里程碑（2 条'))
+  assert.ok(md.includes('### 窗口外·已确认（2 条'))
   assert.ok(md.includes('### 📎 窗口外参考'))
   assert.ok(!md.includes('Grok 4.6 in GitHub Copilot'), '已入 major-out 的 windowMiss 去除')
   assert.ok(!md.includes('Qwen3.8-27B edge model'), '已入 major-out 的 windowMiss 去除')
@@ -348,6 +348,26 @@ test('已核查正常项带 URL sources → 无 [行业公认·无单一链接] 
     ]}], caveats: [], openQuestions: [] },
     coverage: [], windowMisses: [], degraded: [] })
   assert.ok(!md.includes('[行业公认·无单一链接]'), '已核查项带真 URL 不标 noUrl 兜底')
+})
+
+// ─── 2026-08-24 降级版 out 确认项不静默丢失（F2 修复）───
+
+test('降级版：window="out" 的已确认项不静默丢失（maj 过滤 x.window !== "in"）', () => {
+  // 8/24 修复：此前 maj 只收 window==='major-out'，window 为 'out'/'unknown' 的已确认项
+  // 既不进 inW 也不进 maj，静默丢失。改为 x.window !== 'in' 后所有非 in 的已确认项都归入窗口外节。
+  const md = renderDegradedMarkdown({
+    date: 'd', window: 'w',
+    confirmed: [
+      { claim: '窗口内声明', window: 'in', vote: '2-0', verifiedByVote: true, source: 'https://x/a', date: '2026-08-20', erroredCount: 0 },
+      { claim: '窗口外已确认项', window: 'out', vote: '—', verifiedByVote: false, source: '(多源公认)', date: '2026-08-10', erroredCount: 0 },
+      { claim: '重大里程碑项', window: 'major-out', vote: '—', verifiedByVote: false, source: '(多源公认)', date: '2026-07-31', erroredCount: 0 },
+    ],
+    refuted: [], coverage: [], windowMisses: [], degraded: [], noNewsCompanies: [],
+  })
+  assert.ok(md.includes('### 窗口内新闻（1 条'), '窗口内 1 条')
+  assert.ok(md.includes('### 窗口外·已确认（2 条'), '窗口外 2 条（out + major-out 都收入）')
+  assert.ok(md.includes('窗口外已确认项'), 'window="out" 的条目不丢失')
+  assert.ok(md.includes('重大里程碑项'), 'window="major-out" 的条目仍保留')
 })
 
 // ─── 2026-08-22 完整版结构性重复修复（spec 窗口外参考去重，对齐降级版 D.3）───

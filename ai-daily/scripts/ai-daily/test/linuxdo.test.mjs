@@ -159,3 +159,54 @@ test('fetchLinuxDoNews34：WS onerror 早退后仍关掉已开的标签（finall
     globalThis.WebSocket = realWS
   }
 })
+
+// 8/24 补 HTTP 兜底路径（workflow realm 生产路径）零测试覆盖：删除 globalThis.WebSocket 模拟
+// 无 WebSocket 全局 → hasW()=false → 走 CDP HTTP-only polling（/json/new + /json/<targetId> innerText +
+// /json/close）。断言 HTTP polling 能读回 JSON body，且开=关（无标签泄漏）。finally 恢复全局。
+test('fetchLinuxDoNews34：HTTP 兜底路径（无 WebSocket 全局）读回 body 且开=关', async () => {
+  const opened = []
+  const closed = []
+  const mkBody = () => JSON.stringify({ topic_list: { topics: [
+    { id: 100001, title: 'DeepSeek V4-Pro 发布', created_at: '2026-08-23T04:12:00.000Z', excerpt: 'HTTP 兜底路径读回。', like_count: 7 },
+  ] } })
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (u.includes('/json/new?')) {
+      const id = 'tab-http-' + (opened.length + 1)
+      opened.push(id)
+      return { ok: true, status: 200, json: async () => ({ id, webSocketDebuggerUrl: 'ws://mock/' + id }) }
+    }
+    if (u.includes('/json/close/')) {
+      closed.push(u.split('/json/close/')[1])
+      return { ok: true, status: 200, json: async () => ({}) }
+    }
+    const pm = u.match(/\/json\/(tab-http-\d+)$/)
+    if (pm) return { ok: true, status: 200, json: async () => ({ innerText: mkBody() }) }
+    throw new Error('unexpected fetch: ' + u)
+  }
+  // 无 WebSocket 全局 = workflow realm（HTTP-only polling 兜底路径）。删属性而非置 null，
+  // 因 hasW() 用 `in` 探测属性存在性；finally 里用原 descriptor 恢复。
+  const realWSDesc = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket')
+  delete globalThis.WebSocket
+  // 加速 HTTP 轮询（默认 500ms/片会让 4 页 + deep 合计约 4s+），from spec 轮询节奏非本用例验证目标
+  const realPoll = CDP_DEFAULTS.pollIntervalMs
+  CDP_DEFAULTS.pollIntervalMs = 1
+  const timer = setTimeout(() => { throw new Error('test hang') }, 5000)
+  try {
+    const out = await fetchLinuxDoNews34({ date: '2026-08-23', cdpHost: 'mock:9222' })
+    clearTimeout(timer)
+    assert.ok(out.ok, 'HTTP 兜底路径应成功读到 body')
+    assert.equal(out.topics, 4, '4 页 × 1 帖全部经 HTTP polling 读回，实际 ' + out.topics)
+    assert.equal(out.posts[0].snippet, 'HTTP 兜底路径读回。', 'body 应来自 /json/<targetId> 的 innerText')
+    assert.ok(out.posts[0].likeCount === 7, 'JSON 内容正常解析')
+    assert.ok(opened.length >= 4, '应开过至少 4 个标签（news 页 + deep 帖），实际 ' + opened.length)
+    assert.equal(closed.length, opened.length, '关闭数必须等于开启数（无泄漏）')
+    assert.ok(closed.every(id => opened.includes(id)), '每个关闭的标签都是开过的')
+  } finally {
+    clearTimeout(timer)
+    globalThis.fetch = realFetch
+    if (realWSDesc) Object.defineProperty(globalThis, 'WebSocket', realWSDesc)
+    CDP_DEFAULTS.pollIntervalMs = realPoll
+  }
+})
