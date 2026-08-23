@@ -1032,6 +1032,11 @@ const hasW = () => (typeof globalThis !== 'undefined' && 'WebSocket' in globalTh
 // CDP HTTP：开标签 → 读 body 文本 → 关标签。
 // 真 WebSocket：Runtime.evaluate 轮询 body.innerText（复用用户另一生成器的 polling 形态）。
 // 无 WebSocket（workflow realm）：CDP HTTP-only polling——每片轮询都等价于"关旧标签+开新标签+读 body"的幂等快照。
+// 关闭 CDP 临时标签（浏览器 tab，非仅 debugger Socket）——WS 路径必须补这步，否则每个被抓 URL 都泄漏一个标签到用户 9222 Chrome。
+async function closeTab(host, targetId) {
+  try { await fetch(`http://${host}/json/close/${targetId}`, { method: 'PUT', signal: AbortSignal.timeout(3000) }) } catch {}
+}
+
 async function readBodyText(host, url) {
   const res = await fetch(`http://${host}/json/new?${encodeURIComponent(url)}`, { method: 'PUT', signal: AbortSignal.timeout(CDP_DEFAULTS.requestTimeoutMs) })
   if (!res.ok) throw new Error('open-tab HTTP ' + res.status)
@@ -1056,7 +1061,6 @@ async function readBodyText(host, url) {
   } else {
     // 无 WebSocket 全局（workflow realm）：CDP HTTP-only polling — 每片轮询都等价于
     // "关旧标签+开新标签+读 body"的幂等快照。
-    const close = () => fetch(`http://${host}/json/close/${target.id}`, { method: 'PUT', signal: AbortSignal.timeout(3000) }).catch(() => {})
     await new Promise(r => setTimeout(r, CDP_DEFAULTS.pollIntervalMs))
     for (let i = 0; i < Math.ceil(CDP_DEFAULTS.pollMaxMs / CDP_DEFAULTS.pollIntervalMs); i++) {
       try {
@@ -1065,8 +1069,8 @@ async function readBodyText(host, url) {
       } catch { /* poll */ }
       await new Promise(r => setTimeout(r, CDP_DEFAULTS.pollIntervalMs))
     }
-    await close()
   }
+  await closeTab(host, target.id)
   return text && String(text).trimStart().startsWith('{') ? text : null
 }
 

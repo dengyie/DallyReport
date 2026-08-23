@@ -64,3 +64,55 @@ test('CDP_DEFAULTS：默认值符合 spec（host/maxPages/perPageDeep/poll 参�
   assert.equal(CDP_DEFAULTS.pollIntervalMs, 500)
   assert.equal(CDP_DEFAULTS.pollMaxMs, 15000)
 })
+
+// 8/23 复核实证修复：WS 路径（Node 有 globalThis.WebSocket）此前只 ws.close() 不关 CDP 标签，
+// 每抓一页/一帖泄漏一个 tab 到用户 9222 Chrome（实证 2 页 run 泄漏 9 tab）。修复后两条路径都必须
+// 对每个开的标签发 PUT /json/close/<id>。此测试用 mock fetch + mock WebSocket 断言「开=关」。
+test('fetchLinuxDoNews34：WS 路径对每个开的标签都关（json/close 命中=开的标签数）', async () => {
+  const opened = []
+  const closed = []
+  const mkBody = () => JSON.stringify({ topic_list: { topics: [
+    { id: 100001, title: 'DeepSeek V4-Pro 发布', created_at: '2026-08-23T04:12:00.000Z', excerpt: '官方正式版上线。', like_count: 42 },
+  ] } })
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (u.includes('/json/new?')) {
+      const id = 'tab' + (opened.length + 1)
+      opened.push(id)
+      return { ok: true, status: 200, json: async () => ({ id, webSocketDebuggerUrl: 'ws://mock/' + id }) }
+    }
+    if (u.includes('/json/close/')) {
+      const id = u.split('/json/close/')[1]
+      closed.push(id)
+      return { ok: true, status: 200, json: async () => ({}) }
+    }
+    throw new Error('unexpected fetch: ' + u)
+  }
+  // 功能假 WebSocket：构造后下一微任务触发 onopen（模块 await 它）；send 立即回 Runtime.enable / Runtime.evaluate（含 JSON body）
+  class MockWS {
+    constructor(url) { this.url = url; this.onopen = null; this.onmessage = null; this._n = 0; queueMicrotask(() => { this.onopen && this.onopen() }) }
+    send(data) {
+      const msg = JSON.parse(data)
+      this._n++
+      const result = msg.method === 'Runtime.evaluate' ? { result: { value: mkBody() } } : {}
+      setTimeout(() => { this.onmessage && this.onmessage({ data: JSON.stringify({ id: msg.id, result }) }) }, 0)
+    }
+    close() {}
+  }
+  const realWS = globalThis.WebSocket
+  globalThis.WebSocket = MockWS
+  const timer = setTimeout(() => { throw new Error('test hang') }, 5000)
+  try {
+    const out = await fetchLinuxDoNews34({ date: '2026-08-23', cdpHost: 'mock:9222' })
+    clearTimeout(timer)
+    assert.ok(out.ok, 'mock 环境应成功')
+    assert.ok(opened.length >= 4, '应开过至少 4 个标签（news 页 + deep 帖），实际 ' + opened.length)
+    assert.equal(closed.length, opened.length, '关闭数必须等于开启数（无泄漏）')
+    assert.ok(closed.every(id => opened.includes(id)), '每个关闭的标签都是开过的')
+  } finally {
+    clearTimeout(timer)
+    globalThis.fetch = realFetch
+    globalThis.WebSocket = realWS
+  }
+})

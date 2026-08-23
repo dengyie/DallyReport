@@ -267,3 +267,8 @@ OpenAI、Google/DeepMind、Anthropic、**xAI**、NVIDIA、Meta、Amazon、Apple�
 > 6. **build.mjs** MODULES 追加 `cluster`/`linuxdo`（纯导出零依赖，排在 render-md 后）；SKILL.md args 补 `linuxdoCdpHost`（默认 null 不启用）/`linuxdoMaxSources`（默认 24）。
 >
 > **验证**：`node --test "scripts/ai-daily/test/*.test.mjs"` 123 pass / 0 fail（基线 99 + 新增 cluster 9 / linuxdo 6 / render 2 / prompts 2 / workflow-integration 5）；`node --check` 产物通过；`find scripts/ai-daily -newer .claude/workflows/ai-daily.js` 无输出（源不旧于产物）。不启动浏览器、不跑真实 CDP 抓取（那是验证阶段的事），本项只写代码 + 单元测试。
+>
+> **8/23 复核实证 + 修复（交付阶段补充）**：
+> - **真实 CDP 全链路冒烟**：`fetchLinuxDoNews34({ cdpHost:'127.0.0.1:9222' })` 对 9222 登录态 Chrome 实测 ok:true / degraded:false、4 页 / 120 posts（cloudflare 机器人偏好同步 / 上半年公募规模 / Antigravity 远程控制，含登录态内容），deep-fetch snippet 已附。证明 CDP→JSON API→body.innerText 整条链路真实可用，非仅单测。
+> - **运行时缺陷发现并修复（CDP 标签泄漏）**：实测暴露 WS 路径只 `ws.close()`（关 debugger Socket）不关浏览器标签，每抓一页/一帖泄漏一个 tab 到用户 9222 Chrome（实证 2 页 run 泄漏 9 tab）。修复：`readBodyText` 统一末尾 `closeTab(host, target.id)` 发 `PUT /json/close/<id>`，WS 与 HTTP-polling 两路径都收敛到同一关闭点（WS 分支删掉内嵌 close，避免双关）。修复后实测 3 页/90 posts → 标签泄漏 0。
+> - **回归守卫**：`test/linuxdo.test.mjs` 新增「WS 路径对每个开的标签都关」——mock CDP fetch（`/json/new`→`/json/close`）+ mock WebSocket（构造即 onopen、send 即回 body），断言 `closed.length === opened.length`。修复前该测试红（closed 16 vs opened 8，双关）、修复后绿。**127 pass / 0 fail**（123 + 1 新增）。
