@@ -13,7 +13,7 @@ export const clusterTokenize = s => (String(s || '').toLowerCase().match(/[a-z0-
 
 // 聚为 unordered 对：a 与 b 的 claim/claims 任一共享 ≥1 token 即成对。
 // keyOf/unionTokens 供 clusterClaims 内部使用：claim 优先，次 title。
-const unionTokens = (c, f) => new Set([...(c.claim ? clusterTokenize(c.claim) : []), ...(c.title ? clusterTokenize(c.title) : [])])
+const unionTokens = c => new Set([...(c.claim ? clusterTokenize(c.claim) : []), ...(c.title ? clusterTokenize(c.title) : [])])
 
 /**
  * 把共享实体 token 的声明聚成簇。

@@ -1,6 +1,6 @@
 // ai-daily 花名册与静态配置 — 与 workflow 内逐字节一致。真源；加厂商/改种子只改此文件。
 
-// ─── Deterministic coverage: 9 boards × roster ───
+// ─── Deterministic coverage: 10 boards × roster ───
 export const BOARDS = [
   { key: 'labs', title: '头部实验室·新模型', focus: '旗舰实验室本周新模型、新版本、重大模型能力发布（必须逐家核）', degradeNotes: 'X/Grok、OpenAI 等官方 X 通道优先；WebSearch 不可用时以官方渠道覆盖为主。',
     companies: [

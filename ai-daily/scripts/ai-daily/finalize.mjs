@@ -32,6 +32,7 @@ export const extractPayloads = obj => {
     if (typeof p[k] !== 'string') throw new Error(`finalize: payloads.${k} must be a string`)
   }
   const date = (r && r.date) || null
+  if (!date || typeof date !== 'string') throw new Error('finalize: missing result.date (YYYY-MM-DD string required)')
   return { payloads: p, outDir, date }
 }
 

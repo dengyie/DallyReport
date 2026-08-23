@@ -168,13 +168,18 @@ const daysBetween = (seedDayNum, reportDayNum) => {
 
 // age gate：种子距 report 超 maxAgeDays，或日期不可解析（normalizeDate→null）→ 剔除。
 // fail-open：reportDateNum == null（未知）返回原数组，不因 gate 清空 major-out 节。
+// 8/24 修复：区分「日期不可解析」与「超期」两种 retire 原因——retireReasons 数组供调用方分别日志。
 const filterSeedsByAge = (seeds, reportDayNum, maxAgeDays) => {
-  if (reportDayNum == null) return seeds
-  return seeds.filter(s => {
+  if (reportDayNum == null) return { kept: seeds, retired: [] }
+  const kept = [], retired = []
+  for (const s of seeds) {
     const day = normalizeDate(s.date)
-    if (day == null) return false            // 无日期 → 超期剔除（调用方 SEED-AGE 日志可见）
-    return daysBetween(day, reportDayNum) <= maxAgeDays
-  })
+    if (day == null) { retired.push({ seed: s, reason: 'unparseable', raw: s.date }); continue }
+    const age = daysBetween(day, reportDayNum)
+    if (age > maxAgeDays) { retired.push({ seed: s, reason: 'expired', age, max: maxAgeDays }); continue }
+    kept.push(s)
+  }
+  return { kept, retired }
 }
 
 const chunkArr = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out }
@@ -258,7 +263,7 @@ const REPORT_SCHEMA = {
 // ─── inline: boards ───
 // ai-daily 花名册与静态配置 — 与 workflow 内逐字节一致。真源；加厂商/改种子只改此文件。
 
-// ─── Deterministic coverage: 9 boards × roster ───
+// ─── Deterministic coverage: 10 boards × roster ───
 const BOARDS = [
   { key: 'labs', title: '头部实验室·新模型', focus: '旗舰实验室本周新模型、新版本、重大模型能力发布（必须逐家核）', degradeNotes: 'X/Grok、OpenAI 等官方 X 通道优先；WebSearch 不可用时以官方渠道覆盖为主。',
     companies: [
@@ -557,7 +562,12 @@ const buildFallback = (digestByKey, failedGroups, claimWindow, normURL) => {
 }
 // ─── inline: prompts ───
 // ai-daily prompt 模板 — 与 workflow 内逐字节一致；闭包依赖收敛为 ctx 显式注入。
-// ctx = { WINDOW_LABEL, WFROM, WTO, DATE, GROK_DIR, MAX_URLS_PER_BOARD, WEB_BUDGET_TOTAL, WEB_BUDGET_PER, feedMaxChars }
+// ctx 字段（按消费方分组）：
+//   常量:    WINDOW_LABEL, WFROM, WTO, DATE, GROK_DIR, MAX_URLS_PER_BOARD, WEB_BUDGET_TOTAL, WEB_BUDGET_PER, feedMaxChars
+//   discover: BOARDS, digestForBoard, digestForFeeds
+//   verify:   VOTES_PER_CLAIM, REFUTATIONS_REQUIRED
+//   report:   reportBody, coverBlock, missBlock, confirmedVerifyCount, killedCount, majorOutCount,
+//             unverifiedCount, unverifiedList, refutedList
 // build.mjs inline 后在 workflow 顶部构造同名常量 ctx 传入。
 
 const harvestPrompt = (g, ctx) =>
@@ -949,7 +959,7 @@ const clusterTokenize = s => (String(s || '').toLowerCase().match(/[a-z0-9][a-z0
 
 // 聚为 unordered 对：a 与 b 的 claim/claims 任一共享 ≥1 token 即成对。
 // keyOf/unionTokens 供 clusterClaims 内部使用：claim 优先，次 title。
-const unionTokens = (c, f) => new Set([...(c.claim ? clusterTokenize(c.claim) : []), ...(c.title ? clusterTokenize(c.title) : [])])
+const unionTokens = c => new Set([...(c.claim ? clusterTokenize(c.claim) : []), ...(c.title ? clusterTokenize(c.title) : [])])
 
 /**
  * 把共享实体 token 的声明聚成簇。
@@ -1099,12 +1109,12 @@ async function deepFetchTopic(host, id) {
 
 /**
  * 抓取 linux.do 前沿快讯（news/34）分页，返回 posts。CDP 走 9222 登录态 Chrome。
- * @param {{date?:string, cdpHost?:string}} opts date 为可空方言（抓取本身不强依赖日期窗口，只取最新分页）
+ * @param {{cdpHost?:string}} opts cdpHost 为 127.0.0.1:9222 形式；缺省 → ok:false 不降级
  * @returns {{ok:boolean, degraded:boolean, reason:string, pages:number, topics:number, posts:Array}}
  *   posts 每项 { id, title, url, date, snippet, likeCount }
  * no_cdp_host → ok:false 不降级（调用方选择不启用，板不崩）；其余失败 → ok:false + degraded:true。
  */
-async function fetchLinuxDoNews34({ date, cdpHost }) {
+async function fetchLinuxDoNews34({ cdpHost } = {}) {
   const out = { ok: true, degraded: false, reason: '', pages: 0, topics: 0, posts: [] }
   if (!cdpHost) { out.ok = false; out.reason = 'no_cdp_host'; return out }
   try {
@@ -1134,7 +1144,7 @@ function extractTopicsFromJson(raw) {
   let obj; try { obj = JSON.parse(String(raw).trim()) } catch { return null }
   if (!obj?.topic_list?.topics?.length) return null
   return obj.topic_list.topics.map(t => ({
-    id: t.id, title: t.title, url: 'https://linux.do/t/topic/' + t.id,
+    id: t.id, title: t.title, url: 'https://linux.do/t/' + t.id,
     date: t.created_at ? t.created_at.slice(0, 10) : '', snippet: t.excerpt || '', likeCount: t.like_count || 0,
   }))
 }

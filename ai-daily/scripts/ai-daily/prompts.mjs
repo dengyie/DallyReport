@@ -1,5 +1,10 @@
 // ai-daily prompt 模板 — 与 workflow 内逐字节一致；闭包依赖收敛为 ctx 显式注入。
-// ctx = { WINDOW_LABEL, WFROM, WTO, DATE, GROK_DIR, MAX_URLS_PER_BOARD, WEB_BUDGET_TOTAL, WEB_BUDGET_PER, feedMaxChars }
+// ctx 字段（按消费方分组）：
+//   常量:    WINDOW_LABEL, WFROM, WTO, DATE, GROK_DIR, MAX_URLS_PER_BOARD, WEB_BUDGET_TOTAL, WEB_BUDGET_PER, feedMaxChars
+//   discover: BOARDS, digestForBoard, digestForFeeds
+//   verify:   VOTES_PER_CLAIM, REFUTATIONS_REQUIRED
+//   report:   reportBody, coverBlock, missBlock, confirmedVerifyCount, killedCount, majorOutCount,
+//             unverifiedCount, unverifiedList, refutedList
 // build.mjs inline 后在 workflow 顶部构造同名常量 ctx 传入。
 
 export const harvestPrompt = (g, ctx) =>

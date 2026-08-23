@@ -49,6 +49,13 @@ test('extractPayloads：缺任一 payload 字符串字段抛错', () => {
   assert.throws(() => extractPayloads(bad), /payloads\.claims must be a string/)
 })
 
+test('extractPayloads：缺 date 抛错（与 outDir/payloads 同等严格）', () => {
+  const { date, ...rest } = sample()
+  assert.throws(() => extractPayloads({ ...rest, date: null }), /missing result\.date/)
+  assert.throws(() => extractPayloads({ ...rest, date: '' }), /missing result\.date/)
+  assert.throws(() => extractPayloads({ ...rest, date: undefined }), /missing result\.date/)
+})
+
 test('finalizePayloads：4 文件逐字节落盘且内容==源 payload', () => {
   const written = finalizePayloads(sample())
   assert.equal(written.length, 4, '写 4 个文件')

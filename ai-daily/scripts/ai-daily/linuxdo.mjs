@@ -89,12 +89,12 @@ async function deepFetchTopic(host, id) {
 
 /**
  * 抓取 linux.do 前沿快讯（news/34）分页，返回 posts。CDP 走 9222 登录态 Chrome。
- * @param {{date?:string, cdpHost?:string}} opts date 为可空方言（抓取本身不强依赖日期窗口，只取最新分页）
+ * @param {{cdpHost?:string}} opts cdpHost 为 127.0.0.1:9222 形式；缺省 → ok:false 不降级
  * @returns {{ok:boolean, degraded:boolean, reason:string, pages:number, topics:number, posts:Array}}
  *   posts 每项 { id, title, url, date, snippet, likeCount }
  * no_cdp_host → ok:false 不降级（调用方选择不启用，板不崩）；其余失败 → ok:false + degraded:true。
  */
-export async function fetchLinuxDoNews34({ date, cdpHost }) {
+export async function fetchLinuxDoNews34({ cdpHost } = {}) {
   const out = { ok: true, degraded: false, reason: '', pages: 0, topics: 0, posts: [] }
   if (!cdpHost) { out.ok = false; out.reason = 'no_cdp_host'; return out }
   try {
@@ -124,7 +124,7 @@ export function extractTopicsFromJson(raw) {
   let obj; try { obj = JSON.parse(String(raw).trim()) } catch { return null }
   if (!obj?.topic_list?.topics?.length) return null
   return obj.topic_list.topics.map(t => ({
-    id: t.id, title: t.title, url: 'https://linux.do/t/topic/' + t.id,
+    id: t.id, title: t.title, url: 'https://linux.do/t/' + t.id,
     date: t.created_at ? t.created_at.slice(0, 10) : '', snippet: t.excerpt || '', likeCount: t.like_count || 0,
   }))
 }

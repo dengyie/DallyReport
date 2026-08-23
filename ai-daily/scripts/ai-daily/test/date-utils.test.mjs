@@ -75,14 +75,30 @@ test('daysBetween：基础差/同日/闰年/非闰年/跨年/负差', () => {
   assert.equal(daysBetween(20260821, 20260820), -1)             // seed 在 report 之后
 })
 
-test('filterSeedsByAge：≤阈保留/超阈滤除/无日期滤除/fail-open 全保留', () => {
+test('filterSeedsByAge：≤阈保留/超阈滤除/无日期滤除/fail-open 全保留 + 区分 retire 原因', () => {
   const seeds = [
     { name: 'fresh', date: '2026-08-19' },   // 距 20260820 = 1
     { name: 'at-21', date: '2026-07-30' },   // 距 21（含）
     { name: 'over-1', date: '2026-07-29' },  // 距 22
     { name: 'none', date: '' },              // normalizeDate→null
   ]
-  assert.deepEqual(filterSeedsByAge(seeds, 20260820, 21).map(s => s.name), ['fresh', 'at-21'])
-  assert.deepEqual(filterSeedsByAge(seeds, null, 21).map(s => s.name), seeds.map(s => s.name)) // fail-open
+  const r = filterSeedsByAge(seeds, 20260820, 21)
+  assert.deepEqual(r.kept.map(s => s.name), ['fresh', 'at-21'])
+  assert.equal(r.retired.length, 2, '2 个退役')
+  // 超期退役
+  const exp = r.retired.find(x => x.seed.name === 'over-1')
+  assert.ok(exp, 'over-1 在退役列表')
+  assert.equal(exp.reason, 'expired')
+  assert.equal(exp.age, 22)
+  assert.equal(exp.max, 21)
+  // 日期不可解析退役
+  const unp = r.retired.find(x => x.seed.name === 'none')
+  assert.ok(unp, 'none 在退役列表')
+  assert.equal(unp.reason, 'unparseable')
+  assert.equal(unp.raw, '')
+  // fail-open
+  const fo = filterSeedsByAge(seeds, null, 21)
+  assert.deepEqual(fo.kept.map(s => s.name), seeds.map(s => s.name)) // fail-open 全保留
+  assert.deepEqual(fo.retired, [])
   assert.equal(seeds.length, 4)  // 不改原数组
 })

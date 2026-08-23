@@ -42,13 +42,18 @@ export const daysBetween = (seedDayNum, reportDayNum) => {
 
 // age gate：种子距 report 超 maxAgeDays，或日期不可解析（normalizeDate→null）→ 剔除。
 // fail-open：reportDateNum == null（未知）返回原数组，不因 gate 清空 major-out 节。
+// 8/24 修复：区分「日期不可解析」与「超期」两种 retire 原因——retireReasons 数组供调用方分别日志。
 export const filterSeedsByAge = (seeds, reportDayNum, maxAgeDays) => {
-  if (reportDayNum == null) return seeds
-  return seeds.filter(s => {
+  if (reportDayNum == null) return { kept: seeds, retired: [] }
+  const kept = [], retired = []
+  for (const s of seeds) {
     const day = normalizeDate(s.date)
-    if (day == null) return false            // 无日期 → 超期剔除（调用方 SEED-AGE 日志可见）
-    return daysBetween(day, reportDayNum) <= maxAgeDays
-  })
+    if (day == null) { retired.push({ seed: s, reason: 'unparseable', raw: s.date }); continue }
+    const age = daysBetween(day, reportDayNum)
+    if (age > maxAgeDays) { retired.push({ seed: s, reason: 'expired', age, max: maxAgeDays }); continue }
+    kept.push(s)
+  }
+  return { kept, retired }
 }
 
 export const chunkArr = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out }

@@ -13,7 +13,7 @@ test('extractTopicsFromJson：标准 Discourse 列表 → {id,title,url,date,sni
   const ts = extractTopicsFromJson(newsJson)
   assert.equal(ts.length, 2)
   assert.deepEqual(ts[0], {
-    id: 100001, title: 'DeepSeek V4-Pro 发布', url: 'https://linux.do/t/topic/100001',
+    id: 100001, title: 'DeepSeek V4-Pro 发布', url: 'https://linux.do/t/100001',
     date: '2026-08-23', snippet: '官方正式版上线，Agent 能力增强。', likeCount: 42,
   })
   assert.equal(ts[1].likeCount, 0, '缺 like_count 默认 0')
