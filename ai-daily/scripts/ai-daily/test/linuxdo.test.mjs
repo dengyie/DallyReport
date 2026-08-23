@@ -47,7 +47,7 @@ test('extractPostTextFromJson：容错——非 JSON / 无 cooked → null', () 
 })
 
 test('fetchLinuxDoNews34：无 cdpHost → ok:false + reason no_cdp_host，不降级、零副作用', async () => {
-  const out = await fetchLinuxDoNews34({ date: '2026-08-23', cdpHost: null })
+  const out = await fetchLinuxDoNews34({ cdpHost: null })
   assert.equal(out.ok, false)
   assert.equal(out.reason, 'no_cdp_host')
   assert.equal(out.degraded, false, '未启用不算通道失败（CLI/手动默认不启用时板不崩）')
@@ -104,7 +104,7 @@ test('fetchLinuxDoNews34：WS 路径对每个开的标签都关（json/close 命
   globalThis.WebSocket = MockWS
   const timer = setTimeout(() => { throw new Error('test hang') }, 5000)
   try {
-    const out = await fetchLinuxDoNews34({ date: '2026-08-23', cdpHost: 'mock:9222' })
+    const out = await fetchLinuxDoNews34({ cdpHost: 'mock:9222' })
     clearTimeout(timer)
     assert.ok(out.ok, 'mock 环境应成功')
     assert.ok(opened.length >= 4, '应开过至少 4 个标签（news 页 + deep 帖），实际 ' + opened.length)
@@ -147,7 +147,7 @@ test('fetchLinuxDoNews34：WS onerror 早退后仍关掉已开的标签（finall
   globalThis.WebSocket = WSFail
   const timer = setTimeout(() => { throw new Error('test hang') }, 5000)
   try {
-    const out = await fetchLinuxDoNews34({ date: '2026-08-23', cdpHost: 'mock:9222' })
+    const out = await fetchLinuxDoNews34({ cdpHost: 'mock:9222' })
     clearTimeout(timer)
     // 整个抓取失败（data-independent，走 no_cdp 之外的真实失败），每一页开的标签都必须最后被关掉：
     // fetchLinuxDoNews34 顶层 catch 兜底 out.ok=false degraded，但每个 readBodyText 内的 finally 仍须 closeTab。
@@ -194,7 +194,7 @@ test('fetchLinuxDoNews34：HTTP 兜底路径（无 WebSocket 全局）读回 bod
   CDP_DEFAULTS.pollIntervalMs = 1
   const timer = setTimeout(() => { throw new Error('test hang') }, 5000)
   try {
-    const out = await fetchLinuxDoNews34({ date: '2026-08-23', cdpHost: 'mock:9222' })
+    const out = await fetchLinuxDoNews34({ cdpHost: 'mock:9222' })
     clearTimeout(timer)
     assert.ok(out.ok, 'HTTP 兜底路径应成功读到 body')
     assert.equal(out.topics, 4, '4 页 × 1 帖全部经 HTTP polling 读回，实际 ' + out.topics)

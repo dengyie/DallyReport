@@ -1345,7 +1345,7 @@ for (const batch of chunkArr(DISCOVER_GROUPS, DISCOVER_BATCH)) {
       discoverResults.push({ group: g, boards: g.boards, urls: [], noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: false, linuxdoSkipped: true })
       continue
     }
-    const ld = await fetchLinuxDoNews34({ date: DATE, cdpHost: LINUXDO_CDP_HOST })
+    const ld = await fetchLinuxDoNews34({ cdpHost: LINUXDO_CDP_HOST })
     if (!ld.ok || !ld.topics) {
       log('LINUXDO-FAIL ' + (ld.reason || 'unknown') + ' → ' + g.key + ' 降级')
       discoverResults.push({ group: g, boards: g.boards, urls: [], noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: true, linuxdoFailed: true, linuxdoReason: ld.reason || '' })
@@ -1558,10 +1558,21 @@ for (const d of discoverRows) for (const m of (d.majorOutOfWindow || [])) if (m 
 // 种子 KNOWN_MAJOR_OUT 作为保底（未被发现代理上报的补上）
 const REPORT_DAY = normalizeDate(DATE)
 const MAX_SEED_AGE_DAYS = 21
-const freshSeeds = filterSeedsByAge(KNOWN_MAJOR_OUT, REPORT_DAY, MAX_SEED_AGE_DAYS)
-const agedOut = KNOWN_MAJOR_OUT.length - freshSeeds.length
+const _seedResult = filterSeedsByAge(KNOWN_MAJOR_OUT, REPORT_DAY, MAX_SEED_AGE_DAYS)
+const freshSeeds = _seedResult.kept
 for (const m of freshSeeds) _addMajor(m, 'labs')
-log('SEED-AGE: 注入 ' + freshSeeds.length + ' / ' + KNOWN_MAJOR_OUT.length + ' 种子（' + agedOut + ' 超期退役，阈值 ' + MAX_SEED_AGE_DAYS + 'd）' + (REPORT_DAY == null ? ' · REPORT_DAY unknown → fail-open 全注入' : ''))
+if (REPORT_DAY == null) {
+  log('SEED-AGE: 注入 ' + freshSeeds.length + ' / ' + KNOWN_MAJOR_OUT.length + ' 种子 · REPORT_DAY unknown → fail-open 全注入')
+} else {
+  const retired = _seedResult.retired
+  const expired = retired.filter(r => r.reason === 'expired')
+  const unparseable = retired.filter(r => r.reason === 'unparseable')
+  let msg = 'SEED-AGE: 注入 ' + freshSeeds.length + ' / ' + KNOWN_MAJOR_OUT.length + ' 种子（' + retired.length + ' 退役'
+  if (expired.length) msg += '，超期 ' + expired.length + '：' + expired.map(r => r.seed.name + ' ' + r.age + 'd').join('; ')
+  if (unparseable.length) msg += '，日期不可解析 ' + unparseable.length + '：' + unparseable.map(r => r.seed.name + ' (' + JSON.stringify(r.raw) + ')').join('; ')
+  msg += '，阈值 ' + MAX_SEED_AGE_DAYS + 'd）'
+  log(msg)
+}
 confirmed.push(...majorOutClaims)
 log('majorOut: ' + majorOutClaims.length + ' industry milestones injected into confirmed')
 

@@ -20,7 +20,7 @@ test('模板：linuxdo 组在 DISCOVER_GROUPS 保留，无 cdp host 时 LINUXDO-
 
 test('模板：linuxdo 成功/失败两条路径都铺（OK 日志 + 配额塞 posts / FAIL 日志 + degraded 行）', () => {
   assert.ok(TPL.includes("log('LINUXDO-OK ' + ld.topics + ' topics"), '成功日志 LINUXDO-OK n topics')
-  assert.ok(TPL.includes('fetchLinuxDoNews34({ date: DATE, cdpHost: LINUXDO_CDP_HOST })'), '调用签名带 date/cdpHost')
+  assert.ok(TPL.includes('fetchLinuxDoNews34({ cdpHost: LINUXDO_CDP_HOST })'), '调用签名带 cdpHost')
   assert.ok(TPL.includes("log('LINUXDO-FAIL ' + (ld.reason || 'unknown')"), '失败日志 LINUXDO-FAIL reason')
   assert.ok(TPL.includes('degraded: true, linuxdoFailed: true, linuxdoReason'), '失败行为 degraded:true + linuxdoFailed')
   assert.ok(TPL.includes('linuxdoMaxSources'), '配额参数在模板可见')
