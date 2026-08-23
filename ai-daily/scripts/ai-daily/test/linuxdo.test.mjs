@@ -116,3 +116,46 @@ test('fetchLinuxDoNews34：WS 路径对每个开的标签都关（json/close 命
     globalThis.WebSocket = realWS
   }
 })
+
+// 8/23 复核修复：WS open 失败（onerror 早退 throw）路径也必须关掉已开的标签——修复前的
+// readBodyText 只在函数末尾关、非 finally，onerror reject 会让 closeTab 永不执行，标签泄漏。
+// 此用例驱动 mock WS onerror 早退，断言早退后仍发 PUT /json/close/<id>（开=关），锁定 try/finally。
+test('fetchLinuxDoNews34：WS onerror 早退后仍关掉已开的标签（finally 收敛）', async () => {
+  const opened = []
+  const closed = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (u.includes('/json/new?')) {
+      const id = 'tab-onerr-' + (opened.length + 1)
+      opened.push(id)
+      return { ok: true, status: 200, json: async () => ({ id, webSocketDebuggerUrl: 'ws://mock/' + id }) }
+    }
+    if (u.includes('/json/close/')) {
+      closed.push(u.split('/json/close/')[1])
+      return { ok: true, status: 200, json: async () => ({}) }
+    }
+    throw new Error('unexpected fetch: ' + u)
+  }
+  // 假 WebSocket：构造后下一微任务触发 onerror（reject），从而 mock onopen 永不触发 → WS 路径早退 throw。
+  class WSFail {
+    constructor() { this.onopen = null; this.onmessage = null; queueMicrotask(() => { this.onerror && this.onerror() }) }
+    send() {}
+    close() {}
+  }
+  const realWS = globalThis.WebSocket
+  globalThis.WebSocket = WSFail
+  const timer = setTimeout(() => { throw new Error('test hang') }, 5000)
+  try {
+    const out = await fetchLinuxDoNews34({ date: '2026-08-23', cdpHost: 'mock:9222' })
+    clearTimeout(timer)
+    // 整个抓取失败（data-independent，走 no_cdp 之外的真实失败），每一页开的标签都必须最后被关掉：
+    // fetchLinuxDoNews34 顶层 catch 兜底 out.ok=false degraded，但每个 readBodyText 内的 finally 仍须 closeTab。
+    assert.equal(out.ok, false)
+    assert.equal(closed.length, opened.length, 'WS 早退后仍须开=关（finally 收敛），实际开 ' + opened.length + ' 关 ' + closed.length)
+  } finally {
+    clearTimeout(timer)
+    globalThis.fetch = realFetch
+    globalThis.WebSocket = realWS
+  }
+})

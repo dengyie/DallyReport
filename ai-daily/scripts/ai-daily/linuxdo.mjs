@@ -29,39 +29,47 @@ async function closeTab(host, targetId) {
 
 async function readBodyText(host, url) {
   const res = await fetch(`http://${host}/json/new?${encodeURIComponent(url)}`, { method: 'PUT', signal: AbortSignal.timeout(CDP_DEFAULTS.requestTimeoutMs) })
+  // 8/23 复核修复：/json/new 非 2xx 时 target 未建立、无标签可关，直接 throw（无泄漏，无需 closeTab）。
   if (!res.ok) throw new Error('open-tab HTTP ' + res.status)
   const target = await res.json()
-  const wsUrl = target.webSocketDebuggerUrl
-  let text = null
-  if (hasW()) {
-    // 真 WebSocket：轮询内文取 JSON。
-    const ws = new WebSocket(wsUrl)
-    await new Promise((ok, no) => { ws.onopen = ok; ws.onerror = no })
-    let n = 0; const pend = new Map()
-    ws.onmessage = e => { const v = JSON.parse(e.data); if (v.id && pend.has(v.id)) { pend.get(v.id)(v); pend.delete(v.id) } }
-    const send = (method, params = {}) => new Promise(res => { const id = ++n; pend.set(id, res); ws.send(JSON.stringify({ id, method, params })) })
-    await send('Runtime.enable')
-    for (let i = 0; i < Math.ceil(CDP_DEFAULTS.pollMaxMs / CDP_DEFAULTS.pollIntervalMs); i++) {
-      const { result } = await send('Runtime.evaluate', { expression: 'document.body ? document.body.innerText : null', returnByValue: true })
-      const v = result?.result?.value
-      if (v && String(v).trimStart().startsWith('{')) { text = v; break }
+  const targetId = target.id
+  try {
+    const wsUrl = target.webSocketDebuggerUrl
+    let text = null
+    if (hasW()) {
+      // 真 WebSocket：轮询内文取 JSON。
+      const ws = new WebSocket(wsUrl)
+      await new Promise((ok, no) => { ws.onopen = ok; ws.onerror = () => { ws.close(); no(new Error('ws open')) } })
+      let n = 0; const pend = new Map()
+      ws.onmessage = e => { const v = JSON.parse(e.data); if (v.id && pend.has(v.id)) { pend.get(v.id)(v); pend.delete(v.id) } }
+      const send = (method, params = {}) => new Promise(res => { const id = ++n; pend.set(id, res); ws.send(JSON.stringify({ id, method, params })) })
+      await send('Runtime.enable')
+      for (let i = 0; i < Math.ceil(CDP_DEFAULTS.pollMaxMs / CDP_DEFAULTS.pollIntervalMs); i++) {
+        const { result } = await send('Runtime.evaluate', { expression: 'document.body ? document.body.innerText : null', returnByValue: true })
+        const v = result?.result?.value
+        if (v && String(v).trimStart().startsWith('{')) { text = v; break }
+        await new Promise(r => setTimeout(r, CDP_DEFAULTS.pollIntervalMs))
+      }
+      ws.close()
+    } else {
+      // 无 WebSocket 全局（workflow realm）：CDP HTTP-only polling — 每片轮询都等价于
+      // "关旧标签+开新标签+读 body"的幂等快照。
       await new Promise(r => setTimeout(r, CDP_DEFAULTS.pollIntervalMs))
+      for (let i = 0; i < Math.ceil(CDP_DEFAULTS.pollMaxMs / CDP_DEFAULTS.pollIntervalMs); i++) {
+        try {
+          const r2 = await fetch(`http://${host}/json/${targetId}`, { signal: AbortSignal.timeout(3000) })
+          if (r2.ok) { const j = await r2.json(); if (j.innerText) { text = j.innerText; break } }
+        } catch { /* poll */ }
+        await new Promise(r => setTimeout(r, CDP_DEFAULTS.pollIntervalMs))
+      }
     }
-    ws.close()
-  } else {
-    // 无 WebSocket 全局（workflow realm）：CDP HTTP-only polling — 每片轮询都等价于
-    // "关旧标签+开新标签+读 body"的幂等快照。
-    await new Promise(r => setTimeout(r, CDP_DEFAULTS.pollIntervalMs))
-    for (let i = 0; i < Math.ceil(CDP_DEFAULTS.pollMaxMs / CDP_DEFAULTS.pollIntervalMs); i++) {
-      try {
-        const r2 = await fetch(`http://${host}/json/${target.id}`, { signal: AbortSignal.timeout(3000) })
-        if (r2.ok) { const j = await r2.json(); if (j.innerText) { text = j.innerText; break } }
-      } catch { /* poll */ }
-      await new Promise(r => setTimeout(r, CDP_DEFAULTS.pollIntervalMs))
-    }
+    return text && String(text).trimStart().startsWith('{') ? text : null
+  } finally {
+    // 8/23 复核修复：唯一关闭点用 finally 收敛 —— WS open 失败 / 中途抛错 / send 挂起超时被
+    // withDeadline 化前（workflow 召唤层）都能兜到底。只关本函数 json/new 自己开的 targetId，
+    // 绝不误关用户其它标签；关失败 try/catch 吞掉（标签已读完，关不上不影响抓取结果）。
+    await closeTab(host, targetId)
   }
-  await closeTab(host, target.id)
-  return text && String(text).trimStart().startsWith('{') ? text : null
 }
 
 // 深抓单帖：GET https://linux.do/t/<id>.json 官方 JSON 接口（JSON 文档在 Chrome 内直接渲染为文本）。
