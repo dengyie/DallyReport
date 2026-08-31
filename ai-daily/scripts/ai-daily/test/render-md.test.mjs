@@ -478,3 +478,48 @@ test('降级版 I1：算法校正成 no_dynamic 的板不是「真实空行」�
   // 真正的空行（无 claims、无 urls、无公司三态）仍被过滤
   assert.ok(!md.includes('| safety | 安全与伦理 |'), '真·空行 safety 仍被过滤')
 })
+
+// ─── 8/31 P3：覆盖矩阵不得制造「假确信」 ───
+// 8/31 生产 run（wf_e14b2828-ff5）实证两个假确信缺陷，本段两测锁死修复契约。
+
+test('降级版 P3-①：degraded 板即使 0 claims/0 urls/无公司三态也保留行（不得与「查过无新闻」混为一谈）', () => {
+  // 8/31 实况：opensource/academic/funding/policy/safety/people 六板 degraded 且 0/0，
+  // 旧空行过滤把它们整行删掉 → 10 板矩阵只剩 4 行，读者无法区分
+  // 「查过·当日无新闻」与「通道失败·压根没查到」。通道失败本身即必须上报的覆盖事实。
+  const boards = ['opensource', 'academic', 'funding', 'policy', 'safety', 'people']
+  const coverage = [
+    { board: 'labs', title: '头部实验室·新模型', claims: 2, urls: 1, degraded: false },
+    ...boards.map(b => ({ board: b, title: '板-' + b, claims: 0, urls: 0, degraded: true })),
+    // 非 degraded 的真·空行仍被过滤（原契约不变）
+    { board: 'strategy', title: '重磅头条·战略', claims: 0, urls: 0, degraded: false },
+  ]
+  const md = renderDegradedMarkdown({ date: 'd', window: 'w', confirmed: [], refuted: [], coverage, windowMisses: [], degraded: [], noNewsCompanies: [] })
+  for (const b of boards) {
+    assert.ok(md.includes('| ' + b + ' | 板-' + b + ' | 0 | degraded |'), b + ' degraded 0/0 板必须保留行并标 degraded')
+  }
+  assert.ok(!md.includes('| strategy | 重磅头条·战略 |'), '非 degraded 的真·空行仍被过滤')
+  assert.equal(md.split('\n').filter(l => l.startsWith('| ') && !l.startsWith('| 板块 ')).length, boards.length + 1,
+    '矩阵行数 = 1 有内容板 + 6 degraded 板（不再缩水成 4 行）')
+})
+
+test('降级版 P3-②：labs degraded 与「无动态」花名册并存渲染，degraded 标记不被替换掉', () => {
+  // 8/31 实况：labs degraded=True（无任何通道真正查过 OpenAI），但 noNewsCompanies 非空时
+  // 旧三元直接替换掉 degraded 标记 → md 只写「无动态：OpenAI、Google DeepMind…」
+  // = 把「没查到」印成「查过·无事发生」（假确信）。两者必须并存。
+  const coverage = [
+    { board: 'labs', title: '头部实验室·新模型', claims: 0, urls: 0, degraded: true,
+      companiesChecked: [{ name: 'OpenAI', state: 'no_dynamic', evidence: 'labs' }] },
+  ]
+  const md = renderDegradedMarkdown({ date: 'd', window: 'w', confirmed: [], refuted: [], coverage, windowMisses: [], degraded: [], noNewsCompanies: ['OpenAI', 'Google DeepMind'] })
+  const row = md.split('\n').find(l => l.startsWith('| labs |'))
+  assert.ok(row, 'labs 行在场')
+  assert.ok(row.includes('degraded'), 'degraded 标记不得被无动态花名册替换掉（假确信根因）')
+  assert.ok(row.includes('无动态：OpenAI、Google DeepMind'), '无动态花名册同时保留（信息不吞）')
+  assert.ok(row.includes('degraded · 无动态：'), '并存格式为 `degraded · 无动态：…`')
+  // 非 degraded 的 labs 仍只渲染无动态（不无端加 degraded）
+  const clean = renderDegradedMarkdown({ date: 'd', window: 'w', confirmed: [], refuted: [], windowMisses: [], degraded: [], noNewsCompanies: ['OpenAI'],
+    coverage: [{ board: 'labs', title: 'L', claims: 1, urls: 1, degraded: false }] })
+  const cleanRow = clean.split('\n').find(l => l.startsWith('| labs |'))
+  assert.ok(!cleanRow.includes('degraded'), '非 degraded 板不得凭空出现 degraded')
+  assert.ok(cleanRow.includes('无动态：OpenAI'), '非 degraded 板无动态照常渲染')
+})

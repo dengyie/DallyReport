@@ -17,7 +17,7 @@ import os from 'node:os'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const BUILD = path.join(HERE, '..', 'build.mjs')
 // 与 build.mjs 的 MODULES 常量逐字一致：url-polyfill 最先（注入 globalThis.URL），linuxdo 最后（零依赖纯导出）。
-const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'fallback', 'prompts', 'render-md', 'cluster', 'linuxdo']
+const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'wallclock', 'fallback', 'prompts', 'render-md', 'cluster', 'linuxdo']
 // 每模块一个"关键标识"：命即证模块真的被 inline 进产物（若占位符替换丢模块/依赖序错，函数名/常量必缺）。
 // 全部取自各 .mjs 导出名（grep 实证），且为该模块唯一出现于产物中的标识。
 const MARKERS = {
@@ -27,6 +27,7 @@ const MARKERS = {
   boards: 'KNOWN_MAJOR_OUT',
   dedup: 'allocateFetchBudget',
   budget: 'computePhaseDeadlines',
+  wallclock: 'makeCalibratedElapsed',
   fallback: 'buildFallback',
   prompts: 'reportPrompt',
   'render-md': 'buildCitationMap',
@@ -84,6 +85,28 @@ test('F1 产物 new Function 无顶层 SyntaxError（作用域冲突防线）', 
   // 任一命中即红，token 级 bug 无法靠 CJS 宽松判定掩盖。
   const wrapped = 'async function __probe() {' + '\n' + withoutExport + '\n' + '}'
   assert.doesNotThrow(() => new Function(wrapped), '剥离顶层 export 并外包 async 函数后 new Function 不得抛 SyntaxError')
+})
+
+// ─── F2 8/27 Task 3：host-Node prefetch 隔离护栏 ───
+// linuxdo-prefetch.mjs 是宿主 Node CLI，绝不 inline 进 workflow realm。这些断言锁定 build.mjs 的
+// assertRealmGuards：产物须含 linuxdoPrefetched 消费入口、禁任何 linuxdo-prefetch 源码/CLI/裸 CDP 调用。
+test('F2 产物含 linuxdoPrefetched 消费入口（Task 2 预抓注入契约）', () => {
+  const code = readBuiltProduct()
+  assert.ok(code.includes('linuxdoPrefetched'), '产物须含 linuxdoPrefetched（run-daily.sh 预抓注入 → Workflow consumer）')
+  assert.ok(code.includes('no_fetch_realm'), '产物须含 no_fetch_realm 降级路径（无预抓时 realm 内不裸抓 CDP）')
+})
+
+test('F2 产物绝不 inline linuxdo-prefetch（宿主 Node CLI 禁入 realm）', () => {
+  const code = readBuiltProduct()
+  // 用模块导出的函数名/CLI 内容标识（模板注释只文案提及文件名 linuxdo-prefetch.mjs，须忽略）。
+  for (const marker of ['prefetchLinuxDo', 'runPrefetch', 'process.exit', 'require(']) {
+    assert.ok(!code.includes(marker), `产物不应含宿主 CLI 内容标识 ${marker}`)
+  }
+})
+
+test('F2 产物不再裸调 fetchLinuxDoNews34（旧 8/26 版回归源）', () => {
+  const code = readBuiltProduct()
+  assert.ok(!code.includes('await fetchLinuxDoNews34('), 'realm 内不得再裸抓 CDP（workflow realm 无 fetch/WebSocket）')
 })
 
 const runBuild = () => {

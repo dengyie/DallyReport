@@ -1,6 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { CDP_DEFAULTS, extractTopicsFromJson, extractPostTextFromJson, fetchLinuxDoNews34 } from '../linuxdo.mjs'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const TPL = fs.readFileSync(path.join(HERE, '../ai-daily.template.js'), 'utf8')
 
 const newsJson = JSON.stringify({
   topic_list: { topics: [
@@ -98,7 +104,7 @@ test('fetchLinuxDoNews34：WS 路径对每个开的标签都关（json/close 命
       const result = msg.method === 'Runtime.evaluate' ? { result: { value: mkBody() } } : {}
       setTimeout(() => { this.onmessage && this.onmessage({ data: JSON.stringify({ id: msg.id, result }) }) }, 0)
     }
-    close() {}
+    close () {}
   }
   const realWS = globalThis.WebSocket
   globalThis.WebSocket = MockWS
@@ -139,9 +145,9 @@ test('fetchLinuxDoNews34：WS onerror 早退后仍关掉已开的标签（finall
   }
   // 假 WebSocket：构造后下一微任务触发 onerror（reject），从而 mock onopen 永不触发 → WS 路径早退 throw。
   class WSFail {
-    constructor() { this.onopen = null; this.onmessage = null; queueMicrotask(() => { this.onerror && this.onerror() }) }
-    send() {}
-    close() {}
+    constructor () { this.onopen = null; this.onmessage = null; queueMicrotask(() => { this.onerror && this.onerror() }) }
+    send () {}
+    close () {}
   }
   const realWS = globalThis.WebSocket
   globalThis.WebSocket = WSFail
@@ -162,8 +168,8 @@ test('fetchLinuxDoNews34：WS onerror 早退后仍关掉已开的标签（finall
 
 // 8/24 补 HTTP 兜底路径（workflow realm 生产路径）零测试覆盖：删除 globalThis.WebSocket 模拟
 // 无 WebSocket 全局 → hasW()=false → 走 CDP HTTP-only polling（/json/new + /json/<targetId> innerText +
-// /json/close）。断言 HTTP polling 能读回 JSON body，且开=关（无标签泄漏）。finally 恢复全局。
-test('fetchLinuxDoNews34：HTTP 兜底路径（无 WebSocket 全局）读回 body 且开=关', async () => {
+// /json/close）断言 HTTP polling 能读回 JSON body，且开=关（无标签泄漏）。
+test('fetchLinuxDoNews34：HTTP 兜底路径（无 WebSocket）读回 body 且开=关', async () => {
   const opened = []
   const closed = []
   const mkBody = () => JSON.stringify({ topic_list: { topics: [
@@ -185,7 +191,7 @@ test('fetchLinuxDoNews34：HTTP 兜底路径（无 WebSocket 全局）读回 bod
     if (pm) return { ok: true, status: 200, json: async () => ({ innerText: mkBody() }) }
     throw new Error('unexpected fetch: ' + u)
   }
-  // 无 WebSocket 全局 = workflow realm（HTTP-only polling 兜底路径）。删属性而非置 null，
+  // 无 WebSocket 全局 = workflow realm（HTTP-only polling 兜底路径）。删属性而非置 null ，
   // 因 hasW() 用 `in` 探测属性存在性；finally 里用原 descriptor 恢复。
   const realWSDesc = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket')
   delete globalThis.WebSocket
@@ -209,4 +215,36 @@ test('fetchLinuxDoNews34：HTTP 兜底路径（无 WebSocket 全局）读回 bod
     if (realWSDesc) Object.defineProperty(globalThis, 'WebSocket', realWSDesc)
     CDP_DEFAULTS.pollIntervalMs = realPoll
   }
+})
+
+// ─── 8/27 Task 2：workflow realm 不再裸抓 linuxdo（linuxdoPrefetched 隔离）───
+// 模板真源（build 后 inline 成产物）是 workflow 编排层的唯一事实源。这些源级断言锁死：
+// ① realm 内不存在对裸 fetchLinuxDoNews34 的可执行调用（workflow realm 无 fetch/WebSocket → 不可能裸抓）；
+// ② 存在 linuxdoPrefetched 严格校验 + no_fetch_realm 降级防护。
+
+test('模板：realm 内不调用裸 fetchLinuxDoNews34 (no bare CDP fetch in orchestration)', () => {
+  // 模板里 fetchLinuxDoNews34 只允许出现在注释（说明）与 build inline 的 linuxdo 模块标识里，
+  // 编排层（非注释、非 inline 标识）不得主动调用它——prefetch 前移后编排层只消费 linuxdoPrefetched JSON。
+  const bareFetches = TPL.split('\n').filter(l =>
+    l.includes('fetchLinuxDoNews34(') &&
+    !l.trim().startsWith('//') &&
+    !l.includes('@inline: linuxdo'))
+  assert.equal(bareFetches.length, 0, '模板编排层不得调用裸 fetchLinuxDoNews34（prefetch 前移后应只剩注释/内联标识）')
+})
+
+test('模板：严格校验 linuxdoPrefetched 成功形状（ok===true + posts 有效数组）', () => {
+  assert.ok(TPL.includes('args.linuxdoPrefetched'), '模板读取 args.linuxdoPrefetched')
+  assert.ok(TPL.match(/raw\.ok\s*!==\s*true/), '严格校验 ok===true')
+  assert.ok(TPL.includes('raw.posts'), '严格校验 posts 数组')
+  assert.ok(TPL.includes('typeof x.url === \'string\''), '每条 post 校验 url/title 为有效字符串')
+})
+
+test('模板：无有效预抓数据稳定 no_fetch_realm 降级；未配置 linuxdoCdpHost 仍 LINUXDO-SKIP', () => {
+  assert.ok(TPL.includes("'no_fetch_realm'"), '稳定 no_fetch_realm 降级原因在场')
+  assert.ok(TPL.includes('degraded: true, linuxdoFailed: true, linuxdoReason: \'no_fetch_realm\''), 'degraded + linuxdoFailed + linuxdoReason="no_fetch_realm" 行在场')
+  // 未配置 linuxdoCdpHost 仍保持 LINUXDO-SKIP（degraded:false 不降级）
+  assert.ok(TPL.includes('LINUXDO-SKIP no_cdp_host'), 'no_cdp_host → LINUXDO-SKIP 保留')
+  assert.ok(TPL.includes('degraded: false, linuxdoSkipped: true'), '未配置 host → degraded:false 不降级')
+  // cdp 组仍不进 inner parallel 普通代理集（普通代理仍 batch.filter(g => !g.cdp)）
+  assert.ok(TPL.includes('batch.filter(g => !g.cdp)'), 'cdp 组仍被 filter 出普通代理集，避免双 push + 裸 feed')
 })

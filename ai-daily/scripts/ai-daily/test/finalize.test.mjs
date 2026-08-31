@@ -8,7 +8,11 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { extractPayloads, finalizePayloads } from '../finalize.mjs'
+import { spawnSync } from 'node:child_process'
+import { extractPayloads, finalizePayloads, expand } from '../finalize.mjs'
+import { fileURLToPath } from 'node:url'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-daily-finalize-'))
 
@@ -78,4 +82,51 @@ test('finalizePayloads：目录自动创建 + 幂等重跑（重跑覆写同路�
   const again = finalizePayloads({ ...sample(), outDir: nested })
   assert.equal(again.length, 4)
   for (const fp of again) assert.ok(fs.existsSync(fp), `${fp} 重跑可覆盖`)
+})
+
+test('expand：`~`/`~/...` 展开为用户 home，普通路径原样（8/25 修复）', () => {
+  const home = os.homedir()
+  assert.equal(expand('~'), home)
+  assert.equal(expand('~/Library'), path.join(home, 'Library'))
+  assert.equal(expand(`${home}/x`), `${home}/x`)
+  assert.equal(expand('relative/path'), 'relative/path')
+  assert.equal(expand(null), null)
+})
+
+test('extractPayloads：outDir 含 `~` 前缀自动展开（不再写坏 `~` 字面目录）', () => {
+  // 展开下沉到 finalizePayloads（写入边界）后，extractPayloads 保留原样路径（不展开）。
+  const spec = extractPayloads({ ...sample(), outDir: '~/ai-daily-tilde-test' })
+  assert.equal(spec.outDir, '~/ai-daily-tilde-test', 'extract 不再展开（展开在写边界）')
+})
+
+test('finalizePayloads：`~` outDir 直接调用也展开（import/CLI 直达入口都防写坏字面目录）', () => {
+  const written = finalizePayloads({ ...sample(), outDir: '~/ai-daily-tilde-test' })
+  assert.equal(written.length, 4)
+  for (const fp of written) {
+    assert.ok(fp.startsWith(os.homedir()), `写到 home 下：${fp}`)
+    assert.ok(!fp.startsWith('~/'), `不含字面 ~/：${fp}`)
+    assert.ok(fs.existsSync(fp), `${fp} 已写`)
+  }
+  fs.rmSync(path.join(os.homedir(), 'ai-daily-tilde-test'), { recursive: true, force: true })
+})
+
+// 8/26：CLI --out 覆盖分支此前绕过 expand（finalize.mjs 径写 `~/foo` 字面目录）。此端到端测试以真实
+// spawn node 进程跑 CLI + `--out "~/..."`，断言不创建字面 `~/` 目录、产物写到 home 展开路径。
+test('CLI：--out "~/..." 展开为 home，不创建字面 ~ 目录（端到端）', () => {
+  const proj = path.join(HERE, '..') // scripts/ai-daily
+  const resultJson = path.join(tmpDir, 'cli-result.json')
+  fs.writeFileSync(resultJson, JSON.stringify(sample()))
+  const home = os.homedir()
+  const target = 'ai-daily-cli-tilde-test'
+  const before = fs.existsSync(path.join(home, target)) ? fs.readdirSync(path.join(home, target)) : null
+  const res = spawnSync(process.execPath, [path.join(proj, 'finalize.mjs'), resultJson, '--out', `~/${target}`], { encoding: 'utf8' })
+  assert.equal(res.status, 0, `CLI 退出码 0；stderr=${res.stderr}`)
+  const literal = path.resolve(proj, '~/ai-daily-cli-tilde-test')
+  assert.ok(!fs.existsSync(literal), '未创建字面 ~ 目录')
+  const homeDir = path.join(home, target)
+  assert.ok(fs.existsSync(homeDir), 'home 下目录已建')
+  const files = fs.readdirSync(homeDir)
+  assert.equal(files.length, 4, 'home 下写 4 产物')
+  fs.rmSync(homeDir, { recursive: true, force: true })
+  if (before) fs.writeFileSync(path.join(home, target, '.keep'), '')
 })

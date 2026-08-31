@@ -54,7 +54,9 @@ export const fetchPrompt = (src, ctx) =>
   '## Source Extractor\n\n窗口：' + ctx.WINDOW_LABEL + '。抓取并提取该来源的可证伪声明：\n' +
   '**URL:** ' + src.url + '\n**Title:** ' + src.title + '\n**Found via:** ' + src.board + ' / ' + src.found_via + '\n\n' +
   '## Task\n' +
-  '1. 用 WebFetch 抓取页面。\n2. 判定来源质量：primary(官方/一手) / secondary(主流媒体报道) / blog / forum / unreliable。\n' +
+  '1. 用 WebFetch 抓取页面。\n' +
+  '⚠️ **禁止截图/图片输入**：本模型仅支持文本输入。禁止使用 Playwright 截图、禁止用图片方式读页面——使用 WebFetch 文本抓取。传入图片/screenshot 会直接导致 400 模型报错（Model only supports text input）。\n' +
+  '2. 判定来源质量：primary(官方/一手) / secondary(主流媒体报道) / blog / forum / unreliable。\n' +
   '3. 提取 2-3 条与本板块日报问题相关、可核实、具体的声明（非空泛结论）；每条必须带原文引语 quote（**逐字抄录支撑该声明的完整原句，≤220 字，且必须包含声明中的全部具体细节——日期/数字/机构名/对比结论**，只截 40 字短句会导致核查票无据可依而误否决）、重要性 central/supporting/tangential。\n' +
   '4. 注明页面/事件日期 publishDate（YYYY-MM-DD 或 MM-DD）；无日期则空。\n' +
   '5. 页面较长时只精读与日报相关且日期在窗口内的部分，其余快速略读；抓取失败/付费墙/无关页面 → 返回 claims:[] 且 sourceQuality:"unreliable"。\n\nStructured output only.'
@@ -75,7 +77,8 @@ export const reportPrompt = ctx =>
   (ctx.unverifiedCount ? "\n## 未验证声明（核查代理故障，只能进“待核实”小节）\n" + ctx.unverifiedList : "") +
   ctx.missBlock +
   "\n## 覆盖自检\n" + ctx.coverBlock + "\n\n## 编辑要求\n" +
-  "0. **禁止调用任何工具**（禁 WebFetch、WebSearch、Read、curl 及一切工具调用）——只做纯推理合成；一旦发起工具调用即视为失败。\n\n" +
+  "0. **禁止调用任何工具**（禁 WebFetch、WebSearch、Read、curl 及一切工具调用）——只做纯推理合成；一旦发起工具调用即视为失败。\n" +
+  "**✅ 收口纪律（最终唯一出口）**：本代理的最终动作**只能是调用 StructuredOutput 工具**返回结构化对象 { sections, oneLiner, execSummary, caveats, openQuestions }。思考过程中即使已得出全部结论、或素材为空（无已确认声明、仅少量未核查/超窗项），**最后一步也是调用 StructuredOutput 工具，而不是 end_turn 输出文字总结**。任何「我在思考里已经理清，现在用文字说明」的 end_turn 都算失败——主流程判定为 null，整篇日报降级为退化快讯。素材再少也要调用工具——哪怕返回 oneLiner 一句话 + sections 空数组 + execSummary 一句话，也必须通过 StructuredOutput 工具返回。\n\n" +
   "1. **先筛选，再写稿**：通读全部素材，选出今天**真正值得报道的 2-3 条头条**。头条优先序：**新模型发布 > 模型能力重大突破 > 技术里程碑 > 开源重磅发布 > 研究突破 > 监管/官宣**。**融资/并购/收费/估值/商业动态永远不进头条**，只进对应板块正文。其余素材按板块归类，不重要的（小更新/营销话术/旧闻重复）**直接 discard 不进正文**。宁缺毋滥。\n\n" +
   "2. **oneLiner（今日一句话）**：用一句话概括今天 AI 行业**技术层面**最重要的事——新模型、新能力、新突破，不是商业新闻。如果今天没有技术头条，才退而求其次选战略/产品新闻。\n\n" +
   "3. **execSummary（执行摘要）**：3-5 句，按技术重要性排序，写成一个连贯段落（不是分点列项）。每句对应一条重要新闻，写清楚谁做了什么+结果。\n\n" +

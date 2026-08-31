@@ -19,13 +19,17 @@ test('模板：linuxdo 组在 DISCOVER_GROUPS 保留，无 cdp host 时 LINUXDO-
 })
 
 test('模板：linuxdo 成功/失败两条路径都铺（OK 日志 + 配额塞 posts / FAIL 日志 + degraded 行）', () => {
-  assert.ok(TPL.includes("log('LINUXDO-OK ' + ld.topics + ' topics"), '成功日志 LINUXDO-OK n topics')
-  assert.ok(TPL.includes('fetchLinuxDoNews34({ cdpHost: LINUXDO_CDP_HOST })'), '调用签名带 cdpHost')
-  assert.ok(TPL.includes("log('LINUXDO-FAIL ' + (ld.reason || 'unknown')"), '失败日志 LINUXDO-FAIL reason')
+  assert.ok(TPL.includes("log('LINUXDO-OK prefetched ' + LDP.topics + ' topics"), '成功日志 LINUXDO-OK n topics')
+  // 8/27 Task 2：模板编排层不再调裸 fetchLinuxDoNews34（prefetch 前移到宿主 node——linuxdo-prefetch.mjs，
+  // run-daily.sh 注入 linuxdoPrefetched JSON）。这里断言消费分支 + prefetched 数据来源。
+  assert.ok(TPL.includes('LINUXDO_PREFETCHED'), '模板消费 linuxdoPrefetched（预抓隔离）')
+  assert.ok(TPL.includes("prefetched ' + LDP.topics"), '成功日志为 prefetched 数据')
+  assert.ok(TPL.includes("log('LINUXDO-FAIL "), '失败日志 LINUXDO-FAIL reason 前缀')
+  assert.ok(TPL.includes("'no_fetch_realm'"), 'realm 内无预抓数据 → no_fetch_realm 稳定原因')
   assert.ok(TPL.includes('degraded: true, linuxdoFailed: true, linuxdoReason'), '失败行为 degraded:true + linuxdoFailed')
   assert.ok(TPL.includes('linuxdoMaxSources'), '配额参数在模板可见')
   assert.ok(TPL.includes('.slice(0, LINUXDO_MAX_SOURCES)'), '按 linuxdoMaxSources 配额轮换')
-  assert.ok(TPL.includes("found_via: 'linuxdo-cdp'"), 'posts 转 URL 候选标 linuxdo-cdp')
+  assert.ok(TPL.includes("found_via: 'linuxdo-cdp'"), 'POST 转 URL 候选标 linuxdo-cdp')
 })
 
 test('模板：linuxdo_degraded 独立降级旗标 + meta 补 linuxdo_posts/linuxdo_open_posts', () => {
@@ -74,4 +78,138 @@ test('模板 C1 侧：cluster 词法名不与 render-md 顶层冲突（clusterTo
   // 不得再导出裸名 tokenize / 声明裸名 top-level STOP_TOKENS（与 render-md 顶层撞名）
   assert.ok(!/export const tokenize =/.test(CLUSTER), 'cluster.mjs 不再导出裸名 tokenize')
   assert.ok(!/^const STOP_TOKENS =/.test(CLUSTER), 'cluster.mjs 不再声明裸名 top-level STOP_TOKENS')
+})
+
+// ─── 8/27 Task 1：静态候选排序 + Fetch 预算书账（stageFetchRan 一次性状态）───
+
+test('模板：preferStaticFirst 位于 allocation 后、Fetch 分批前', () => {
+  // preferStaticFirst 必须作用于 allocateFetchBudget 的结果（fetchTargets），且在任何分装（分批）之前。
+  const idxAlloc = TPL.indexOf('allocateFetchBudget(boardURLMap, MAX_FETCH)')
+  const idxPref = TPL.indexOf('preferStaticFirst(fetchTargets)')
+  const idxFirstBatch = TPL.indexOf('FETCH_FIRST_BATCH')
+  const idxSlice = TPL.indexOf('fetchTargets.slice(0, FETCH_FIRST_BATCH)')
+  assert.ok(idxAlloc >= 0 && idxPref >= 0 && idxFirstBatch >= 0 && idxSlice >= 0, '四处在场')
+  assert.ok(idxPref > idxAlloc, 'preferStaticFirst 在 allocation 之后')
+  assert.ok(idxFirstBatch > idxPref && idxSlice > idxPref, '分批组装在 preferStaticFirst 之后（排序后按 staticCount 扩首批）')
+})
+
+test('模板：allocateFetchBudget 走 8/27 prefer 通道（linuxdo-cdp/static-fallback 默认优先）', () => {
+  // 调用点不带 opts → 走 dedup.mjs 默认 preferFoundVia=['linuxdo-cdp','static-fallback']；
+  // prefer 阶段在轮询前优先取 linuxdo/静态候选（预算紧张时不把预兑内容挤到 budgetDropped）。
+  assert.ok(TPL.includes('allocateFetchBudget(boardURLMap, MAX_FETCH)'), '调用点走默认 prefer 通道')
+  assert.ok(TPL.includes("found_via: 'linuxdo-cdp'"), 'linuxdo-cdp 标记保持（prefer 依赖该标记识别）')
+  // 模板对 prefer 通道书账：Dedup 日志带 linuxdo-cdp 进配额计数（可观测预抓内容真实入流水线）
+  assert.match(TPL, /linuxdo-cdp 进配额/, 'Dedup 日志含 linuxdo-cdp 进配额计数')
+})
+
+test('模板：首批大小 max(FETCH_BATCH, staticCount)，后续按 FETCH_BATCH 分批', () => {
+  // Fetch 分批不再用单一 chunkArr——首批取 max(FETCH_BATCH, staticCount)（装下全部静态项），
+  // 后续批固定 FETCH_BATCH（静态项只入首批，余批保持既有并发上限）。
+  assert.match(TPL, /const FETCH_FIRST_BATCH\s*=\s*Math\.max\(FETCH_BATCH,\s*staticCount\)/, '首批大小 = max(FETCH_BATCH, staticCount)')
+  assert.match(TPL, /const fetchBatches\s*=\s*\[\]/, 'fetchBatches 容器在场')
+  assert.match(TPL, /for \(let i\s*=\s*FETCH_FIRST_BATCH;\s*i\s*<\s*fetchTargets\.length;\s*i\s*\+=\s*FETCH_BATCH\)/, '后续批次按 FETCH_BATCH 步进')
+  assert.ok(!/chunkArr\(fetchTargets,\s*FETCH_BATCH\)/.test(TPL), 'Fetch 分批不再固定 chunkArr(fetchTargets, FETCH_BATCH)')
+})
+
+test('模板：stageFetchRan 一次性 + 后续批次 roomTo 纯读停止，不再把 Fetch 写 skip', () => {
+  assert.match(TPL, /let stageFetchRan = false/, 'stageFetchRan 一次性状态在场')
+  assert.match(TPL, /stageFetchRan = true/, '首批正常启动前置位（await 之前）')
+  assert.match(TPL, /if \(stageFetchRan\)/, 'stageFetchRan 分支在循环内')
+  assert.match(TPL, /budgetGate\.roomTo\('Fetch'\)\s*===\s*0/, '后续批次用纯读 roomTo === 0 停止')
+  assert.match(TPL, /if \(stageFetchRan\)\s*\{[\s\S]*?if \(budgetGate\.roomTo\('Fetch'\)\s*===\s*0\)\s*\{/, '纯读分支在 stageFetchRan 下的代码块内')
+  // 8/26 既有语义保留：救护首批标记与余批 break
+  assert.match(TPL, /let salvaged = false/, 'salvaged 标记在场')
+  assert.match(TPL, /if \(salvaged\) break/, '救护后余批顶部 break')
+})
+
+test('模板：首批正常启动调 budgetGate(Fetch) 并前置 stageFetchRan；首批越线只走 FETCH-SALVAGE 不记账', () => {
+  assert.match(TPL, /const gate = budgetGate\('Fetch'\)/, '非救护路径仍调用控 gate')
+  assert.match(TPL, /stageFetchRan = true\s*\/\/ 首批正常启动/, '正常启动：await 前置 stageFetchRan')
+  assert.match(TPL, /FETCH-SALVAGE/, '救护日志在场')
+})
+
+test('模板：静态注入不进 discoverRows.urls → urls_discovered 账本不变', () => {
+  // 静态兜底只进 boardURLMap（fetch 配额前注入），不得追加到 discoverRows.urls —— 后者驱动
+  // urls_discovered（meta/stats 记账）。账本不变指 discoverRows.urls 不含 static-fallback。
+  const discoveryRowsLoops = TPL.match(/discoverRows\.reduce\(\(n, d\) => n \+ d\.urls\.length/g)
+  assert.ok(discoveryRowsLoops.length >= 2, 'urls_discovered 统计在场（stats + meta）')
+  // 注入点：static-fallback 的 boardURLMap push/unshift 不 touch discoverRows
+  assert.doesNotMatch(TPL, /discoverRows\.push\([\s\S]*static-fallback/, 'discoverRows.push 不得带 static-fallback')
+  assert.doesNotMatch(TPL, /discoverRows\.urls\.concat[\s\S]*static-fallback/, 'discoverRows.urls 不得追加静态项')
+  assert.doesNotMatch(TPL, /discoverRows\.urls\.push\([\s\S]*static-fallback/, 'discoverRows.urls 不得 push 静态项')
+})
+
+// ─── 8/27 Task 2：dropped 明细可审计（fetch_budget_dropped 只能给总数；dropped_detail 逐类归因）───
+
+test('模板：meta 包含 dropped_detail 逐类明细（linuxdo_cdp/static_fallback/other 三分类记账）', () => {
+  // fetch_budget_dropped 只给总数不够归因；dropped_detail 给出"丢的到底是谁"的逐类账。
+  assert.match(TPL, /dropped_detail:/, 'meta 包含 dropped_detail')
+  assert.match(TPL, /linuxdo_cdp:/, 'dropped_detail 含 linuxdo_cdp 分类（预抓的帖被预算丢）')
+  assert.match(TPL, /static_fallback:/, 'dropped_detail 含 static_fallback 分类（静态兜底被丢）')
+  assert.match(TPL, /other:/, 'dropped_detail 含 other 分类（普通 discover 候选被丢）')
+  // 三分类来自同一处 budgetDropped 统计（不凭空捏造），且有 len 守恒（other = 总 - 前两类）
+  assert.match(TPL, /const linuxdoDropped = budgetDropped\.filter/, 'linuxdoDropped 从 budgetDropped 派生')
+  assert.match(TPL, /const staticDropped = budgetDropped\.filter/, 'staticDropped 从 budgetDropped 派生')
+  assert.match(TPL, /otherDropped = budgetDropped\.length - linuxdoDropped - staticDropped/, 'other 分类 = 总数 - 前两类（守恒）')
+})
+
+test('模板：dropped_detail 与 Dedup 日志同源（linuxdo-cdp 进配额计数复用同一账本）', () => {
+  // 日志与 meta 都必须来自同一份 budgetDropped 派生账——避免"日志说进了、meta 却说丢了"的漂移。
+  const dedupLogIdx = TPL.indexOf('linuxdo-cdp 进配额')
+  const droppedDetailIdx = TPL.indexOf('dropped_detail')
+  assert.ok(dedupLogIdx >= 0 && droppedDetailIdx >= 0, 'Dedup 日志与 dropped_detail 都在场')
+  // dropped_detail 计算段出现在 Dedup 日志附近（同一账本派生点，不晚于 meta 组装）
+  const linuxdoDroppedIdx = TPL.indexOf('const linuxdoDropped = budgetDropped.filter')
+  assert.ok(linuxdoDroppedIdx >= 0, 'linuxdoDropped 派生在场')
+})
+
+// ─── 8/28 Verify SALVAGE 账本修复（镜像 Fetch stageFetchRan 一次性状态）───
+
+test('模板：Verify 死线已过且 0 批已跑 → SALVAGE 救护首批（镜像 Fetch FETCH-SALVAGE 模式）', () => {
+  // 8/28 修复：救护路径前置判定（roomTo 纯读），避免 budgetGate('Verify') 在救护前记账 →
+  // claims_verified>0 同时 budget_skipped:Verify 的语义矛盾。
+  assert.match(TPL, /VERIFY-SALVAGE/, 'VERIFY-SALVAGE 救护日志在场')
+  assert.match(TPL, /let stageVerifyRan = false/, 'stageVerifyRan 一次性状态在场')
+  assert.match(TPL, /const salvage = !stageVerifyRan && voted\.length === 0 && rankedClaims\.length > 0 && budgetGate\.roomTo\('Verify'\) === 0/, '救护条件：0 批已跑 + 有待核查 claim + roomTo 纯读')
+  assert.match(TPL, /rankedClaims\.slice\(0, salvageCount\)/, '救护首批取前 salvageCount 条最高优先级 claim')
+  assert.match(TPL, /salvageCount\s*=\s*Math\.min\(VERIFY_BATCH,\s*rankedClaims\.length\)/, 'salvageCount = min(VERIFY_BATCH, rankedClaims.length)')
+  // 救护后 break（不继续下一批），与 FETCH-SALVAGE 行为一致
+  const vsIdx = TPL.indexOf('VERIFY-SALVAGE')
+  const afterSalvage = TPL.slice(vsIdx, vsIdx + 400)
+  assert.match(afterSalvage, /break/, 'SALVAGE 后 break（不续批）')
+})
+
+test('模板：后续批次 stageVerifyRan 纯读停止——不记 budget_skipped:Verify', () => {
+  // 8/28 关键语义：已跑首批 → if (stageVerifyRan) 分支 → roomTo 纯读 === 0 直接 break，
+  // 绝不调用 budgetGate('Verify')（该调用会在账本里记 budget_skipped）。
+  assert.match(TPL, /if \(stageVerifyRan\)/, 'stageVerifyRan 分支在 for 循环内')
+  assert.match(TPL, /if \(stageVerifyRan\)[\s\S]*?if \(budgetGate\.roomTo\('Verify'\)\s*===\s*0\)[\s\S]*?break/, '后续批次：纯读 roomTo 停止不记 skip')
+  assert.match(TPL, /BUDGET-BREAK Verify 余批跳过（已跑首批，roomTo=0 纯读停止，不记 budget_skipped:Verify）/, '后续批次纯读停止日志')
+})
+
+test('模板：首批正常启动调 budgetGate(Verify) 并前置 stageVerifyRan；首批越线只走 SALVAGE 不记账', () => {
+  assert.match(TPL, /const gate = budgetGate\('Verify'\)/, '非救护路径仍调用控 gate')
+  assert.match(TPL, /stageVerifyRan = true\s/, '首批正常启动：await 前置 stageVerifyRan')
+  assert.match(TPL, /BUDGET-BREAK Verify 余批跳过，用已完成批次结果/, '正常启动首批超线日志保留')
+})
+
+test('模板：report safeAgent tries——只要有提取内容（allClaims>0）就 2 次尝试', () => {
+  // 8/30 收紧：8/29 实证 9 条已确认内容因 report 单次未成功而全量降级 raw；只要当日有内容就给
+  // tries=2（一次 end_turn/抖动不判死整份 report）。只有全空（allClaims 0，纯空板）才单次 fast-fail。
+  assert.match(TPL, /const reportTries = allClaims\.length === 0 \? 1 : 2/, '有 claim→tries=2，全空才 1 次')
+  assert.match(TPL, /}, reportTries\)/, 'safeAgent 第三个参数（tries）走 reportTries')
+  assert.ok(TPL.indexOf('allClaims.length === 0 ? 1 : 2') >= 0, '全空才单次尝试')
+  assert.ok(TPL.indexOf('confirmedVerify.length > 0') < 0, '不再以 confirmedVerify 判 tries（改以 allClaims 判）')
+})
+
+test('模板：探针只观察不否决——report 由总墙钟唯一守门（8/30 探针 advisory）', () => {
+  // 8/29 降级根因：探针单发 20s 失败把 synthAllowed 打成 false，report 从未被调用，
+  // 9 条已确认内容全量降 raw archive。修复后探针仅留日志，返回不再写进 synthAllowed。
+  assert.match(TPL, /const synthAllowed = RUN_ELAPSED\(\) <= TOTAL_LIMIT_MS/, 'synthAllowed 只由总墙钟决定')
+  assert.match(TPL, /if \(synthAllowed\) await probeGateway\('report'\)/, '探针 advisory：仅记录不参与否决')
+  // 旧 bug 形态：`const synthAllowed = RUN_ELAPSED() <= TOTAL_LIMIT_MS ? await probeGateway('report') : false`
+  // （同一行内短路探针）。修复后探针从决策表达式移出 → 断言不再出现该三元表达式。
+  assert.ok(!/const synthAllowed = RUN_ELAPSED\(\) <= TOTAL_LIMIT_MS \?/.test(TPL), 'synthAllowed 不再由探针短路（同行的旧三形态需消失）')
+  assert.ok(TPL.indexOf('const synthAllowed = RUN_ELAPSED() <= TOTAL_LIMIT_MS\nif (synthAllowed) await probeGateway') >= 0, 'report 由总墙钟唯一守门，探针仅独立记录')
+  assert.match(TPL, /if \(!synthAllowed\) log\('SYNTH-SKIP/, '只有总墙钟超限才 SYNTH-SKIP')
 })

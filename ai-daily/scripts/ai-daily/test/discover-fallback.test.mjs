@@ -159,3 +159,43 @@ test('buildFallback: 跳过 failed digest 与窗口外 entry', () => {
   assert.equal(fallbackByUrl[0].url, 'https://36kr.com/in')
   assert.ok(recoveredBoards.has('funding') && !recoveredBoards.has('safety'), '只 funding 被救回（safety digest failed）')
 })
+
+// ─── 8/24 run 崩溃兜底：非可迭代/非数组 inputs 绝不打穿整轮日报（fail-open，返回空兜底）───
+// 实测 2026-08-24 run：buildFallback 入口在 "Spread ... requires iterable[Symbol.iterator] to be a function"
+// 处硬崩，整个日报 workflow failed、0 产物落盘。根因是入口对部分畸形/非可迭代 inputs 直接 spread。
+// 修复：fallback.mjs 防御归一（srcUrls/boards 必须真数组、feed.boards 必须可迭代才 spread、entries 必须数组），
+// 命中即跳过该项/整组，返回空兜底而非抛错。本测试固化「任何畸形输入都 fail-open、绝不 throw」契约。
+test('buildFallback: 非可迭代 feed.boards / 非数组 srcUrls / 非数组 entries 一律 fail-open 不抛错（8/24 崩溃兜底）', () => {
+  const cases = [
+    // ① feed.boards 是普通对象（非可迭代）→ 该项跳过，不 spread 崩溃
+    { name: 'feed.boards=plain object', digest: new Map([[normURL('https://a.example/'), {
+      feed: { url: 'https://a.example/', label: 'A', boards: { 0: 'safety', length: 1 } }, // 类数组但非可迭代
+      entries: [{ url: 'https://a.example/1', title: 'a', date: '2026-08-19' }], failed: false,
+    }]]), groups: [{ key: 'media-cn', boards: ['safety'], srcUrls: ['https://a.example/'] }], expect: 0 },
+    // ② srcUrls 是字符串（非数组 .map）→ 归一成 []，无贡献且不崩
+    { name: 'srcUrls=string', digest: new Map(), groups: [{ key: 'media-cn', boards: ['safety'], srcUrls: 'https://a.example/' }], expect: 0 },
+    // ③ h.entries 是字符串（非数组）→ for...of 源归一成 []，不崩
+    { name: 'h.entries=string', digest: new Map([[normURL('https://a.example/'), {
+      feed: { url: 'https://a.example/', boards: new Set(['safety']) }, entries: 'not-an-array', failed: false,
+    }]]), groups: [{ key: 'media-cn', boards: ['safety'], srcUrls: ['https://a.example/'] }], expect: 0 },
+    // ④ g 为 null / 非对象 → 整组 continue
+    { name: 'g=null', digest: new Map(), groups: [null], expect: 0 },
+    // ⑤ digestByKey 非 Map → 返回空兜底
+    { name: 'digestByKey=plain object', digest: {}, groups: [{ key: 'media-cn', boards: ['safety'], srcUrls: ['https://a.example/'] }], expect: 0 },
+  ]
+  for (const c of cases) {
+    const claimWindow = () => 'in'
+    let threw = false
+    let out = null
+    try { out = buildFallback(c.digest, c.groups, claimWindow, normURL) } catch (e) { threw = true; console.error('THREW on', c.name, e.message) }
+    assert.equal(threw, false, c.name + ' 不应抛错（fail-open）')
+    assert.ok(out, c.name + ' 应返回对象')
+    assert.equal(out.fallbackByUrl.length, c.expect, c.name + ' 兜底条数')
+  }
+  // 正常路径（数组 srcUrls + Set feed.boards + 数组 entries）仍如常产出，防过度防御
+  const okDigest = new Map([[normURL('https://b.example/'), {
+    feed: { url: 'https://b.example/', boards: new Set(['safety']) }, entries: [{ url: 'https://b.example/2', title: 'b', date: '2026-08-19' }], failed: false,
+  }]])
+  const ok = buildFallback(okDigest, [{ key: 'media-cn', boards: ['safety'], srcUrls: ['https://b.example/'] }], () => 'in', normURL)
+  assert.equal(ok.fallbackByUrl.length, 1, '正常输入不得被防御误伤（1 entry → 1 条）')
+})

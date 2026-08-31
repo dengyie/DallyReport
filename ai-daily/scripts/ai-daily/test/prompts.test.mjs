@@ -58,7 +58,21 @@ test('reportPrompt §3.2：同事件数字口径不一 → 直接并陈、不各
   assert.match(PROMPTS, /4\.25GW\/\$150-200B\/\$600B\/\$105B/, '口径示例在场')
 })
 
-// ─── 2026-08-23 task-1：report 标题按 status 分轨（未核查 title 必须带不确定性措辞）───
+// ─── 2026-08-27 修复：report 收口纪律 + fetch 禁止截图───
+
+test('reportPrompt：StructuredOutput 收口约束在场（8/27 修复 report_failed 终版）', () => {
+  assert.match(PROMPTS, /收口纪律（最终唯一出口）/, '收口纪律段落标题在场')
+  assert.match(PROMPTS, /调用 StructuredOutput 工具/, '强制调 StructuredOutput 工具')
+  assert.match(PROMPTS, /素材再少也要调用工具/, '空素材不能 end_turn 纯文本返回')
+  assert.match(PROMPTS, /哪怕返回 oneLiner 一句话/, '空内容兜底调用示例')
+})
+
+test('fetchPrompt：禁止截图/图片输入（8/27 修复 linuxdo fetch 400）', () => {
+  assert.match(PROMPTS, /禁止截图\/图片输入/, 'fetchPrompt 含禁止截图规则')
+  assert.match(PROMPTS, /禁止使用 Playwright 截图/, '明确禁止 Playwright 截图')
+  assert.match(PROMPTS, /Model only supports text input/, '引述模型限制（text-only）')
+  assert.match(PROMPTS, /WebFetch 文本抓取/, '唯一推荐方式为 WebFetch 文本抓取')
+})
 
 const reportCtx = {
   WINDOW_LABEL: '2026-08-23',

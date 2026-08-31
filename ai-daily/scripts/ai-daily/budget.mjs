@@ -23,5 +23,9 @@ export const makeBudgetGate = (deadlines, elapsedFn, onSkip) => {
     return { ok, roomMs: Math.max(0, dl - e) }
   }
   budgetGate.skipped = skipped  // 暴露记账数组供 degraded 标记读取（对应现行 budgetSkipped）
+  // 8/26 修复（Discover 慢代理不得拖垮 Fetch）：纯读「距某累计死线的剩余」，无副作用——
+  // 不写 skipped、不调 onSkip。供批边界决策（如 Discover 起跑前查是否应压住新批保住 Fetch 时段），
+  // 而不像 budgetGate('Fetch') 那样在阶段未真正越线时误记 budget_skipped。
+  budgetGate.roomTo = stage => Math.max(0, deadlines[stage] - elapsedFn())
   return budgetGate
 }

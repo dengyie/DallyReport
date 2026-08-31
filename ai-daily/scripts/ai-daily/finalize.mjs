@@ -7,13 +7,23 @@
 //
 // 用法：
 //   node scripts/ai-daily/finalize.mjs <result-path> [--out <dir>]
-//   - <result-path>：workflow 返回体（task result / 自定义 JSON，含顶层 { result:{ payloads } } 或直接 { payloads }）
+//   - <result-path>：workflow 返回的（task 返回 / 自定义 JSON，含顶层 { result:{ payloads } } 或直接 { payloads }）
 //   - --out <dir>：覆盖 outDir（默认取 result.outDir 或 result.result.outDir）
 // 行为：逐字节写 4 文件到 outDir/**，缺任一字段即报错非 0 退出；写成功打印每个文件字节数。
+// 8/25：outDir 支持 `~` 展开（Skill 示例曾用 `~`，finalize 不展开会写坏路径）。
 //
-// CLI（本人直接可用），也可作为函数 import 进 node:test / 编排器复用（finalizePayloads）。
+// CLI（本人直接可用），也可作为函数 import 进 node:test / 编排器复现（finalizePayloads）。
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
+
+/** 展开任意 `~` 前缀为用户 home（`~/...` → `${os.homedir()}/...`）。只处理开头为 `~/` 的。 */
+export const expand = p => {
+  if (typeof p !== 'string' || !p) return p
+  if (p === '~') return os.homedir()
+  if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2))
+  return p
+}
 
 /**
  * 从 workflow result 规范化出 payloads 与 outDir。
@@ -24,7 +34,7 @@ import path from 'node:path'
 export const extractPayloads = obj => {
   const r = (obj && typeof obj === 'object' && obj.result && typeof obj.result === 'object') ? obj.result : obj
   const outDir = (r && r.outDir) || (obj && obj.outDir)
-  if (!outDir || typeof outDir !== 'string') throw new Error('finalize: missing result.outDir (absolute path required)')
+  if (!outDir || typeof outDir !== 'string') throw new Error('finalize: missing result.outDir (absolute or ~-prefixed path required)')
   const p = r && r.payloads
   if (!p || typeof p !== 'object') throw new Error('finalize: missing payloads object')
   const need = ['claims', 'sources', 'meta', 'md']
@@ -46,6 +56,8 @@ const ensure = {
  * @returns {string[]} 已写文件绝对路径列表
  */
 export const finalizePayloads = ({ payloads, outDir, date }) => {
+  // 8/25: 展开放在写入边界——一条入口同时覆盖 workflow outDir、CLI --out、import 直达（避免 `~/` 写坏字面目录）。
+  outDir = expand(outDir)
   ensure.dir(outDir)
   const written = []
   const write = (name, content) => {

@@ -49,13 +49,17 @@ export const OFFICIAL_FEEDS = [
   { url: 'https://ai.meta.com/blog/', label: 'Meta AI Blog' },
 ]
 
-// 种子"重大超窗事实"（行业里程碑级公认事件，即使不在窗口也应出现在正文，标注 [窗口外·重大]）：
+// 种子“重大超窗事实”（行业里程碑级公认事件，即使不在窗口也应出现在正文，标注 [窗口外·重大]）：
 // 发现代理通过 majorOutOfWindow 字段上报更多此类事实。
+// 种子 url 全量强制（2026-09-01 P5）：每项必须带官方一手页可溯源；纯媒体口径不收录。
+// Astra 为媒体口径预告 + 已超 21d 门禁，2026-09-01 退役。
+// 命名约束（P5 实测锁定）：DeepSeek 系新名必须用连字符（DeepSeek-V4-Flash-Vision-Exp）——
+// 空格形式会命中既有 deepseek-v4 指纹 key 被 makeAddMajor 静默去重（dedup.mjs majorKey 实测 09-01）。
 export const KNOWN_MAJOR_OUT = [
-  // 种子 url 字段可选（2026-08-22 B.1）：有官方一手页可溯源才加；纯媒体口径预告无官方页不加（降级 C 兜底标 [行业公认·无单一链接]）。
-  // Astra 是媒体口径预告、无 OpenAI 官方一手页 → 不加 url；DeepSeek V4-Pro 官方 news 页可溯源 → 加 url。
-  { name: 'OpenAI 预告 Astra 旗舰模型（解决 10 个长期开放数学难题）', date: '2026-08-02', note: 'OpenAI 公开预告下一个旗舰模型 Astra，宣称已解决 10 个长期开放数学难题，具体发布日期待官方确认（来源：多家媒体 2026-08-02，日期为预告日）。' },
   { name: 'DeepSeek V4-Pro 正式版上线（Agent 能力增强）', date: '2026-08-13', note: 'DeepSeek 官方 news 页登记 DeepSeek-V4-Pro 正式版上线 2026/08/13，App/网页/API 全面开放，强化 Agent 能力并引入分时段峰值定价；网易 08-16 报道印证 2026-08-17 价格生效（双源）。', url: 'https://api-docs.deepseek.com/news/' },
+  { name: 'DeepSeek-V4-Flash-Vision-Exp 多模态实验模型上线', date: '2026-08-21', note: 'DeepSeek 官方 news 页 2026/08/21 登记 V4-Flash-Vision-Exp 多模态实验模型：文本侧对齐 V4-Flash（Agent/推理/代码），多模态 Agent 基准较主流模型跃升、逼近前沿旗舰；图片 token 化 ≤384 且按 V4-Flash 定价计费；同日 API 支持 Chat/Messages/Responses，Files API 与 DeepSeek Harness 0.1.1 同步支持。（官方一手页溯源）', url: 'https://api-docs.deepseek.com/news/news260821' },
+  { name: 'Anthropic 发布 Model Hardware Standard 研究预览（Agent 操纵物理设备）', date: '2026-08-27', note: 'Anthropic 官方 news 页 2026/08/27 发布 Model Hardware Standard 研究预览：为 Agent 安全并行操作显微仪器/液态处理器/机械臂定义共享规范；Anthropic 与 HHMI Janelia 合作、集成耗时从周/月压缩到小时级，研究发布。（官方一手页溯源）', url: 'https://www.anthropic.com/news/model-hardware-standard-research-preview' },
+  { name: 'Anthropic 扩大科学家支持（1 万免费席位 + 5× 高级计划）', date: '2026-08-27', note: 'Anthropic 官方 news 页 2026/08/27 公布科学家支持扩展：科研界 1 万免费 Claude 席位 + 5× 额度高级计划（$15/月）、AI for Science 从生物学扩展出更广学科。（官方一手页溯源）', url: 'https://www.anthropic.com/news/expanding-support-for-scientists' },
 ]
 
 // labs 花名册跨板块校正别名表：发现代理可能过报 no_news，已确认声明/来源标题命中别名即翻转 has_dynamic。
@@ -144,3 +148,23 @@ export const computeBoardStates = (rows, boardKeys, recoveredKeys) => {
 // normURL 在 date-utils.mjs；boards.mjs 的 GROUPS_RAW.test 闭包需要它，这里前向声明由 build.mjs 整时保证顺序。
 // 直接 import 供 node 环境用；build.mjs inline 时剥掉 import 行（workflow 内 normURL 已在上文定义）。
 import { normURL } from './date-utils.mjs'
+
+// 静态兜底源（2026-08-26 新增）：discover 全失败 + harvest-fallback 仍空 → 注入精选一级/官方新闻页
+// URL（板块首页/官方 news 索引，常驻可抓）。found_via 标 'static-fallback'。仅代理面通道挂掉时兜底。
+// 约定：URL 常驻可靠更新、无登录墙、非 SEO/内容农场；索引页允许（fetch 后按窗口过滤）。
+export const STATIC_FALLBACK_SOURCES = [
+  { board: 'labs',       url: 'https://www.anthropic.com/news',  title: 'Anthropic 官方 News' },
+  { board: 'labs',       url: 'https://openai.com/news/',     title: 'OpenAI News' },
+  { board: 'labs',       url: 'https://x.ai/news',           title: 'xAI News' },
+  { board: 'labs',       url: 'https://blogs.nvidia.com/blog/', title: 'NVIDIA Blog' },
+  { board: 'labs',       url: 'https://research.google/blog/', title: 'Google Research Blog' },
+  { board: 'opensource', url: 'https://huggingface.co/blog', title: 'Hugging Face Blog' },
+  { board: 'opensource', url: 'https://github.com/trending?since=daily', title: 'GitHub Trending' },
+  { board: 'academic',   url: 'https://export.arxiv.org/api/query?search_query=cat:cs.AI&sortBy=submittedDate&sortOrder=descending&start=0&max_results=20', title: 'arXiv cs.AI 最新' },
+  { board: 'strategy',   url: 'https://techcrunch.com/category/artificial-intelligence/', title: 'TechCrunch AI' },
+  { board: 'products',   url: 'https://www.theverge.com/ai-artificial-intelligence/', title: 'The Verge AI' },
+  { board: 'funding',    url: 'https://techcrunch.com/category/artificial-intelligence/', title: 'TechCrunch AI（融资）' },
+  { board: 'policy',     url: 'https://www.qbitai.com/', title: '量子位（政策）' },
+  { board: 'safety',     url: 'https://www.qbitai.com/', title: '量子位（安全）' },
+  { board: 'people',     url: 'https://www.qbitai.com/', title: '量子位（人才）' },
+]

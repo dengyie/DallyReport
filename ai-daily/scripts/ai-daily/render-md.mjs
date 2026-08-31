@@ -268,11 +268,18 @@ export const renderDegradedMarkdown = ({ date, window, confirmed, refuted, cover
     // no_dynamic）会被误判成空行跳过——「已核查这些公司、当日均无动态」的覆盖自检信息（无动态 备注列）
     // 静默丢失（amnesia 类）。枚举补 'no_dynamic' → 该行保留渲染。真正空行仍是
     // 「0 claims 且无 urls 且无任何公司三态信息」（无 companiesChecked 或全空态）。
-    if ((b.claims || 0) === 0 && !(b.urls || 0) && !(b.companiesChecked || []).some(c => ['has_dynamic', 'no_news', 'unreached', 'no_dynamic'].includes(c.state))) continue
-    const note = b.board === 'labs'
-      ? (noNewsCompanies && noNewsCompanies.length ? '无动态：' + noNewsCompanies.join('、') : (b.degraded ? 'degraded' : ''))
-      : (b.degraded ? 'degraded' : '')
-    L.push('| ' + b.board + ' | ' + b.title + ' | ' + b.claims + ' | ' + note + ' |')
+    // 8/31 P3 修复①：`degraded` 板即使 0 claims / 0 urls / 无公司三态也**保留行**。此前它们被
+    // 当空行跳过——8/31 生产 run 里 opensource/academic/funding/policy/safety/people 六个 degraded
+    // 的 0/0 板整行消失，10 板矩阵只剩 4 行，读者无法区分「查过·当日无新闻」与「压根没查到」。
+    // 通道失败本身就是必须上报的覆盖事实，不是「无内容」。
+    if (!b.degraded && (b.claims || 0) === 0 && !(b.urls || 0) && !(b.companiesChecked || []).some(c => ['has_dynamic', 'no_news', 'unreached', 'no_dynamic'].includes(c.state))) continue
+    // 8/31 P3 修复②：degraded 与「无动态花名册」**并存渲染**（`degraded · 无动态：…`）。此前 labs 的
+    // 三元在 noNewsCompanies 非空时直接替换掉 degraded 标记 → md 写「无动态：OpenAI、Google DeepMind…」
+    // 而 meta 里 labs degraded=True、根本没有通道真正查过 OpenAI = 假确信（把「没查到」印成「查过无事」）。
+    const notes = []
+    if (b.degraded) notes.push('degraded')
+    if (b.board === 'labs' && noNewsCompanies && noNewsCompanies.length) notes.push('无动态：' + noNewsCompanies.join('、'))
+    L.push('| ' + b.board + ' | ' + b.title + ' | ' + b.claims + ' | ' + notes.join(' · ') + ' |')
   }
   L.push('')
   if (citeMap.list.length) {

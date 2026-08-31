@@ -30,8 +30,13 @@ const REFUTATIONS_REQUIRED = 2
 // MAX_FETCH 48→20、MAX_VERIFY 48→24、每板候选 URL 12→6；fetch 预算改为板间轮询公平分配（见下），保证晚序板块不被挤掉。
 // 8/15 第九项优化（结构降本，见设计文档 changelog）：MAX_FETCH 20→12、MAX_VERIFY 24→12；
 // harvest 14 并发→5 分组串行批；discover 9→5 分组；核查 3 票→双票快查+分歧升补；昂贵代理失败不再换新重跑（tries 按阶段）。
-const MAX_FETCH = typeof args.maxFetch === 'number' && args.maxFetch > 0 ? args.maxFetch : 12
-const MAX_VERIFY = typeof args.maxVerify === 'number' && args.maxVerify > 0 ? args.maxVerify : 12
+// 8/31 修正（8/30 生产实证）：45 发现只抓 12 → _MAX_FETCH/MAX_VERIFY 默认 12→16。
+// 8/30 标本：urls_discovered 45、urls_fetched 12、fetch_budget_dropped 33（linuxdo_cdp 17 + other 15 + static 1），
+// 10 板轮询公平分配下每个板最多 1 名，还剩 ~8 板第二轮名额被挤掉——覆盖率被配额掐头去尾。
+// 16 属预算可容的上限（fetch 480s/verify 300s 仍按批间归软目标；真超时限走既有 BUDGET-BREAK/roomTo 兜底），
+// 让更多板真的进一批候选而非整板 0 抓取。
+const MAX_FETCH = typeof args.maxFetch === 'number' && args.maxFetch > 0 ? args.maxFetch : 16
+const MAX_VERIFY = typeof args.maxVerify === 'number' && args.maxVerify > 0 ? args.maxVerify : 16
 const MAX_URLS_PER_BOARD = 6
 // 单代理最大存活时长。deepseek 网关偶发"发了工具结果后模型再无回复"的静默卡死：
 // 没有此上限时一个卡死代理会永久挡住整个 parallel/pipeline 闸门（实测 >10min 无产出）。
@@ -48,7 +53,8 @@ const TOTAL_LIMIT_MS = typeof args.totalLimitMs === 'number' && args.totalLimitM
 // 依据见 HARVEST_BUDGET_MS 前的注释——discover 换 Tavily 兜底提速，harvest 保留 442-800s 慢但有效的 crops）；
 // 分配序：Harvest/Discover 留足慢但有效的包络，Verify 牺牲序最低。
 // 8/17 全量实测（Harvest 5.2 / Discover 9.2 / Fetch 7.3 / Verify 9.1min）证明 30min 盘子装不下 50 代理健康包络（合计 30.8min）：
-// 修复后健康跑尾部 Verify 被逐波重算硬停（尾部核查票如实降 unverified），墙钟由 Verify 死线缓冲严格钉在 ≤ TOTAL_LIMIT_MS。
+// 修复后健康跑尾部 Verify 被逐波重算硬停（尾部核查票如实降 unverified）；墙钟为软目标——批末 360s 在飞票与
+// report 重试（≤2×600s，仅真死网关时）可越过 TOTAL_LIMIT_MS，尾部由 synthAllowed 门禁 + render-md 降级兜底。
 // 8/19 第十五项优化：Harvest/Discover 预算对调（480→540 / 540→480），零净盘子 30min 不变。
 // 依据：8/18 重跑实测 harvest:crops 442-800s 在 480s 死线上被砍（opensource 38min 后超时、cn-media/en-media crops），
 // 而 8/17 全量实测 harvest 健康包络 5.2min。Discover 因 8/19 的 --extra 4 改用 Tavily 快速兜底（~2-5s/查询，
@@ -72,6 +78,18 @@ const GROK_DIR = '/Users/mango/.claude/skills/grok-search'
 // linuxdoMaxSources 配额默认 24（帖子轮换进组返回行）。
 const LINUXDO_CDP_HOST = typeof args.linuxdoCdpHost === 'string' && args.linuxdoCdpHost ? args.linuxdoCdpHost : null
 const LINUXDO_MAX_SOURCES = typeof args.linuxdoMaxSources === 'number' && args.linuxdoMaxSources > 0 ? args.linuxdoMaxSources : 24
+// 8/27 Task 2：linux.do 预抓隔离——CDP 抓取从 Workflow realm 前移到宿主 Node（linuxdo-prefetch.mjs，
+// run-daily.sh 在调 Workflow 前预抓并把成功 JSON 注入 args.linuxdoPrefetched）。这里严格校验其成功形状：
+// ok===true 且 posts 是含 非空 url/title 的数组，才视为有效可消费；否则视同「无有效预抓数据」。
+// realm 内不再调用裸 fetchLinuxDoNews34（workflow realm 无 fetch/WebSocket 全局），无有效数据即走 no_fetch_realm 降级。
+const LINUXDO_PREFETCHED = (() => {
+  const raw = args.linuxdoPrefetched
+  if (!raw || typeof raw !== 'object') return null
+  if (raw.ok !== true || !Array.isArray(raw.posts)) return null
+  const posts = (raw.posts || []).filter(x => x && typeof x.url === 'string' && x.url && typeof x.title === 'string' && x.title)
+  if (!posts.length) return null
+  return { ok: true, host: raw.host || '', topics: Number(raw.topics) || posts.length, posts }
+})()
 
 if (!DATE || !OUT) {
   return { error: 'Args must include date (YYYY-MM-DD) and outDir (absolute path). window optional. got: ' + JSON.stringify(args) }
@@ -168,13 +186,18 @@ const daysBetween = (seedDayNum, reportDayNum) => {
 
 // age gate：种子距 report 超 maxAgeDays，或日期不可解析（normalizeDate→null）→ 剔除。
 // fail-open：reportDateNum == null（未知）返回原数组，不因 gate 清空 major-out 节。
+// 8/24 修复：区分「日期不可解析」与「超期」两种 retire 原因——retireReasons 数组供调用方分别日志。
 const filterSeedsByAge = (seeds, reportDayNum, maxAgeDays) => {
-  if (reportDayNum == null) return seeds
-  return seeds.filter(s => {
+  if (reportDayNum == null) return { kept: seeds, retired: [] }
+  const kept = [], retired = []
+  for (const s of seeds) {
     const day = normalizeDate(s.date)
-    if (day == null) return false            // 无日期 → 超期剔除（调用方 SEED-AGE 日志可见）
-    return daysBetween(day, reportDayNum) <= maxAgeDays
-  })
+    if (day == null) { retired.push({ seed: s, reason: 'unparseable', raw: s.date }); continue }
+    const age = daysBetween(day, reportDayNum)
+    if (age > maxAgeDays) { retired.push({ seed: s, reason: 'expired', age, max: maxAgeDays }); continue }
+    kept.push(s)
+  }
+  return { kept, retired }
 }
 
 const chunkArr = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out }
@@ -258,7 +281,7 @@ const REPORT_SCHEMA = {
 // ─── inline: boards ───
 // ai-daily 花名册与静态配置 — 与 workflow 内逐字节一致。真源；加厂商/改种子只改此文件。
 
-// ─── Deterministic coverage: 9 boards × roster ───
+// ─── Deterministic coverage: 10 boards × roster ───
 const BOARDS = [
   { key: 'labs', title: '头部实验室·新模型', focus: '旗舰实验室本周新模型、新版本、重大模型能力发布（必须逐家核）', degradeNotes: 'X/Grok、OpenAI 等官方 X 通道优先；WebSearch 不可用时以官方渠道覆盖为主。',
     companies: [
@@ -307,13 +330,17 @@ const OFFICIAL_FEEDS = [
   { url: 'https://ai.meta.com/blog/', label: 'Meta AI Blog' },
 ]
 
-// 种子"重大超窗事实"（行业里程碑级公认事件，即使不在窗口也应出现在正文，标注 [窗口外·重大]）：
+// 种子“重大超窗事实”（行业里程碑级公认事件，即使不在窗口也应出现在正文，标注 [窗口外·重大]）：
 // 发现代理通过 majorOutOfWindow 字段上报更多此类事实。
+// 种子 url 全量强制（2026-09-01 P5）：每项必须带官方一手页可溯源；纯媒体口径不收录。
+// Astra 为媒体口径预告 + 已超 21d 门禁，2026-09-01 退役。
+// 命名约束（P5 实测锁定）：DeepSeek 系新名必须用连字符（DeepSeek-V4-Flash-Vision-Exp）——
+// 空格形式会命中既有 deepseek-v4 指纹 key 被 makeAddMajor 静默去重（dedup.mjs majorKey 实测 09-01）。
 const KNOWN_MAJOR_OUT = [
-  // 种子 url 字段可选（2026-08-22 B.1）：有官方一手页可溯源才加；纯媒体口径预告无官方页不加（降级 C 兜底标 [行业公认·无单一链接]）。
-  // Astra 是媒体口径预告、无 OpenAI 官方一手页 → 不加 url；DeepSeek V4-Pro 官方 news 页可溯源 → 加 url。
-  { name: 'OpenAI 预告 Astra 旗舰模型（解决 10 个长期开放数学难题）', date: '2026-08-02', note: 'OpenAI 公开预告下一个旗舰模型 Astra，宣称已解决 10 个长期开放数学难题，具体发布日期待官方确认（来源：多家媒体 2026-08-02，日期为预告日）。' },
   { name: 'DeepSeek V4-Pro 正式版上线（Agent 能力增强）', date: '2026-08-13', note: 'DeepSeek 官方 news 页登记 DeepSeek-V4-Pro 正式版上线 2026/08/13，App/网页/API 全面开放，强化 Agent 能力并引入分时段峰值定价；网易 08-16 报道印证 2026-08-17 价格生效（双源）。', url: 'https://api-docs.deepseek.com/news/' },
+  { name: 'DeepSeek-V4-Flash-Vision-Exp 多模态实验模型上线', date: '2026-08-21', note: 'DeepSeek 官方 news 页 2026/08/21 登记 V4-Flash-Vision-Exp 多模态实验模型：文本侧对齐 V4-Flash（Agent/推理/代码），多模态 Agent 基准较主流模型跃升、逼近前沿旗舰；图片 token 化 ≤384 且按 V4-Flash 定价计费；同日 API 支持 Chat/Messages/Responses，Files API 与 DeepSeek Harness 0.1.1 同步支持。（官方一手页溯源）', url: 'https://api-docs.deepseek.com/news/news260821' },
+  { name: 'Anthropic 发布 Model Hardware Standard 研究预览（Agent 操纵物理设备）', date: '2026-08-27', note: 'Anthropic 官方 news 页 2026/08/27 发布 Model Hardware Standard 研究预览：为 Agent 安全并行操作显微仪器/液态处理器/机械臂定义共享规范；Anthropic 与 HHMI Janelia 合作、集成耗时从周/月压缩到小时级，研究发布。（官方一手页溯源）', url: 'https://www.anthropic.com/news/model-hardware-standard-research-preview' },
+  { name: 'Anthropic 扩大科学家支持（1 万免费席位 + 5× 高级计划）', date: '2026-08-27', note: 'Anthropic 官方 news 页 2026/08/27 公布科学家支持扩展：科研界 1 万免费 Claude 席位 + 5× 额度高级计划（$15/月）、AI for Science 从生物学扩展出更广学科。（官方一手页溯源）', url: 'https://www.anthropic.com/news/expanding-support-for-scientists' },
 ]
 
 // labs 花名册跨板块校正别名表：发现代理可能过报 no_news，已确认声明/来源标题命中别名即翻转 has_dynamic。
@@ -401,6 +428,26 @@ const computeBoardStates = (rows, boardKeys, recoveredKeys) => {
 
 // normURL 在 date-utils.mjs；boards.mjs 的 GROUPS_RAW.test 闭包需要它，这里前向声明由 build.mjs 整时保证顺序。
 // 直接 import 供 node 环境用；build.mjs inline 时剥掉 import 行（workflow 内 normURL 已在上文定义）。
+
+// 静态兜底源（2026-08-26 新增）：discover 全失败 + harvest-fallback 仍空 → 注入精选一级/官方新闻页
+// URL（板块首页/官方 news 索引，常驻可抓）。found_via 标 'static-fallback'。仅代理面通道挂掉时兜底。
+// 约定：URL 常驻可靠更新、无登录墙、非 SEO/内容农场；索引页允许（fetch 后按窗口过滤）。
+const STATIC_FALLBACK_SOURCES = [
+  { board: 'labs',       url: 'https://www.anthropic.com/news',  title: 'Anthropic 官方 News' },
+  { board: 'labs',       url: 'https://openai.com/news/',     title: 'OpenAI News' },
+  { board: 'labs',       url: 'https://x.ai/news',           title: 'xAI News' },
+  { board: 'labs',       url: 'https://blogs.nvidia.com/blog/', title: 'NVIDIA Blog' },
+  { board: 'labs',       url: 'https://research.google/blog/', title: 'Google Research Blog' },
+  { board: 'opensource', url: 'https://huggingface.co/blog', title: 'Hugging Face Blog' },
+  { board: 'opensource', url: 'https://github.com/trending?since=daily', title: 'GitHub Trending' },
+  { board: 'academic',   url: 'https://export.arxiv.org/api/query?search_query=cat:cs.AI&sortBy=submittedDate&sortOrder=descending&start=0&max_results=20', title: 'arXiv cs.AI 最新' },
+  { board: 'strategy',   url: 'https://techcrunch.com/category/artificial-intelligence/', title: 'TechCrunch AI' },
+  { board: 'products',   url: 'https://www.theverge.com/ai-artificial-intelligence/', title: 'The Verge AI' },
+  { board: 'funding',    url: 'https://techcrunch.com/category/artificial-intelligence/', title: 'TechCrunch AI（融资）' },
+  { board: 'policy',     url: 'https://www.qbitai.com/', title: '量子位（政策）' },
+  { board: 'safety',     url: 'https://www.qbitai.com/', title: '量子位（安全）' },
+  { board: 'people',     url: 'https://www.qbitai.com/', title: '量子位（人才）' },
+]
 // ─── inline: dedup ───
 // ai-daily 指纹去重 + 轮询公平分配 — 三个历史 bug 在此固化（测试锁定）。
 
@@ -452,16 +499,85 @@ const makeAddMajor = majorOutClaims => (m, board) => {
   majorOutClaims.push(_mkMajor(m, board))
 }
 
-// 轮询公平分配 fetch 预算：每轮每板块至多取 1 个未抓 URL，直到 maxFetch 耗尽——保证晚序板块不被挤掉。
+// 静态候选优先：把 found_via==='static-fallback' 的项移到数组前部，组内保持原顺序；返回新数组，
+// 不修改输入数组与项对象。8/27 Fetch 预算书账：静态源（官方新闻页）在预算紧张时优先摄入，
+// 保证 discover 全失败 + harvest 兜底缺时，静态兜底 URL 仍能先进 Fetch 配额（而非被排在普通候选中
+// 挤到 budgetDropped）。只排序不增减项——不承诺恢复 budgetDropped 项，MAX_FETCH 是总上限。
+const preferStaticFirst = targets => {
+  const statics = []
+  const others = []
+  for (const t of targets) (t && t.found_via === 'static-fallback' ? statics : others).push(t)
+  return statics.concat(others)
+}
+
+// 轮询公平分配 fetch 预算：每轮每板块至多取 1 个未抓 URL，直到 maxFetch 耗尽——保证晚序板块不被压占。
 // boardURLMap: Map<boardKey, urlObj[]>（urlObj 带 url 字段；函数内补 board 字段）。
+// 8/27 Task 1：可选 prefer 通道——found_via 命中 preferFoundVia（默认 ['linuxdo-cdp','static-fallback']）
+// 的候选先于轮询占位（去重后按 cap=⌊MAX_FETCH×preferShare⌋ 封顶，单板墙量配额不能吃光整个预算），
+// 剩余 slots 仍走既有轮询公平。**默认行为与旧版逐字节一致**（无 prefer 候选时此阶段为 no-op）。
+// 用途：linux-do 预抓内容（linuxdo-cdp）与静态兜底（static-fallback）是"已投入资源、应当消费"的候选，
+// 之前与普通候选混池轮询，会被其他板块的轮询名额挤到 budgetDropped（8/26 实测 fetch_budget_dropped:45
+// 中大量是预抓的 linux.do 帖子）。prefer 通道保证它们在预算紧张时仍真实进入 Fetch/Verify。
 // 返回 { fetchTargets, dupes, budgetDropped }，与现行编排内逻辑逐字对齐。
-const allocateFetchBudget = (boardURLMap, MAX_FETCH) => {
+const allocateFetchBudget = (boardURLMap, MAX_FETCH, opts) => {
   const dupes = []
   const budgetDropped = []
   const seen = new Map()
-  let fetchSlots = MAX_FETCH
   const fetchTargets = []
+  const prefer = new Set((opts && opts.preferFoundVia) || ['linuxdo-cdp', 'static-fallback'])
+  const preferShare = (opts && typeof opts.preferShare === 'number') ? opts.preferShare : 0.5
+  // prefer 通道封顶：floor(MAX_FETCH × preferShare)，单板墙量配额不能吃光整个预算。
+  // preferShare=0 → 封顶 0 → 通道整体关闭（回退纯轮询）；默认 0.5。
+  const preferCap = MAX_FETCH <= 0 ? 0 : Math.floor(MAX_FETCH * Math.min(1, Math.max(0, preferShare)))
   const boardURLs = [...boardURLMap.entries()].map(([board, urls]) => ({ board, urls }))
+
+  // Phase 1 — prefer：吃下命中 prefer 的候选（去重、封顶到 preferCap）。preferCap=0 时本阶段整体关闭。
+  //
+  // 8/31 P2 修复：改**按通道轮询**分配，不再「板间先到先得」。
+  // 旧版按 boardURLMap 插入序逐板吃满 preferCap：template 中 linuxdo CDP 预块的 discoverResults.push
+  // 早于普通组（`batch.filter(g => !g.cdp)`）→ linuxdo 带 24 个候选排第一 → preferCap=8 全被它吃光，
+  // static-fallback 只能回轮询里挤。8/31 实证 `linuxdo-cdp 进配额 10（丢弃 14）` 而 `static_fallback:5` 全丢。
+  // 而 ROI 是**倒挂**的：静态 2 席 → 3 claims（techcrunch 1 confirmed）；linuxdo 9 席 → 3 claims
+  // （仅 1 帖有产出，另 8 席 claimCount 0、quality unreliable）→ 静态单席产出是 linuxdo 的 4.5×。
+  // MAX_FETCH 12→16 的上调把 preferCap 6→8，旧逻辑下等于又白送 linuxdo 两席。
+  //
+  // 新语义：preferCap 在**实际有候选的通道**间等分（round-robin 逐轮每通道取 1），任一通道用不满的
+  // 余量自然流给其它通道（轮询到无候选即跳过）——既给每条通道保底下限，又不浪费配额。
+  // 通道内仍按板轮询（每轮每板至多 1），保持板间公平。
+  if (preferCap > 0) {
+    // 通道 → 该通道的候选队列（按板轮询序展开：第 1 轮各板首个候选、第 2 轮各板次个……）
+    const queues = new Map()
+    for (const via of prefer) queues.set(via, [])
+    let maxLen = 0
+    for (const b of boardURLs) maxLen = Math.max(maxLen, b.urls.length)
+    for (let i = 0; i < maxLen; i++) {
+      for (const b of boardURLs) {
+        const u = b.urls[i]
+        if (!u || !prefer.has(u.found_via)) continue
+        queues.get(u.found_via).push({ u, board: b.board })
+      }
+    }
+    // 只保留真有候选的通道参与等分（否则空通道会白占份额）
+    const live = [...queues.entries()].filter(([, q]) => q.length).map(([via, q]) => ({ via, q, i: 0 }))
+    let progressedPrefer = live.length > 0
+    while (progressedPrefer && fetchTargets.length < preferCap) {
+      progressedPrefer = false
+      for (const ch of live) {
+        if (fetchTargets.length >= preferCap) break
+        // 取该通道下一个未被去重吃掉的候选（每轮每通道至多 1 席）
+        while (ch.i < ch.q.length) {
+          const { u, board } = ch.q[ch.i++]
+          const key = normURL(u.url)
+          if (seen.has(key)) continue
+          seen.set(key, true); u.board = board
+          fetchTargets.push(u); progressedPrefer = true
+          break
+        }
+      }
+    }
+  }
+
+  let fetchSlots = MAX_FETCH - fetchTargets.length
   let progressed = true
   while (progressed && fetchSlots > 0) {
     progressed = false
@@ -472,7 +588,7 @@ const allocateFetchBudget = (boardURLMap, MAX_FETCH) => {
         if (seen.has(key)) continue
         seen.set(key, true); u.board = b.board
         fetchTargets.push(u); fetchSlots--; progressed = true
-        break  // 每板块每轮至多一个名额
+        break // 每板每轮至多一个名额
       }
     }
   }
@@ -508,7 +624,107 @@ const makeBudgetGate = (deadlines, elapsedFn, onSkip) => {
     return { ok, roomMs: Math.max(0, dl - e) }
   }
   budgetGate.skipped = skipped  // 暴露记账数组供 degraded 标记读取（对应现行 budgetSkipped）
+  // 8/26 修复（Discover 慢代理不得拖垮 Fetch）：纯读「距某累计死线的剩余」，无副作用——
+  // 不写 skipped、不调 onSkip。供批边界决策（如 Discover 起跑前查是否应压住新批保住 Fetch 时段），
+  // 而不像 budgetGate('Fetch') 那样在阶段未真正越线时误记 budget_skipped。
+  budgetGate.roomTo = stage => Math.max(0, deadlines[stage] - elapsedFn())
   return budgetGate
+}
+// ─── inline: wallclock ───
+// ai-daily 墙钟标定 + 计数型断路器 — 8/31 P1 修复。
+//
+// 背景（8/31 生产 run wf_e14b2828-ff5 实证）：workflow realm 无 Date.now/performance，唯一时钟是
+// `setTimeout(_tick, 250)` 自递归累加器 `_wallMs`——它计的是**tick 发生次数 × 250ms**，不是真实
+// 经过时间。54 个代理 + 26 次 stall 把事件循环压满 → tick 被饿死 → 累加器**只会低估，永不高估**：
+//   检查点        真实经过    累计死线   低估倍率
+//   Fetch gate     6981s      1500s     ≥4.7×
+//   Verify gate   11514s      1740s     ≥6.6×
+//   synthAllowed  13604s      1800s     ≥7.6×
+// 后果：4h13m 的 run 里零 BUDGET-SKIP/BUDGET-BREAK，30min 软目标形同不存在，AGENT_TIMEOUT_MS
+// 一起失效（名义 360s 的 fetch 代理实跑 1926/1951/2914s）。
+//
+// 关键观察：**定时器本身是可信的真实时间证据**。setTimeout(ms) 不会早于 ms 真实毫秒触发；
+// 事件循环饱和只让它**晚**触发。所以当一个名义 ms 的 withDeadline 真的超时了，我们就掌握了
+// 「真实经过 ≥ ms」这一硬事实；把它与同窗口的累加器增量 d 相比，即得饥饿倍率 ms/d。
+// 这让 realm 内**可以**推出真实墙钟的下界，30min 承诺重新变得可执行（不再只能靠宿主侧看门狗）。
+
+// ── 饥饿倍率 ──
+// realMs：已被定时器证实的真实经过下界；accumDeltaMs：同一窗口内累加器的增量。
+// 累加器只会低估 → 倍率下界 = realMs / accumDeltaMs，且恒 ≥1（健康时 ≈1）。
+// accumDeltaMs ≤ 0（tick 完全饿死）时无从取比值，返回 null 交调用方忽略该次观测。
+const starvationFactor = (realMs, accumDeltaMs) => {
+  if (!(realMs > 0) || !(accumDeltaMs > 0)) return null
+  return Math.max(1, realMs / accumDeltaMs)
+}
+
+/**
+ * 标定墙钟：包住 raw 累加器，用定时器观测校正其低估。
+ * @param {() => number} rawElapsed 原始累加器读数（workflow 里 RUN_ELAPSED）
+ * @param {{maxFactor?:number}} opts maxFactor 封顶防单次异常观测把倍率放飞（默认 20）
+ * @returns {{elapsed, observe, factor, observations}}
+ *   elapsed()  校正后的经过毫秒，**单调不减**（时间绝不倒流，即便倍率回落）
+ *   observe(realMs, accumDeltaMs) 记一次标定观测（withDeadline 超时 / 周期标定器各调一次）
+ */
+const makeCalibratedElapsed = (rawElapsed, opts) => {
+  const maxFactor = (opts && typeof opts.maxFactor === 'number' && opts.maxFactor > 0) ? opts.maxFactor : 20
+  let factor = 1
+  let floor = 0
+  let observations = 0
+  const elapsed = () => {
+    const v = rawElapsed() * factor
+    // 单调闸：倍率回落（网关恢复健康）时读数不得倒退，否则已越线的阶段会「复活」。
+    if (v > floor) floor = v
+    return floor
+  }
+  return {
+    elapsed,
+    observe: (realMs, accumDeltaMs) => {
+      const f = starvationFactor(realMs, accumDeltaMs)
+      if (f === null) return factor
+      observations++
+      // 取最新观测（受 maxFactor 封顶）：饱和缓解时倍率应当能回落，
+      // 而 elapsed() 的单调闸已保证读数不倒退——两者配合既跟得上变化又不会时间倒流。
+      factor = Math.min(maxFactor, f)
+      return factor
+    },
+    get factor() { return factor },
+    get observations() { return observations },
+  }
+}
+
+/**
+ * 计数型断路器：不依赖时钟，纯靠**失败/停滞计数**决定是否放弃后续昂贵阶段。
+ * 8/31 实证 Harvest 烧 70min、Discover 再烧 129min，而此间失败信号早已密集出现——
+ * 计数信号在饱和下依然准确（与墙钟不同，它不会被事件循环饿死），是最后一道可靠闸门。
+ *
+ * @param {{consecutive?:number, total?:number}} opts 跳闸阈值
+ *   consecutive 连续失败数（默认 3）；total 累计失败数（默认 5）
+ * @returns {{record, open, reason, stats}}
+ *   record(ok, label) 记一次代理结果（ok=false 即失败/超时/null 产出）
+ *   open() 是否已跳闸；reason() 跳闸原因串（未跳闸为 null）
+ */
+const makeCircuitBreaker = opts => {
+  const maxConsecutive = (opts && opts.consecutive) || 3
+  const maxTotal = (opts && opts.total) || 5
+  let consecutive = 0
+  let failures = 0
+  let successes = 0
+  let reason = null
+  return {
+    record: (ok, label) => {
+      if (ok) { successes++; consecutive = 0 } else {
+        failures++; consecutive++
+        if (!reason) {
+          if (consecutive >= maxConsecutive) reason = 'consecutive_failures:' + consecutive + (label ? '@' + label : '')
+          else if (failures >= maxTotal) reason = 'total_failures:' + failures + (label ? '@' + label : '')
+        }
+      }
+      return !reason
+    },
+    open: () => !!reason,
+    reason: () => reason,
+    get stats() { return { failures, successes, consecutive } },
+  }
 }
 // ─── inline: fallback ───
 // ai-daily discover 兜底构造器 — 纯函数，供 template inline 与测试直调。
@@ -531,21 +747,31 @@ const makeBudgetGate = (deadlines, elapsedFn, onSkip) => {
 const buildFallback = (digestByKey, failedGroups, claimWindow, normURL) => {
   const fallbackByUrl = []
   const recoveredBoards = new Set()
-  for (const g of failedGroups) {
+  for (const g of failedGroups || []) {
     // srcUrls：合组走 g.feeds（硬编码组源），单板组从组 boards 派生订阅源（feeds+companies feed+labs 官方源）。
     // 注意：srcUrls 的来源由调用方（template）构造后传入更合适，但为保持纯函数自包含，这里接收 failedGroups
     // 已带 srcUrls 的形态——template 在调用前把 srcUrls 预算进 g（见 template inline 版本，下方兼容 g.feeds）。
-    const srcUrls = g.srcUrls || g.feeds || []
+    // 防御：把 g 归一成安全形态——srcUrls/feeds 必须真数组，boards 必须数组，缺省 `[]`——防 8/24 run 兜底入口
+    // 对非数组/非可迭代 inputs 抛 "Spread ... iterable requires [Symbol.iterator] to be a function" 打穿整轮日报。
+    if (!g || typeof g !== 'object') continue
+    const srcUrls = Array.isArray(g.srcUrls) ? g.srcUrls : Array.isArray(g.feeds) ? g.feeds : []
+    const gBoards = Array.isArray(g.boards) ? g.boards : []
+    if (!srcUrls.length || !gBoards.length) continue
     for (const su of [...new Set(srcUrls.map(normURL))]) {
-      const h = digestByKey.get(su)
+      const h = digestByKey instanceof Map ? digestByKey.get(su) : null
       if (!h || h.failed) continue
       // feed.boards 是该 feed 被订阅的全部板（feedMap 记录）；与失败组 boards 求交 = 真正归属板。
-      const feedBoards = (h.feed && h.feed.boards) ? [...h.feed.boards].filter(b => g.boards.includes(b)) : []
+      // 防御：boards 可能是 Set 或数组；非可迭代值（null/数字/对象）视为空，绝不 spread——命中即整组跳过，不打穿整轮日报。
+      const rawBoards = h.feed && h.feed.boards
+      let feedBoards = []
+      if (rawBoards && typeof rawBoards[Symbol.iterator] === 'function') {
+        feedBoards = [...rawBoards].filter(b => g.boards.includes(b))
+      }
       // 空交集说明该 feed 不属于当前失败组的任何板（冒烟子集：feed 订阅板被 BOARDS_SELECTED 过滤掉）。
       // 跳过该 entry 更诚实，不制造错误归属（首板被灌满、真实板 0 claim）。
       if (!feedBoards.length) continue
-      for (const e of (h.entries || [])) {
-        if (!(e && e.url && claimWindow({ date: e.date }) !== 'out')) continue
+      for (const e of (Array.isArray(h.entries) ? h.entries : [])) {
+        if (!(e && e.url && typeof e.url === 'string' && claimWindow({ date: e.date }) !== 'out')) continue
         for (const b of feedBoards) {
           fallbackByUrl.push({ url: e.url, title: e.title || e.url, date: e.date, board: b, found_via: 'harvest-fallback' })
           recoveredBoards.add(b)
@@ -557,7 +783,12 @@ const buildFallback = (digestByKey, failedGroups, claimWindow, normURL) => {
 }
 // ─── inline: prompts ───
 // ai-daily prompt 模板 — 与 workflow 内逐字节一致；闭包依赖收敛为 ctx 显式注入。
-// ctx = { WINDOW_LABEL, WFROM, WTO, DATE, GROK_DIR, MAX_URLS_PER_BOARD, WEB_BUDGET_TOTAL, WEB_BUDGET_PER, feedMaxChars }
+// ctx 字段（按消费方分组）：
+//   常量:    WINDOW_LABEL, WFROM, WTO, DATE, GROK_DIR, MAX_URLS_PER_BOARD, WEB_BUDGET_TOTAL, WEB_BUDGET_PER, feedMaxChars
+//   discover: BOARDS, digestForBoard, digestForFeeds
+//   verify:   VOTES_PER_CLAIM, REFUTATIONS_REQUIRED
+//   report:   reportBody, coverBlock, missBlock, confirmedVerifyCount, killedCount, majorOutCount,
+//             unverifiedCount, unverifiedList, refutedList
 // build.mjs inline 后在 workflow 顶部构造同名常量 ctx 传入。
 
 const harvestPrompt = (g, ctx) =>
@@ -607,7 +838,9 @@ const fetchPrompt = (src, ctx) =>
   '## Source Extractor\n\n窗口：' + ctx.WINDOW_LABEL + '。抓取并提取该来源的可证伪声明：\n' +
   '**URL:** ' + src.url + '\n**Title:** ' + src.title + '\n**Found via:** ' + src.board + ' / ' + src.found_via + '\n\n' +
   '## Task\n' +
-  '1. 用 WebFetch 抓取页面。\n2. 判定来源质量：primary(官方/一手) / secondary(主流媒体报道) / blog / forum / unreliable。\n' +
+  '1. 用 WebFetch 抓取页面。\n' +
+  '⚠️ **禁止截图/图片输入**：本模型仅支持文本输入。禁止使用 Playwright 截图、禁止用图片方式读页面——使用 WebFetch 文本抓取。传入图片/screenshot 会直接导致 400 模型报错（Model only supports text input）。\n' +
+  '2. 判定来源质量：primary(官方/一手) / secondary(主流媒体报道) / blog / forum / unreliable。\n' +
   '3. 提取 2-3 条与本板块日报问题相关、可核实、具体的声明（非空泛结论）；每条必须带原文引语 quote（**逐字抄录支撑该声明的完整原句，≤220 字，且必须包含声明中的全部具体细节——日期/数字/机构名/对比结论**，只截 40 字短句会导致核查票无据可依而误否决）、重要性 central/supporting/tangential。\n' +
   '4. 注明页面/事件日期 publishDate（YYYY-MM-DD 或 MM-DD）；无日期则空。\n' +
   '5. 页面较长时只精读与日报相关且日期在窗口内的部分，其余快速略读；抓取失败/付费墙/无关页面 → 返回 claims:[] 且 sourceQuality:"unreliable"。\n\nStructured output only.'
@@ -628,7 +861,8 @@ const reportPrompt = ctx =>
   (ctx.unverifiedCount ? "\n## 未验证声明（核查代理故障，只能进“待核实”小节）\n" + ctx.unverifiedList : "") +
   ctx.missBlock +
   "\n## 覆盖自检\n" + ctx.coverBlock + "\n\n## 编辑要求\n" +
-  "0. **禁止调用任何工具**（禁 WebFetch、WebSearch、Read、curl 及一切工具调用）——只做纯推理合成；一旦发起工具调用即视为失败。\n\n" +
+  "0. **禁止调用任何工具**（禁 WebFetch、WebSearch、Read、curl 及一切工具调用）——只做纯推理合成；一旦发起工具调用即视为失败。\n" +
+  "**✅ 收口纪律（最终唯一出口）**：本代理的最终动作**只能是调用 StructuredOutput 工具**返回结构化对象 { sections, oneLiner, execSummary, caveats, openQuestions }。思考过程中即使已得出全部结论、或素材为空（无已确认声明、仅少量未核查/超窗项），**最后一步也是调用 StructuredOutput 工具，而不是 end_turn 输出文字总结**。任何「我在思考里已经理清，现在用文字说明」的 end_turn 都算失败——主流程判定为 null，整篇日报降级为退化快讯。素材再少也要调用工具——哪怕返回 oneLiner 一句话 + sections 空数组 + execSummary 一句话，也必须通过 StructuredOutput 工具返回。\n\n" +
   "1. **先筛选，再写稿**：通读全部素材，选出今天**真正值得报道的 2-3 条头条**。头条优先序：**新模型发布 > 模型能力重大突破 > 技术里程碑 > 开源重磅发布 > 研究突破 > 监管/官宣**。**融资/并购/收费/估值/商业动态永远不进头条**，只进对应板块正文。其余素材按板块归类，不重要的（小更新/营销话术/旧闻重复）**直接 discard 不进正文**。宁缺毋滥。\n\n" +
   "2. **oneLiner（今日一句话）**：用一句话概括今天 AI 行业**技术层面**最重要的事——新模型、新能力、新突破，不是商业新闻。如果今天没有技术头条，才退而求其次选战略/产品新闻。\n\n" +
   "3. **execSummary（执行摘要）**：3-5 句，按技术重要性排序，写成一个连贯段落（不是分点列项）。每句对应一条重要新闻，写清楚谁做了什么+结果。\n\n" +
@@ -864,7 +1098,9 @@ const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, wi
   ])
   const badge = x => citationBadges(x.source ? [x.source] : [], citeMap)
   const inW = (confirmed || []).filter(x => x.window === 'in')
-  const maj = (confirmed || []).filter(x => x.window === 'major-out')
+  // 8/24 修复：maj 过滤改为 `x.window !== 'in'`——此前只收 'major-out'，window 为 'out'/'unknown'
+  // 的已确认项既不进 inW 也不进 maj，静默丢失。现在非 in 的已确认项都归入窗口外节，不再消失。
+  const maj = (confirmed || []).filter(x => x.window !== 'in')
   // 修 reportError 硬编码（spec D.1）：null/空不抹成 'report agent failed'，如实描述。
   const reason = reportError ? String(reportError).replace(/\s+/g, ' ').trim() : 'report 代理未产出完整版合成结构'
   const L = []
@@ -883,7 +1119,7 @@ const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, wi
   }
   L.push('')
   if (maj.length) {
-    L.push('### 窗口外·行业里程碑（' + maj.length + ' 条，公认事实未经窗口内投票）')
+    L.push('### 窗口外·已确认（' + maj.length + ' 条，未经窗口内投票）')
     L.push('')
     for (const x of maj) {
       L.push('- ' + S(x.claim) + '（' + (x.date || '?') + '）')
@@ -916,11 +1152,18 @@ const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, wi
     // no_dynamic）会被误判成空行跳过——「已核查这些公司、当日均无动态」的覆盖自检信息（无动态 备注列）
     // 静默丢失（amnesia 类）。枚举补 'no_dynamic' → 该行保留渲染。真正空行仍是
     // 「0 claims 且无 urls 且无任何公司三态信息」（无 companiesChecked 或全空态）。
-    if ((b.claims || 0) === 0 && !(b.urls || 0) && !(b.companiesChecked || []).some(c => ['has_dynamic', 'no_news', 'unreached', 'no_dynamic'].includes(c.state))) continue
-    const note = b.board === 'labs'
-      ? (noNewsCompanies && noNewsCompanies.length ? '无动态：' + noNewsCompanies.join('、') : (b.degraded ? 'degraded' : ''))
-      : (b.degraded ? 'degraded' : '')
-    L.push('| ' + b.board + ' | ' + b.title + ' | ' + b.claims + ' | ' + note + ' |')
+    // 8/31 P3 修复①：`degraded` 板即使 0 claims / 0 urls / 无公司三态也**保留行**。此前它们被
+    // 当空行跳过——8/31 生产 run 里 opensource/academic/funding/policy/safety/people 六个 degraded
+    // 的 0/0 板整行消失，10 板矩阵只剩 4 行，读者无法区分「查过·当日无新闻」与「压根没查到」。
+    // 通道失败本身就是必须上报的覆盖事实，不是「无内容」。
+    if (!b.degraded && (b.claims || 0) === 0 && !(b.urls || 0) && !(b.companiesChecked || []).some(c => ['has_dynamic', 'no_news', 'unreached', 'no_dynamic'].includes(c.state))) continue
+    // 8/31 P3 修复②：degraded 与「无动态花名册」**并存渲染**（`degraded · 无动态：…`）。此前 labs 的
+    // 三元在 noNewsCompanies 非空时直接替换掉 degraded 标记 → md 写「无动态：OpenAI、Google DeepMind…」
+    // 而 meta 里 labs degraded=True、根本没有通道真正查过 OpenAI = 假确信（把「没查到」印成「查过无事」）。
+    const notes = []
+    if (b.degraded) notes.push('degraded')
+    if (b.board === 'labs' && noNewsCompanies && noNewsCompanies.length) notes.push('无动态：' + noNewsCompanies.join('、'))
+    L.push('| ' + b.board + ' | ' + b.title + ' | ' + b.claims + ' | ' + notes.join(' · ') + ' |')
   }
   L.push('')
   if (citeMap.list.length) {
@@ -947,7 +1190,7 @@ const clusterTokenize = s => (String(s || '').toLowerCase().match(/[a-z0-9][a-z0
 
 // 聚为 unordered 对：a 与 b 的 claim/claims 任一共享 ≥1 token 即成对。
 // keyOf/unionTokens 供 clusterClaims 内部使用：claim 优先，次 title。
-const unionTokens = (c, f) => new Set([...(c.claim ? clusterTokenize(c.claim) : []), ...(c.title ? clusterTokenize(c.title) : [])])
+const unionTokens = c => new Set([...(c.claim ? clusterTokenize(c.claim) : []), ...(c.title ? clusterTokenize(c.title) : [])])
 
 /**
  * 把共享实体 token 的声明聚成簇。
@@ -974,17 +1217,17 @@ const clusterClaims = claims => {
   return clusters
 }
 
-// 源码页的数字各自被 verify 阶段用什么字段注载——此为启发式：只在摘要文本中出现同一实体+数字差异
-// 才算真冲突；否则只是两则独立陈述。当前实现保守返回 false（由 report prompt 4.7 / 3.2 在文案层处置）。
+// 数字口径冲突由 report prompt 4.7 / 3.2 在文案层处置（聚类层不主动判定——保守设计，YAGNI）。
+// 保留 detectNumericConflict 导出供 test 锁定保守语义，但 mergeCluster 不再消费其返回值（死分支已清理）。
 const detectNumericConflict = items => false
 
 const distinctByClaim = claims => { const m = new Map(); for (const c of claims) m.set((c.claim || '').trim(), c); return [...m.values()] }
 
-const honestMergeSummary = (items, conflict) => {
-  // 取 items 摘要拼接（中文顿号分隔），冲突时 + 一句「口径不一，勿相加」。
+const honestMergeSummary = items => {
+  // 取 items 摘要拼接（中文顿号分隔）。数字口径冲突由 report prompt 4.7/3.2 文案层处置，聚类层不标注。
   const parts = items.map(c => (c.summary || c.quote || '').trim()).filter(Boolean)
   if (!parts.length) return ''
-  return parts.join('；') + (conflict ? '（该事件多源数字口径不一，引用时勿叠加相加。）' : '')
+  return parts.join('；')
 }
 
 /**
@@ -999,12 +1242,10 @@ const mergeCluster = (items, dateLabel, majorOutMap) => {
   const total = items.length
   const distinct = distinctByClaim(items)
   const key = distinct.map(c => c.claim || c.title).join('\n')   // 编排 key（信息熵契约新 claim）
-  const numMismatch = detectNumericConflict(distinct)
   const sources = [...new Set(distinct.flatMap(c => c.sources || []))]
   const vote = distinct[0] && distinct[0].status ? distinct[0].status : null
-  const summary = honestMergeSummary(distinct, numMismatch)
+  const summary = honestMergeSummary(distinct)
   const out = { ...distinct[0], claim: key, summary, sources, ...(vote ? { status: vote } : {}), mergedCount: total }
-  if (numMismatch) out.numericConflict = true
   return out
 }
 // ─── inline: linuxdo ───
@@ -1056,7 +1297,13 @@ async function readBodyText(host, url) {
       await new Promise((ok, no) => { ws.onopen = ok; ws.onerror = () => { ws.close(); no(new Error('ws open')) } })
       let n = 0; const pend = new Map()
       ws.onmessage = e => { const v = JSON.parse(e.data); if (v.id && pend.has(v.id)) { pend.get(v.id)(v); pend.delete(v.id) } }
-      const send = (method, params = {}) => new Promise(res => { const id = ++n; pend.set(id, res); ws.send(JSON.stringify({ id, method, params })) })
+      const send = (method, params = {}) => new Promise((res, rej) => {
+        const id = ++n
+        pend.set(id, res)
+        ws.send(JSON.stringify({ id, method, params }))
+        // 超时防挂起：CDP 不回匹配 id 的消息时 reject + 清理 pend（挂起会卡住 readBodyText、finally 不触发）
+        setTimeout(() => { if (pend.has(id)) { pend.delete(id); rej(new Error('cdp send timeout: ' + method)) } }, CDP_DEFAULTS.requestTimeoutMs)
+      })
       await send('Runtime.enable')
       for (let i = 0; i < Math.ceil(CDP_DEFAULTS.pollMaxMs / CDP_DEFAULTS.pollIntervalMs); i++) {
         const { result } = await send('Runtime.evaluate', { expression: 'document.body ? document.body.innerText : null', returnByValue: true })
@@ -1093,12 +1340,12 @@ async function deepFetchTopic(host, id) {
 
 /**
  * 抓取 linux.do 前沿快讯（news/34）分页，返回 posts。CDP 走 9222 登录态 Chrome。
- * @param {{date?:string, cdpHost?:string}} opts date 为可空方言（抓取本身不强依赖日期窗口，只取最新分页）
+ * @param {{cdpHost?:string}} opts cdpHost 为 127.0.0.1:9222 形式；缺省 → ok:false 不降级
  * @returns {{ok:boolean, degraded:boolean, reason:string, pages:number, topics:number, posts:Array}}
  *   posts 每项 { id, title, url, date, snippet, likeCount }
  * no_cdp_host → ok:false 不降级（调用方选择不启用，板不崩）；其余失败 → ok:false + degraded:true。
  */
-async function fetchLinuxDoNews34({ date, cdpHost }) {
+async function fetchLinuxDoNews34({ cdpHost } = {}) {
   const out = { ok: true, degraded: false, reason: '', pages: 0, topics: 0, posts: [] }
   if (!cdpHost) { out.ok = false; out.reason = 'no_cdp_host'; return out }
   try {
@@ -1128,7 +1375,7 @@ function extractTopicsFromJson(raw) {
   let obj; try { obj = JSON.parse(String(raw).trim()) } catch { return null }
   if (!obj?.topic_list?.topics?.length) return null
   return obj.topic_list.topics.map(t => ({
-    id: t.id, title: t.title, url: 'https://linux.do/t/topic/' + t.id,
+    id: t.id, title: t.title, url: 'https://linux.do/t/' + t.id,
     date: t.created_at ? t.created_at.slice(0, 10) : '', snippet: t.excerpt || '', likeCount: t.like_count || 0,
   }))
 }
@@ -1161,10 +1408,20 @@ const WIN_TO = normalizeDate(WTO || DATE)
 const claimWindow = makeClaimWindow(WIN_FROM, WIN_TO)
 
 const TRANSIENT = /(422|429|5\d\d|524|timeout|timed out|connection closed|model not found|upstream|gateway|cloudflare)/i
+// 8/31 P1：超时定时器是**真实时间的硬证据**——setTimeout(ms) 绝不早于 ms 真实毫秒触发，事件循环
+// 饱和只会让它更晚。所以每次真超时都给了「真实经过 ≥ ms」这一事实，与同窗口累加器增量相比即得
+// 饥饿倍率，喂给 WALL.observe 标定墙钟（见 wallclock.mjs）。这是 realm 内唯一能反推真实墙钟的通道。
 const withDeadline = (p, ms) => new Promise(resolve => {
   let done = false
+  const t0 = _wallMs
   const settle = v => { if (!done) { done = true; clearTimeout(to); resolve(v) } }
-  const to = setTimeout(() => { log('agent 超时 ' + Math.round(ms / 1000) + 's 无产出 → 视为失败（按阶段重试策略：harvest/disc/票不换新代理，fetch 换一次，report 单次直出）'); settle(null) }, ms)
+  const to = setTimeout(() => {
+    // 真超时：ms 真实毫秒已过，而累加器同窗口只涨了 (_wallMs - t0) → 标定饥饿倍率。
+    const f = WALL.observe(ms, _wallMs - t0)
+    log('agent 超时 ' + Math.round(ms / 1000) + 's 无产出 → 视为失败（按阶段重试策略：harvest/disc/票不换新代理，fetch 换一次，report 单次直出）'
+      + ' [墙钟标定 累加器仅计 ' + Math.round((_wallMs - t0) / 1000) + 's → 饥饿倍率 ' + (f || 1).toFixed(2) + '×]')
+    settle(null)
+  }, ms)
   p.then(v => settle(v), () => settle(null))
 })
 const safeAgent = async (p, o, tries = 2) => {
@@ -1172,31 +1429,55 @@ const safeAgent = async (p, o, tries = 2) => {
     let r = null
     try { r = await withDeadline(agent(p, o), o.timeoutMs || AGENT_TIMEOUT_MS) } catch (e) {
       const msg = String(((e && (e.message || e.error)) || e) || '')
-      if (i === tries - 1 || !TRANSIENT.test(msg)) { log('safeAgent fail ' + (o.label || '?') + ': ' + msg.slice(0, 120)); return null }
+      if (i === tries - 1 || !TRANSIENT.test(msg)) {
+        log('safeAgent fail ' + (o.label || '?') + ': ' + msg.slice(0, 120))
+        BREAKER.record(false, o.label || '?')  // 8/31 P1-①：终局失败计入断路器
+        return null
+      }
       log('safeAgent retry ' + (i + 1) + ' ' + (o.label || '?') + ': ' + msg.slice(0, 100))
       continue
     }
-    if (r) return r
+    if (r) { BREAKER.record(true, o.label || '?'); return r }
     log('safeAgent retry ' + (i + 1) + ' ' + (o.label || '?') + ' (null agent)')
   }
+  // 用尽 tries 仍无产出（含 withDeadline 超时的 null 路径）= 终局失败，计入断路器。
+  BREAKER.record(false, o.label || '?')
   return null
 }
 // 8/17 第十一项：墙钟基准用 performance.now()（Workflow realm 内 Date.now()/new Date() 会抛错）。
 // 8/17 第十四项：墙钟基准。Workflow realm 里 performance 不存在（实测 undefined）、Date.now()/new Date() 被静态拒绝（resume 确定性）。
 // 唯一可用时钟源 = setTimeout 链累加：脚本启动即开一条每 250ms 自递归的链累加 _wallMs，await 期间事件循环空闲时持续推进（实测 agent 跑 2.2s → 累加 2000ms，吻合）。
 // 精度 250ms 对分钟级墙钟预算足够；resume 时链重新起算（脚本从头跑），语义=重新计时，与本注释历史意图一致。
+// 8/31 P1 根因：上面这段标定（「实测 agent 跑 2.2s → 累加 2000ms，吻合」）**只在健康快跑成立**。
+// 累加器计的是 tick 发生次数 × 250ms；54 代理 + 26 stall + harness stall 检测把事件循环压满后
+// tick 被饿死 → 累加器只低估、永不高估（8/31 实测 Fetch gate ≥4.7×、Verify ≥6.6×、synth ≥7.6×，
+// 4h13m 的 run 零 BUDGET-SKIP）。修法见 wallclock.mjs：用超时定时器反推真实经过下界，标定倍率。
 const _TICK_MS = 250
 let _wallMs = 0
 const _tick = () => { _wallMs += _TICK_MS; setTimeout(_tick, _TICK_MS) }
 setTimeout(_tick, _TICK_MS)
 const now = () => _wallMs
 const RUN_START = now()
-const RUN_ELAPSED = () => now() - RUN_START
+const RUN_ELAPSED_RAW = () => now() - RUN_START
+// WALL 包住原始累加器：无观测时 factor=1 逐字节等价旧行为（健康跑零影响）；
+// withDeadline 每次真超时都 observe 一次，饱和下读数被放大到真实量级，闸门重新生效。
+const WALL = makeCalibratedElapsed(RUN_ELAPSED_RAW)
+const RUN_ELAPSED = () => WALL.elapsed()
+// 8/31 P1-①：计数型断路器——不依赖时钟（饱和下计数信号依然准确），连续 3 次或累计 5 次代理失败即跳闸，
+// 之后不再放行昂贵的 Discover 代理批，直连 static-fallback → Fetch。
+// 8/31 实证：Harvest 烧 70min、Discover 再烧 129min，而此间 DISCOVER-FAIL 早已密集出现。
+const BREAKER = makeCircuitBreaker({
+  consecutive: typeof args.breakerConsecutive === 'number' ? args.breakerConsecutive : 3,
+  total: typeof args.breakerTotal === 'number' ? args.breakerTotal : 5,
+})
 const probeGateway = async label => {
   const t0 = now()
   const p = await withDeadline(agent('仅回复 OK。', { label: 'probe:' + label, effort: 'low', timeoutMs: GATEWAY_PROBE_MS }), GATEWAY_PROBE_MS)
   const took = Math.round(now() - t0)
-  if (!p) { log('PROBE-FAIL ' + label + ' ' + took + 'ms 网关不可用 → 跳过合成（快速降级 raw archive）'); return false }
+  // 8/30：探针由「合成否决权」降为「只观察」——探针失败不再跳过 report（8/29 实证：
+  // 单次 20s 探针超时竟把 9 条已确认内容整体判死，report 代理其实从未被调用过）。
+  // 探针只用于记录网关饱和度；真死网关由 report 自身 600s 超时 + safeAgent 重试兜底。
+  if (!p) { log('PROBE-FAIL advisory ' + label + ' ' + took + 'ms 探针未通过（不否决合成）'); return false }
   log('PROBE-OK ' + label + ' ' + took + 'ms'); return true
 }
 // 8/17 第十四项：阶段墙钟闸门——某阶段前查 RUN_ELAPSED 是否已过该阶段累计死线；超限即记 budget_skipped + log，返回 ok:false。
@@ -1209,10 +1490,19 @@ const PHASE_DEADLINES = computePhaseDeadlines({
 // 注意：HARVEST/DISCOVER/FETCH/VERIFY_BUDGET_MS 是"该阶段允许花多久"的切片（用户可单独调），
 // 死线必须累加——若误把切片当死线，Verify 切片 5min 会在健康跑（elapsed 早已 >5min）误判超时。
 // Verify 累计死线在切片和后另减 VERIFY_INFLIGHT_BUFFER_MS：为最后一批在飞票（固定 360s）预留空间，
-// 墙钟仅为软目标——极端尾批可超 TOTAL_LIMIT_MS 约 300s，由 Synthesize 绝对闸门 + render-md 降级兜底。
+// 墙钟仅为软目标——极端尾批 / 真死网关时 report 重试（≤2×600s）可超 TOTAL_LIMIT_MS，由 synthAllowed 闸门 + render-md 降级兜底。
 const budgetGate = makeBudgetGate(PHASE_DEADLINES, RUN_ELAPSED, stage =>
   log('BUDGET-SKIP ' + stage + ' elapsed=' + Math.round(RUN_ELAPSED() / 1000) + 's ≥ 死线 ' + Math.round(PHASE_DEADLINES[stage] / 1000) + 's → 跳过该阶段快速降级'))
 const budgetSkipped = budgetGate.skipped  // degraded 标记读取（makeBudgetGate 内同 stage 只记一次）
+// 8/26 修复（Discover 慢代理不得拖垮 Fetch）：discover 批边界加"给 Fetch 保留窗口"的墙钟闸门。
+// 根因（8/24/8/25 实证）：discover 单代理 timeout 上限 30/40min，慢批把墙钟拖过 Fetch 累计死线 →
+// budgetGate('Fetch') 在阶段 START 判定整段跳过（urls_fetched=0）。no-room 硬约束禁止收紧 timeoutMs，
+// 修法只能在批边界层：discover 每批启动前用 budgetGate.roomTo('Fetch')（纯读、不记账）看距
+// Fetch 死线的剩余；余额 ≤ DISCOVER_FETCH_RESERVE_MS 就不再放行新 discover 批（BUDGET-BREAK Discover），
+// 把余下的墙钟留给 Fetch 真实抓批——即使 Fetch 只跑 1-2 批也比整段跳过（0 源 → 0 claim）强。
+// 健康包络（8/22 实测：harvest ~5-9min、discover ~9-11min、Fetch ~7min）下，健康批启动时
+// roomTo('Fetch') 常年落在 13-18min，远高于阈值 → 永不触发；只有病态慢窗（discover 吞墙钟）才触发。
+const DISCOVER_FETCH_RESERVE_MS = 480000  // 恒为 Fetch 保留整块切片时长（=FETCH_BUDGET_MS 8min）：绝不让 discover 吃光 Fetch 窗口
 
 log('Q: 生成 ' + WINDOW_LABEL + ' 窗口的 AI 日报（' + boards.length + ' 个板块）')
 
@@ -1318,6 +1608,24 @@ const discoverResults = []
 const DISCOVER_BATCH = 3
 for (const batch of chunkArr(DISCOVER_GROUPS, DISCOVER_BATCH)) {
   if (!budgetGate('Discover').ok) { log('BUDGET-BREAK Discover 余批跳过，用已完成批次结果'); break }
+  // 8/26 修复：Discover 慢代理保护 Fetch 的墙钟闸门（见 DISCOVER_FETCH_RESERVE_MS 注释）。
+  // safeAgent birth 前查「距 Fetch 累计死线剩余」；不足阈值则本批不再放行新 discover 代理，
+  // BUDGET-BREAK Discover 余批跳到 Fetch（丢弃慢批换取 Fetch 真实抓批，保住已发现 URL 摄入机会）。
+  // 仅在 roomTo('Fetch') 低时触发——健康窗远高于阈值，永不触发、不影响既有 Discover stage 各批合法跑。
+  // parallel 内的 map 若在批启动点已被 BREAK 跳过，不会再生效（break 跳出 for、round 不建），语义完整。
+  if (budgetGate.roomTo('Fetch') < DISCOVER_FETCH_RESERVE_MS) {
+    log('BUDGET-BREAK Discover 距 Fetch 死线仅 ' + Math.round(budgetGate.roomTo('Fetch') / 1000) + 's < 保留窗 ' + Math.round(DISCOVER_FETCH_RESERVE_MS / 1000) + 's → 余批跳过，时间留给 Fetch')
+    break
+  }
+  // 8/31 P1-①：计数型断路器闸门。墙钟在事件循环饱和下只低估（4.7–7.6×），上面两道墙钟闸门
+  // 因此在最需要它们的那种 run 里恰好失效——8/31 实测 Harvest 烧 70min、Discover 再烧 129min 而
+  // 零 BUDGET-BREAK。失败计数不依赖时钟，饱和下依然准确，是最后一道可靠闸门：
+  // Harvest/前批 Discover 已连续/累计失败到阈值 → 后续 Discover 代理大概率同样白烧，直接跳到
+  // static-fallback → Fetch（保住真实抓批与产出），并把跳闸原因如实写进 degraded。
+  if (BREAKER.open()) {
+    log('BREAKER-OPEN Discover 余批跳过（' + BREAKER.reason() + '，代理失败计数 ' + JSON.stringify(BREAKER.stats) + '）→ 直连 static-fallback → Fetch')
+    break
+  }
   // 8/23 第二十一项：linuxdo 组是独立发现通道（走 9222 登录态 Chrome 抓 news/34.json），非代理。
   // 在该批并行代理前同步抓取——成功 → posts 按配额塞进组返回行（board 标 linuxdo，URL 进 Fetch/Verify
   // 既有流水线）；失败 → 组返回行标 degraded（linuxdo_degraded 进降级旗标）；no_cdp_host（默认）→
@@ -1329,18 +1637,21 @@ for (const batch of chunkArr(DISCOVER_GROUPS, DISCOVER_BATCH)) {
       discoverResults.push({ group: g, boards: g.boards, urls: [], noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: false, linuxdoSkipped: true })
       continue
     }
-    const ld = await fetchLinuxDoNews34({ date: DATE, cdpHost: LINUXDO_CDP_HOST })
-    if (!ld.ok || !ld.topics) {
-      log('LINUXDO-FAIL ' + (ld.reason || 'unknown') + ' → ' + g.key + ' 降级')
-      discoverResults.push({ group: g, boards: g.boards, urls: [], noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: true, linuxdoFailed: true, linuxdoReason: ld.reason || '' })
+    // 8/27 Task 2：优先消费 run-daily.sh 注入的 linuxdoPrefetched 预抓 JSON（已按上方严格校验）。
+    // 无有效预抓数据时——不调用裸 fetchLinuxDoNews34（workflow realm 无 fetch/WebSocket，
+    // 裸 CDP 长跑不可能、裸 HTTP 必 403）——记录 no_fetch_realm 稳定原因并降级，绝不静默空板。
+    const LDP = LINUXDO_PREFETCHED
+    if (!LDP) {
+      log('LINUXDO-FAIL no_fetch_realm → ' + g.key + ' 降级（linuxdoPrefetch 无有效数据，realm 内不裸抓 CDP）')
+      discoverResults.push({ group: g, boards: g.boards, urls: [], noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: true, linuxdoFailed: true, linuxdoReason: 'no_fetch_realm' })
       continue
     }
-    log('LINUXDO-OK ' + ld.topics + ' topics → ' + g.key + ' board（配额 ' + LINUXDO_MAX_SOURCES + '）')
-    // 按 linuxdoMaxSources 配额把 posts 转成组返回行 URL 候选（latest posts 在前，配额轮换截至）。
-    const srcs = (ld.posts || []).slice(0, LINUXDO_MAX_SOURCES).map(p => ({
+    log('LINUXDO-OK prefetched ' + LDP.topics + ' topics → ' + g.key + ' board（配额 ' + LINUXDO_MAX_SOURCES + '）')
+    // 按 linuxdoMaxSources 配额把预抓 posts 转成组返回行 URL 候选（latest posts 在前，配额轮换截至）。
+    const srcs = LDP.posts.slice(0, LINUXDO_MAX_SOURCES).map(p => ({
       url: p.url, title: p.title, found_via: 'linuxdo-cdp', date: p.date || DATE, board: 'linuxdo',
     }))
-    discoverResults.push({ group: g, boards: g.boards, urls: srcs, noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: false, linuxdoTopics: ld.topics, linuxdoPosts: (ld.posts || []).length })
+    discoverResults.push({ group: g, boards: g.boards, urls: srcs, noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: false, linuxdoTopics: LDP.topics, linuxdoPosts: LDP.posts.length })
   }
   // 8/23 C2 复核修复：cdp 组已在上方预块处理并 push（CDP 抓取不进普通发现代理）；此处只跑普通组，
   // 避免 linuxdo 组被双 push（urls_discovered 翻倍、Fetch 预算空耗）且不被当普通代理喂裸
@@ -1412,15 +1723,116 @@ if (failedGroups.length) {
   }
 }
 
-const { fetchTargets, dupes, budgetDropped } = allocateFetchBudget(boardURLMap, MAX_FETCH)
-log('Dedup: ' + dupes.length + ' dupes, ' + budgetDropped.length + ' budget-dropped, fetching ' + fetchTargets.length)
+// 第二层静态兜底（8/26 新增）：discover 全组 0 候选/通道坏 或 全失败(missing) + harvest-fallback 未救回 → 注入精选一级/官方页 URL。
+// 触发收宽（8/26 生产实证 wf_f7cc4d14）：原只看「组是否全失败(null)」，漏掉 disc:labs/disc:opensource
+// 「组成功返回但 urls 空且自报 degraded」的通道坏场景 → 板仍 0/0。现两类任一即注入：
+//   (A) 全部归属组均无返回行（missing）；
+//   (B) 所有归属组返回的行 urls 均为 [] 且其中至少一个行自报 degraded。
+// 任一归属组给了 URL（delivered）则不注入（近窗/超窗都算给过候选）。
+// 注入 boardURLMap → 进 fetch 配额 → fetch/verify 仍对抗式处理。诚实书账：不注入 discoverRows.urls
+// （urls_discovered 不含）；degraded 保留（discover 代理失败如实上报）；不写 recovered（无恢复据）。
+const staticFallbackBoards = new Set()
+{
+  const staticByBoard = new Map()
+  for (const s of STATIC_FALLBACK_SOURCES) {
+    if (!staticByBoard.has(s.board)) staticByBoard.set(s.board, [])
+    staticByBoard.get(s.board).push(s)
+  }
+  // 8/26 生产实证（wf_f7cc4d14）：disc:labs/disc:opensource 组「成功返回但 0 候选 URL + 自报 degraded」
+  // → 原触发只看「组是否全失败(null)」→ 不注入 → 板仍 0/0。
+  // 现收宽为两类之一即注入：
+  //   (A) 所有归属组失败（null / 无返回行）→ 板 missing
+  //   (B) 所有归属组返回的行都 0 候选，且其中至少一行自报 degraded（通道坏但组活着）
+  // 有任一归属组给了 URL（delivered）→ 板已有候选，不注入。
+  const rowsOf = g => discoverRows.find(d => d.group.key === g.key)
+  for (const b of boards) {
+    const key = b.key
+    if (key === 'linuxdo') continue
+    const groupsOfBoard = DISCOVER_GROUPS.filter(g => g.boards.includes(key))
+    if (!groupsOfBoard.length) continue  // 无归属组（理论上不会）→ 跳过
+
+    const delivered = groupsOfBoard.some(g => {
+      const r = rowsOf(g)
+      return r && r.urls.length > 0
+    })
+    if (delivered) continue             // 板已有真实候选 URL（urls 含近窗/远窗），不注入
+    const anyReturnedWithURL = groupsOfBoard.some(g => {
+      const r = rowsOf(g)
+      if (!r) return false
+      // 8/31 修正（8/30 生产实证）：移除 8/27 的窗外信号排除门。
+      // 8/27 认为「0 URLs + degraded + 有 nearWindow/majorOutOfWindow 产物 → 窗口内确实没新闻 → 不注入」；
+      // 8/30 两板实证打脸：academic/labs 返回 degraded + 0 窗内 URL，却带窗外探索产物
+      // （Opus-4 08-28、Sonnet-4 08-26 等其实落在窗口内），该门把它们整板堵成 0 claim——
+      // 「代理返回窗外产物」≠「窗口内确无新闻」：degraded 来自通道失败，窗外产物只是检索副产品。
+      // 而静态源（官方首页/arXiv 最新）注入后 fetch/verify 仍对抗式处理，真窗内 claim 会被保留，
+      // 窗外内容也会被 dates 过滤——注入不引入错误内容，却救回本该有内容却因通道失败而 0 的板。
+      // 故 8/31 起仅凭「0 URLs + degraded」即注入，不再看窗外信号。
+      return r.urls.length === 0 && r.degraded
+    })
+    const allMissingRows = groupsOfBoard.every(g => !rowsOf(g))
+    const shouldInject = allMissingRows || anyReturnedWithURL
+    if (!shouldInject) continue
+    if (recoveredBoards.has(key)) continue  // harvest-fallback 已救回 → 不注入
+    const cands = staticByBoard.get(key) || []
+    if (!cands.length) continue
+    staticFallbackBoards.add(key)
+    const arr = boardURLMap.has(key) ? boardURLMap.get(key) : (boardURLMap.set(key, []), boardURLMap.get(key))
+    for (const s of cands) arr.unshift({ ...s, found_via: 'static-fallback', date: DATE, board: key })
+  }
+}
+if (staticFallbackBoards.size) {
+  log('STATIC-FALLBACK ' + [...staticFallbackBoards].join('+') + '：discover 全组 0 候选/通道坏 或 missing → 注入精选常驻一级/官方新闻页 URL，fetch 仍对抗式处理（degraded 保留如实上报）')
+}
+
+let { fetchTargets, dupes, budgetDropped } = allocateFetchBudget(boardURLMap, MAX_FETCH)
+// 8/27 prefer 通道：linuxdo-cdp 与 static-fallback 候选优先占位（预抓/兜底=已投入资源，真实进 Fetch），
+// 其余走轮询公平；MAX_FETCH 仍是硬上限（单板墙量配额经 preferCap=floor(MAX_FETCH×0.5) 封顶）。
+const linuxdoFetched = fetchTargets.filter(t => t.found_via === 'linuxdo-cdp').length
+const linuxdoCdpUrls = (boardURLMap.get('linuxdo') || []).filter(u => u.found_via === 'linuxdo-cdp')
+// 8/27 Task 2 书账：逐类统计被预算丢弃的候选（谁被丢、为什么），供 Dedup 日志与 meta.dropped_detail 复用。
+const linuxdoDropped = budgetDropped.filter(d => linuxdoCdpUrls.some(u => u.url === d.url)).length
+const staticUrls = [...boardURLMap.values()].flat().filter(u => u.found_via === 'static-fallback')
+const staticDropped = budgetDropped.filter(d => staticUrls.some(u => u.url === d.url)).length
+const otherDropped = budgetDropped.length - linuxdoDropped - staticDropped
+log('Dedup: ' + dupes.length + ' dupes, ' + budgetDropped.length + ' budget-dropped, fetching ' + fetchTargets.length +
+  (linuxdoFetched ? ' · linuxdo-cdp 进配额 ' + linuxdoFetched + '（丢弃 ' + linuxdoDropped + '）' : ''))
+// 8/27 静态候选排序：static-fallback 项前置——预算紧张时优先摄入静态兜底（官方内容页）。
+fetchTargets = preferStaticFirst(fetchTargets)
+// 诚实书账：staticCount 只统计已经进入 fetchTargets 的项（已在 allocation 内获配额），
+// 不统计被预算丢弃（budgetDropped）或未进入配额的候选——不虚报未获配额的静态候选。
+const staticCount = fetchTargets.filter(t => t.found_via === 'static-fallback').length
+if (staticCount > 0) log('STATIC-FALLBACK quota: ' + staticCount + ' 条静态兜底 URL 已获 fetch 配额并前置（fetchTargets 内实计）')
+// 首批大小取 max(FETCH_BATCH, staticCount)：静态项已全进 fetchTargets，要一并装进首批（不绕过 MAX_FETCH）。
+// 后续批次按 FETCH_BATCH 分批（静态项只入首批，余批保持既有并发上限）。
+// 静态注入不在 discoverRows.urls → urls_discovered 账本不变（boardURLMap 仅从 discoverRows 派生）。
+const FETCH_BATCH = 6
+const FETCH_FIRST_BATCH = Math.max(FETCH_BATCH, staticCount)
+const fetchBatches = []
+if (fetchTargets.length) fetchBatches.push(fetchTargets.slice(0, FETCH_FIRST_BATCH))
+for (let i = FETCH_FIRST_BATCH; i < fetchTargets.length; i += FETCH_BATCH) fetchBatches.push(fetchTargets.slice(i, i + FETCH_BATCH))
 
 // ─── Phase Fetch + Extract ───
 phase('Fetch')
 const extracted = []
-const FETCH_BATCH = 6
-for (const batch of chunkArr(fetchTargets, FETCH_BATCH)) {
-  if (!budgetGate('Fetch').ok) { log('BUDGET-BREAK Fetch 余批跳过，用已完成批次结果'); break }
+let stageFetchRan = false  // 8/27 一次性状态：Fetch 首批是否已正常启动（预算记账过 + 会在 await 前置位）
+let salvaged = false  // 8/26 修复：救护首批已标记——余批整批 break，不再碰 budgetGate('Fetch')，避免把已抓过批的 Fetch 误记成「整段跳过」
+for (const batch of fetchBatches) {
+  if (salvaged) break  // 救护首批已跑：余批不再处理（budgetGate('Fetch') 不再被调用 → budgetSkipped 不记 Fetch）
+  // 8/27 预算书账（stageFetchRan 一次性）：
+  //  - 首批正常启动：调 budgetGate('Fetch')（记 skipped 的 gate）判定整段跳过/放行；放行则在 await 前置 stageFetchRan=true。
+  //  - 首批越线：只允许现有救护语义（FETCH-SALVAGE），不调用记账 gate → 不把 Fetch 写进 skipped。
+  //  - 后续批次：用纯读 budgetGate.roomTo('Fetch') === 0 停止，绝不再次把 Fetch 写入 skip。
+  const salvageFirst = extracted.length === 0 && fetchTargets.length > 0 && budgetGate.roomTo('Fetch') === 0
+  if (stageFetchRan) {
+    // 后续批次：纯读停止（roomTo 无记账副作用），不再调用 budgetGate('Fetch')。
+    if (budgetGate.roomTo('Fetch') === 0) { log('BUDGET-BREAK Fetch 余批跳过（首批已跑，roomTo=0 纯读停止，不记 budget_skipped:Fetch）'); break }
+  } else if (!salvageFirst) {
+    const gate = budgetGate('Fetch')
+    if (!gate.ok) { log('BUDGET-BREAK Fetch 余批跳过，用已完成批次结果'); break }
+    stageFetchRan = true  // 首批正常启动：await 前置 one-time 状态（预算账本已钉在「已运行」）
+  } else {
+    log('FETCH-SALVAGE 已过 Fetch 死线但执行救护首批：抓前 ' + Math.min(Math.max(FETCH_BATCH, staticCount), batch.length) + ' 条 URL（保证非 0 摄入）')
+  }
   const batchRes = await parallel(batch.map(src => () =>
     safeAgent(fetchPrompt(src, ctxP), { label: 'fetch:' + hostOf(src.url), phase: 'Fetch', schema: EXTRACT_SCHEMA, effort: 'low', timeoutMs: AGENT_TIMEOUT_MS }, 2)
       .then(ext => {
@@ -1432,6 +1844,7 @@ for (const batch of chunkArr(fetchTargets, FETCH_BATCH)) {
       }).catch(e => ({ ...src, sourceQuality: 'unreliable', claims: [] }))
   ))
   extracted.push(...batchRes)
+  if (salvageFirst) salvaged = true  // 抓完救护首批后置位：下一个循环迭代整批 break 跳出
 }
 const sources = extracted.filter(Boolean)
 const allClaims = sources.flatMap(s => s.claims)
@@ -1502,11 +1915,31 @@ const voteClaim = async (c, timeoutMs) => {
 }
 const voted = []
 const VERIFY_BATCH = 6
-// 8/20 第十六项：vtimeout 取固定 AGENT_TIMEOUT_MS，与 room 无关；批间 BREAK 仍每批重算 budgetGate('Verify')
-// （下循环首行）——墙钟守护留在批次边界，不进入单代理超时。缓冲保留以为末批（固定 360s）留空间；墙钟是软目标，尾批可超 TOTAL_LIMIT_MS 约 300s，由 synthAllowed 绝对闸门兜底。
+// 8/20 第十六项：vtimeout 取固定 AGENT_TIMEOUT_MS，与 room 无关；批间 BREAK 守护留在批次边界，不进入单代理超时。
+// 缓冲保留以为末批（固定 360s）留空间；墙钟是软目标，尾批可超 TOTAL_LIMIT_MS（最坏：真死网关 report 重试 ≤2×600s），由 synthAllowed 闸门 + 降级兜底。
+// 8/28 账本修复（镜像 Fetch 的 stageFetchRan 一次性状态）：救护/后续批次不再调有副作用的 budgetGate('Verify')——
+// 只要首批正常跑过 or 救护首批跑过（voted 非空 / 有 claim 待核），就绝不把 Verify 误记成 budget_skipped:Verify。
+// 否则会再现 8/27 的「claims_verified>0 却同时上报 budget_skipped:Verify」自相矛盾。
+let stageVerifyRan = false  // 8/28 一次性状态：Verify 首批是否已正常启动（预算记账过 + 会在 await 前置位）
 for (const batch of chunkArr(rankedClaims, VERIFY_BATCH)) {
-  const gate = budgetGate('Verify')
-  if (!gate.ok) { log('BUDGET-BREAK Verify 余批跳过，用已完成批次结果'); break }
+  const salvage = !stageVerifyRan && voted.length === 0 && rankedClaims.length > 0 && budgetGate.roomTo('Verify') === 0
+  if (stageVerifyRan) {
+    // 后续批次：纯读停止（roomTo 无记账副作用），不再调用 budgetGate('Verify')。
+    if (budgetGate.roomTo('Verify') === 0) { log('BUDGET-BREAK Verify 余批跳过（已跑首批，roomTo=0 纯读停止，不记 budget_skipped:Verify）'); break }
+  } else if (salvage) {
+    // 8/27 修复：Verify 死线已过但尚未跑任何批 → 救护首批（镜像 Fetch 的 FETCH-SALVAGE）
+    // 保证非 0 核查——至少跑一批最高优先级 claim，避免整个 Verify 被跳过导致 report 缺输入。
+    const salvageCount = Math.min(VERIFY_BATCH, rankedClaims.length)
+    log('VERIFY-SALVAGE 已过 Verify 死线但执行救护首批：核查前 ' + salvageCount + ' 条最高优先级 claim（保证非 0 确认）')
+    const vtimeout = AGENT_TIMEOUT_MS
+    const salvageRes = await parallel(rankedClaims.slice(0, salvageCount).map(c => () => voteClaim(c, vtimeout)))
+    voted.push(...salvageRes.filter(Boolean))
+    break
+  } else {
+    const gate = budgetGate('Verify')
+    if (!gate.ok) { log('BUDGET-BREAK Verify 余批跳过，用已完成批次结果'); break }
+    stageVerifyRan = true  // 首批正常启动：await 前置 one-time 状态（预算账本已钉在「已运行」）
+  }
   const vtimeout = AGENT_TIMEOUT_MS
   const batchRes = await parallel(batch.map(c => () => voteClaim(c, vtimeout)))
   voted.push(...batchRes.filter(Boolean))
@@ -1542,10 +1975,21 @@ for (const d of discoverRows) for (const m of (d.majorOutOfWindow || [])) if (m 
 // 种子 KNOWN_MAJOR_OUT 作为保底（未被发现代理上报的补上）
 const REPORT_DAY = normalizeDate(DATE)
 const MAX_SEED_AGE_DAYS = 21
-const freshSeeds = filterSeedsByAge(KNOWN_MAJOR_OUT, REPORT_DAY, MAX_SEED_AGE_DAYS)
-const agedOut = KNOWN_MAJOR_OUT.length - freshSeeds.length
+const _seedResult = filterSeedsByAge(KNOWN_MAJOR_OUT, REPORT_DAY, MAX_SEED_AGE_DAYS)
+const freshSeeds = _seedResult.kept
 for (const m of freshSeeds) _addMajor(m, 'labs')
-log('SEED-AGE: 注入 ' + freshSeeds.length + ' / ' + KNOWN_MAJOR_OUT.length + ' 种子（' + agedOut + ' 超期退役，阈值 ' + MAX_SEED_AGE_DAYS + 'd）' + (REPORT_DAY == null ? ' · REPORT_DAY unknown → fail-open 全注入' : ''))
+if (REPORT_DAY == null) {
+  log('SEED-AGE: 注入 ' + freshSeeds.length + ' / ' + KNOWN_MAJOR_OUT.length + ' 种子 · REPORT_DAY unknown → fail-open 全注入')
+} else {
+  const retired = _seedResult.retired
+  const expired = retired.filter(r => r.reason === 'expired')
+  const unparseable = retired.filter(r => r.reason === 'unparseable')
+  let msg = 'SEED-AGE: 注入 ' + freshSeeds.length + ' / ' + KNOWN_MAJOR_OUT.length + ' 种子（' + retired.length + ' 退役'
+  if (expired.length) msg += '，超期 ' + expired.length + '：' + expired.map(r => r.seed.name + ' ' + r.age + 'd').join('; ')
+  if (unparseable.length) msg += '，日期不可解析 ' + unparseable.length + '：' + unparseable.map(r => r.seed.name + ' (' + JSON.stringify(r.raw) + ')').join('; ')
+  msg += '，阈值 ' + MAX_SEED_AGE_DAYS + 'd）'
+  log(msg)
+}
 confirmed.push(...majorOutClaims)
 log('majorOut: ' + majorOutClaims.length + ' industry milestones injected into confirmed')
 
@@ -1606,12 +2050,16 @@ const gatedMisses = outOfWindow.map(c => ({ name: c.claim.slice(0, 36) + (c.clai
 const windowMisses = []
 for (const m of discoveredMisses.concat(gatedMisses)) if (m && m.name && !windowMisses.some(w => w.name === m.name)) windowMisses.push(m)
 
-// ─── Phase Synthesize ───
+// ─── Synthesize（report 是一次性昂贵代理，唯一真正的软目标）───
 phase('Synthesize')
-// 8/17 第十一项：report（上下文最重、最容易撞网关挂起）前先判总墙钟 + 网关探针；
-// 超总时限或网关不可用 → 跳过合成直接降级，杜绝挂起空转拖满墙钟。
-const synthAllowed = RUN_ELAPSED() <= TOTAL_LIMIT_MS ? await probeGateway('report') : false
-if (!synthAllowed) log('SYNTH-SKIP 总墙钟超限或网关探针失败 → 归 raw archive')
+// 8/17 原意：report（上下文最重、最容易撞网关挂死）前先判总墙钟 + 探针，超限即降级防挂起。
+// 8/30 修复（2026-08-29 仍降级根因）：探针从「否决权」降为「只观察」。8/29 实测——探针（单发 20s）
+// 在高负载长会话里超时，曾把 9 条已确认内容整块降级成 raw archive，report 代理根本未被调用；
+// 探针返回 false ≠ 网关真死，不能以一票否决整份日报。修后探针只留日志；report 自身 600s 超时
+// + safeAgent 重试兜底——真死网关顶多多耗一轮也会如实沉降级路径，不再被探针一票判死。
+const synthAllowed = RUN_ELAPSED() <= TOTAL_LIMIT_MS
+if (synthAllowed) await probeGateway('report')  // advisory：探针失败仅留日志，不再跳过合成
+if (!synthAllowed) log('SYNTH-SKIP 总墙钟超限 → 归 raw archive（探针与网关抖动不再否决合成）')
 const reportBody = (confirmed.length ? confirmed.map((c, i) =>
   // 8/17 第十二项：quote 截断 140 字降 report 输入体积——合成只需要点，引语全文由核查阶段保证；大幅压单请求 payload（挂起敏感度 + token）。
   '### ' + (c.isMajorOut ? '[窗口外·重大] ' : '') + '[' + i + '] ' + c.claim + '\nVote: ' + (c.isMajorOut ? '—（未投票，多源公认行业里程碑）' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount) + ' · Source: ' + c.sourceUrl + ' (' + c.sourceQuality + ') · Date: ' + (c.publishDate || c.date || '?') + '\nQuote: "' + c.quote.slice(0, 140) + (c.quote.length > 140 ? '…' : '') + '"\n')
@@ -1630,10 +2078,16 @@ const coverBlock = coverage.map(c => '- ' + c.title + ': ' + c.claims + ' claims
 const missLines = windowMisses.map(w => '- ' + w.name + '（' + (w.date || '日期未知') + '）：' + w.note).join('\n')
 const missBlock = windowMisses.length ? '\n## 窗口外参考（次要超窗项，须单列一节如实标注，不得混入正文）\n' + missLines : ''
 
+// 8/27 修复 report_failed：confirmedVerify 全空 + tries=1 时 v4-flash 易 end_turn 无 StructuredOutput → null。
+// 改为强化 prompt 收口（看 prompts.test）：report 代理必须调 StructuredOutput 工具才成功。
+// 8/30 再次收紧：只要当日存在提取的任何 claim（能看到可写内容）就给 tries=2——一次 end_turn/网络抖动
+// 不能把整份 report 打成 raw archive（8/29 实证：9 条已确认内容因 report 未跑完而全量降级）。
+// 唯一的单次直出=当日全空（allClaims.length === 0），此时 nothing 可写，一次即可。
+const reportTries = allClaims.length === 0 ? 1 : 2
 const report = synthAllowed ? await safeAgent(reportPrompt({
   ...ctxP, confirmedVerifyCount: confirmedVerify.length, majorOutCount: majorOutClaims.length,
   reportBody: reportBodyWithCluster, killedCount: killed.length, refutedList, unverifiedCount: unverified.length, unverifiedList, missBlock, coverBlock,
-}), { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: 600000 }, 1) : null
+}), { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: 600000 }, reportTries) : null
 
 // ─── md 确定性渲染（report 成功 → 完整版；失败 → 降级版）。render-md.mjs，不再有 mdWriter 代理。───
 // report 成功 → md 必然成功（纯字符串拼接），md 产出不再受网关波动影响。
@@ -1644,10 +2098,18 @@ if (missingBoardKeys.length > 0) degradedFlags.push('discovery_degraded:missing_
 else if (discoverRows.some(d => d.degraded)) degradedFlags.push('discovery_degraded')
 if (recoveredBoards.size > 0) degradedFlags.push('discovery_recovered:' + [...recoveredBoards].join('+'))
 if (budgetSkipped.length > 0) degradedFlags.push('budget_skipped:' + budgetSkipped.join('+'))
+// 8/31 P1：断路器跳闸与墙钟饥饿都必须在产物里**可见**——8/31 那种 run 的病症（代理成批失败、
+// 事件循环饱和让墙钟低估 4.7–7.6×）在 meta/md 里完全无痕，只能靠翻 4h 的 workflow 日志才发现。
+if (BREAKER.open()) degradedFlags.push('breaker_open:' + BREAKER.reason())
+if (WALL.observations > 0 && WALL.factor > 1.5) degradedFlags.push('wallclock_starved:' + WALL.factor.toFixed(1) + 'x')
 // 8/23 第二十一项：linuxdo 组失败/降级 → linuxdo_degraded 独立降级旗标（no_cdp_host 跳过不算降级）。
 const linuxdoFailedRows = discoverRows.filter(d => d.linuxdoFailed)
 if (linuxdoFailedRows.length) degradedFlags.push('linuxdo_degraded' + (linuxdoFailedRows.some(d => d.linuxdoReason) ? ':' + linuxdoFailedRows.map(d => d.linuxdoReason).join('+').slice(0, 80) : ''))
-const reportErr = report ? null : 'report agent failed; reverting to raw archive'
+// 8/30：reportErr 区分两种退化路径——总墙钟超限（压根没尝试汇总）vs report 代理真失败（尝试过但未产出）。
+// 8/29 报告失败时 meta 的 report_error 只看到后者字样，实际是前者（探针判死/墙钟超了），
+// 排查只能靠猜；现在因果链对 meta 如实声明（SYNTH-SKIP 也记）。
+const reportErr = !synthAllowed ? 'synth skipped (wall-clock over limit); reverting to raw archive'
+  : (report ? null : 'report agent failed; reverting to raw archive')
 if (reportErr) degradedFlags.push('report_failed')
 // 归档 payload 数组（claimsJson 与降级 md 共用同一份同构数据，避免两处映射漂移）。
 const confirmedOut = confirmed.map(c => ({ claim: c.claim, quote: c.quote, source: c.sourceUrl, sourceQuality: c.sourceQuality, date: c.publishDate || c.date, window: c.isMajorOut ? 'major-out' : claimWindow(c), vote: c.isMajorOut ? '—' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, verifiedByVote: !c.isMajorOut, erroredCount: c.erroredCount || 0, confidence: (c.verdicts.filter(v => !v.refuted)[0] || {}).confidence || (c.isMajorOut ? 'high' : 'low') }))
@@ -1676,11 +2138,29 @@ const metaJson = JSON.stringify({
   claims_verified: voted.length, confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, unverified: unverified.length, out_of_window_confirmed: outOfWindow.length,
   window_misses: windowMisses,
   url_dupes: dupes.length, fetches_dropped: budgetDropped.length, verify_agent_errors: toolError,
+  // 8/27 Task 2 (dropped 明细可审计)：fetch_budget_dropped 只给总数，不够归因。
+  // dropped_detail 给出"丢的到底是谁"的逐类账：linuxdo_cdp（预抓的帖/URL 被预算丢）、
+  // static_fallback（静态兜底被丢）、其它（普通 discover 候选被丢）。
+  dropped_detail: {
+    linuxdo_cdp: linuxdoDropped,
+    static_fallback: staticDropped,
+    other: otherDropped,
+  },
   // 8/23 第二十一项：linuxdo 抓取统计——linuxdo_posts = 抓到的帖子总数，linuxdo_open_posts = 按配额
   // 进 boardURLMap 的 URL 候选数（成功时补入）；linuxdo_degraded 是独立降级旗标（见 degradedFlags）。
   linuxdo_posts: discoverRows.filter(d => d.linuxdoTopics).reduce((n, d) => n + (d.linuxdoPosts || 0), 0),
   linuxdo_open_posts: discoverRows.filter(d => d.linuxdoTopics).reduce((n, d) => n + d.urls.length, 0),
   degraded: degradedFlags, report_error: reportErr,
+  // 8/31 P1：墙钟标定与断路器的账。realm 唯一时钟是 tick 累加器，饱和下只低估——
+  // wallclock_raw_s（累加器原始读数）与 wallclock_calibrated_s（标定后下界）之差即被吞掉的时间，
+  // 配合宿主侧 run-daily.sh 的真实 epoch（P1-②）三方对账，才能判断闸门是真放行还是被骗放行。
+  wallclock: {
+    raw_s: Math.round(RUN_ELAPSED_RAW() / 1000),
+    calibrated_s: Math.round(RUN_ELAPSED() / 1000),
+    starvation_factor: Number(WALL.factor.toFixed(2)),
+    observations: WALL.observations,
+  },
+  breaker: { open: BREAKER.open(), reason: BREAKER.reason(), ...BREAKER.stats },
   // md_written 语义（8/18 重构后）：report 是否成功（1=完整版 md 进 payloads.md，0=降级版 md 仍落盘）——不再是 workflow 写盘计数。
   md_written: report ? 1 : 0, artifacts_failed: [],
   coverage: coverage, noNews_companies: noDynamicCompanies, covered_elsewhere_companies: [...matchedCompany],
