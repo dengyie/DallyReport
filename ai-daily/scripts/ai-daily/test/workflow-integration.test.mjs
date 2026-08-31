@@ -52,6 +52,16 @@ test('模板：linuxdo/cluster 已在 build MODULES 且占位符在场（成品�
   assert.ok(TPL.includes('/* @inline: linuxdo */'), 'linuxdo 占位符在场')
 })
 
+test('模板 P2：BREAKER-OPEN break 不得包住 linuxdo 三态消费（预抓通道与代理断路器解耦）', () => {
+  const skip = TPL.indexOf("log('LINUXDO-SKIP no_cdp_host")
+  const ok = TPL.indexOf("log('LINUXDO-OK prefetched")
+  const loop = TPL.indexOf("for (const batch of chunkArr(DISCOVER_GROUPS, DISCOVER_BATCH))")
+  const breakerLog = TPL.indexOf('BREAKER-OPEN Discover 余批跳过')
+  assert.ok(skip > 0 && ok > 0 && loop > 0 && breakerLog > 0, '消费点 / 批循环 / 跳闸日志都在场')
+  assert.ok(skip < loop && ok < loop, '三态消费在代理批循环之前')
+  assert.ok(breakerLog > loop, 'BREAKER-OPEN 仍在批循环内（只跳代理余批）')
+})
+
 test('模板 C2：cdp 组不进 inner parallel 的普通代理集（filter 后无 g.cdp），避免双 push + 裸 feed 403', () => {
   // inner parallel 必须 filter(!g.cdp)——否则 linuxdo 组既被预块 push 又被当普通代理再喂裸
   // linux.do/c/news/34（403）→ urls_discovered 翻倍 + Fetch 预算空耗 + 默认(nullptr)时板误标 degraded。
@@ -222,6 +232,17 @@ test('模板：SYNTHESIS_LIMIT_MS 可配，默认 600s，接到 report timeoutMs
   assert.ok(!/timeoutMs: 600000/.test(TPL), 'report 不再写死 600000 魔法数')
   // report 不再被 synthAllowed 三元短路
   assert.match(TPL, /const report = await safeAgent\(reportPrompt/, 'report 无条件尝试（不套 synthAllowed）')
+})
+
+test('模板：从不 budgetGate(Synthesize)（方案 D 入口不走该字段）', () => {
+  assert.doesNotMatch(TPL, /budgetGate\('Synthesize'\)/, '模板不得把 Synthesize 当入口闸门')
+})
+
+test('模板：safeAgent 末次 null 打 fail 不打 retry', () => {
+  const seg = TPL.slice(TPL.indexOf('const safeAgent'), TPL.indexOf('const _TICK_MS'))
+  const nullLine = seg.split('\n').find(l => l.includes('(null agent)'))
+  assert.ok(nullLine, 'null agent 日志在场')
+  assert.ok(nullLine.includes('fail'), '末次/分支须含 fail（throw 路径已是 fail；null 路径不得无条件 retry）')
 })
 
 test('模板：agent/safeAgent 不覆盖模型（全链路走 CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-flash）', () => {

@@ -8,7 +8,7 @@ test('死线累加：切片 8/9/8/5 + 60s 缓冲 + 30min → 8/17/25/29/30min', 
   assert.equal(dl.Discover, 1020000)              // 8+9=17min
   assert.equal(dl.Fetch, 1500000)                 // +8=25min
   assert.equal(dl.Verify, 1800000 - 60000)        // +5=30min 减 60s 缓冲 = 29min
-  assert.equal(dl.Synthesize, 1800000)
+  assert.equal(dl.Synthesize, 1800000) // 字段保留（方案 D 计划）；模板从不 budgetGate('Synthesize')
 })
 
 test('切片误当死线即 bug：Verify 死线必须大于 Fetch 死线（累计语义）', () => {
@@ -37,7 +37,8 @@ test('budgetGate roomMs 与放行', () => {
   assert.equal(g1.ok, true)
   assert.equal(g1.roomMs, 180000)  // 480000-300000
   elapsed = 2000000  // 33min，全越线
-  assert.equal(gate('Synthesize').ok, false)
+  // Synthesize 字段保留但模板从不 budgetGate('Synthesize')——越线示例用 Verify，避免把死字段教成入口闸门。
+  assert.equal(gate('Verify').ok, false)
   assert.equal(gate('Verify').roomMs, 0)  // roomMs 下限 0 不负
 })
 

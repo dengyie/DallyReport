@@ -96,6 +96,16 @@ test('F2 产物含 linuxdoPrefetched 消费入口（Task 2 预抓注入契约）
   assert.ok(code.includes('no_fetch_realm'), '产物须含 no_fetch_realm 降级路径（无预抓时 realm 内不裸抓 CDP）')
 })
 
+test('F2 宿主 CLI 辅助（cli-main / prefetch / artifact-check）不进 MODULES', () => {
+  const src = fs.readFileSync(BUILD, 'utf8')
+  const m = src.match(/const MODULES = \[([^\]]+)\]/)
+  assert.ok(m, 'build.mjs 含 MODULES 列表')
+  const list = m[1]
+  for (const host of ['cli-main', 'linuxdo-prefetch', 'artifact-check']) {
+    assert.ok(!list.includes("'" + host + "'"), host + ' 是宿主 Node CLI，不得 inline')
+  }
+})
+
 test('F2 产物绝不 inline linuxdo-prefetch（宿主 Node CLI 禁入 realm）', () => {
   const code = readBuiltProduct()
   // 用模块导出的函数名/CLI 内容标识（模板注释只文案提及文件名 linuxdo-prefetch.mjs，须忽略）。

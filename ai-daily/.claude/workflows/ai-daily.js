@@ -613,7 +613,7 @@ const computePhaseDeadlines = ({ harvest, discover, fetch, verify, verifyInfligh
   Discover: harvest + discover,
   Fetch: harvest + discover + fetch,
   Verify: harvest + discover + fetch + verify - verifyInflightBuffer,
-  Synthesize: totalLimit,
+  Synthesize: totalLimit, // unused by template — 方案 D 入口不走 budgetGate('Synthesize')
 })
 
 // 工厂：elapsedFn 注入时钟（workflow 里 _wallMs 累加器，测试里 mock）——realm 时钟限制的正确解耦点。
@@ -1453,7 +1453,11 @@ const safeAgent = async (p, o, tries = 2) => {
       continue
     }
     if (r) { BREAKER.record(true, o.label || '?'); return r }
-    log('safeAgent retry ' + (i + 1) + ' ' + (o.label || '?') + ' (null agent)')
+    if (i === tries - 1) {
+      log('safeAgent fail ' + (o.label || '?') + ' (null agent)')
+    } else {
+      log('safeAgent retry ' + (i + 1) + ' ' + (o.label || '?') + ' (null agent)')
+    }
   }
   // 用尽 tries 仍无产出（含 withDeadline 超时的 null 路径）= 终局失败，计入断路器。
   BREAKER.record(false, o.label || '?')
@@ -1621,6 +1625,32 @@ const DISCOVER_GROUPS = DISCOVER_GROUPS_ALL
   .filter(g => g.boards.length > 0)
 const discoverResults = []
 const DISCOVER_BATCH = 3
+// 9/01 P2：linuxdo 是宿主预抓通道（CDP，不走 safeAgent），不得被代理失败断路器丢掉。
+// linuxdo 在 DISCOVER_GROUPS 末位，DISCOVER_BATCH=3 → 第 2 批；Harvest consecutive=3 可在
+// Discover 起跑前跳闸。同批把 cdp 挪到 BREAKER.open() 之前仍会在第 1 批 break 时丢掉预抓。
+// 因此三态消费必须在代理批循环之外、之前；BREAKER/budget 只闸后续 discover 代理。
+for (const g of DISCOVER_GROUPS) {
+  if (!g.cdp) continue
+  if (!LINUXDO_CDP_HOST) {
+    log('LINUXDO-SKIP no_cdp_host ' + g.key + ' → urls:[]，不降级')
+    discoverResults.push({ group: g, boards: g.boards, urls: [], noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: false, linuxdoSkipped: true })
+    continue
+  }
+  // 8/27 Task 2：优先消费 run-daily.sh 注入的 linuxdoPrefetched 预抓 JSON（已按上方严格校验）。
+  // 无有效预抓数据时——不调用裸 fetchLinuxDoNews34（workflow realm 无 fetch/WebSocket，
+  // 裸 CDP 长跑不可能、裸 HTTP 必 403）——记录 no_fetch_realm 稳定原因并降级，绝不静默空板。
+  const LDP = LINUXDO_PREFETCHED
+  if (!LDP) {
+    log('LINUXDO-FAIL no_fetch_realm → ' + g.key + ' 降级（linuxdoPrefetch 无有效数据，realm 内不裸抓 CDP）')
+    discoverResults.push({ group: g, boards: g.boards, urls: [], noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: true, linuxdoFailed: true, linuxdoReason: 'no_fetch_realm' })
+    continue
+  }
+  log('LINUXDO-OK prefetched ' + LDP.topics + ' topics → ' + g.key + ' board（配额 ' + LINUXDO_MAX_SOURCES + '）')
+  const srcs = LDP.posts.slice(0, LINUXDO_MAX_SOURCES).map(p => ({
+    url: p.url, title: p.title, found_via: 'linuxdo-cdp', date: p.date || DATE, board: 'linuxdo',
+  }))
+  discoverResults.push({ group: g, boards: g.boards, urls: srcs, noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: false, linuxdoTopics: LDP.topics, linuxdoPosts: LDP.posts.length })
+}
 for (const batch of chunkArr(DISCOVER_GROUPS, DISCOVER_BATCH)) {
   if (!budgetGate('Discover').ok) { log('BUDGET-BREAK Discover 余批跳过，用已完成批次结果'); break }
   // 8/26 修复：Discover 慢代理保护 Fetch 的墙钟闸门（见 DISCOVER_FETCH_RESERVE_MS 注释）。
@@ -1637,38 +1667,12 @@ for (const batch of chunkArr(DISCOVER_GROUPS, DISCOVER_BATCH)) {
   // 零 BUDGET-BREAK。失败计数不依赖时钟，饱和下依然准确，是最后一道可靠闸门：
   // Harvest/前批 Discover 已连续/累计失败到阈值 → 后续 Discover 代理大概率同样白烧，直接跳到
   // static-fallback → Fetch（保住真实抓批与产出），并把跳闸原因如实写进 degraded。
+  // 9/01 P2：本闸只拦代理。linuxdo 已在循环外消费，跳闸不得丢掉预抓。
   if (BREAKER.open()) {
     log('BREAKER-OPEN Discover 余批跳过（' + BREAKER.reason() + '，代理失败计数 ' + JSON.stringify(BREAKER.stats) + '）→ 直连 static-fallback → Fetch')
     break
   }
-  // 8/23 第二十一项：linuxdo 组是独立发现通道（走 9222 登录态 Chrome 抓 news/34.json），非代理。
-  // 在该批并行代理前同步抓取——成功 → posts 按配额塞进组返回行（board 标 linuxdo，URL 进 Fetch/Verify
-  // 既有流水线）；失败 → 组返回行标 degraded（linuxdo_degraded 进降级旗标）；no_cdp_host（默认）→
-  // LINUXDO-SKIP + urls:[] 不降级（板不崩）。date 参数可空：抓取只取最新分页，不强依赖日期窗口。
-  for (const g of batch) {
-    if (!g.cdp) continue
-    if (!LINUXDO_CDP_HOST) {
-      log('LINUXDO-SKIP no_cdp_host ' + g.key + ' → urls:[]，不降级')
-      discoverResults.push({ group: g, boards: g.boards, urls: [], noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: false, linuxdoSkipped: true })
-      continue
-    }
-    // 8/27 Task 2：优先消费 run-daily.sh 注入的 linuxdoPrefetched 预抓 JSON（已按上方严格校验）。
-    // 无有效预抓数据时——不调用裸 fetchLinuxDoNews34（workflow realm 无 fetch/WebSocket，
-    // 裸 CDP 长跑不可能、裸 HTTP 必 403）——记录 no_fetch_realm 稳定原因并降级，绝不静默空板。
-    const LDP = LINUXDO_PREFETCHED
-    if (!LDP) {
-      log('LINUXDO-FAIL no_fetch_realm → ' + g.key + ' 降级（linuxdoPrefetch 无有效数据，realm 内不裸抓 CDP）')
-      discoverResults.push({ group: g, boards: g.boards, urls: [], noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: true, linuxdoFailed: true, linuxdoReason: 'no_fetch_realm' })
-      continue
-    }
-    log('LINUXDO-OK prefetched ' + LDP.topics + ' topics → ' + g.key + ' board（配额 ' + LINUXDO_MAX_SOURCES + '）')
-    // 按 linuxdoMaxSources 配额把预抓 posts 转成组返回行 URL 候选（latest posts 在前，配额轮换截至）。
-    const srcs = LDP.posts.slice(0, LINUXDO_MAX_SOURCES).map(p => ({
-      url: p.url, title: p.title, found_via: 'linuxdo-cdp', date: p.date || DATE, board: 'linuxdo',
-    }))
-    discoverResults.push({ group: g, boards: g.boards, urls: srcs, noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: false, linuxdoTopics: LDP.topics, linuxdoPosts: LDP.posts.length })
-  }
-  // 8/23 C2 复核修复：cdp 组已在上方预块处理并 push（CDP 抓取不进普通发现代理）；此处只跑普通组，
+  // 8/23 C2 复核修复：cdp 组已在循环外预块处理并 push（CDP 抓取不进普通发现代理）；此处只跑普通组，
   // 避免 linuxdo 组被双 push（urls_discovered 翻倍、Fetch 预算空耗）且不被当普通代理喂裸
   // https://linux.do/c/news/34（spec §A 明文裸 fetch 必 403 → 长墙钟失败 + 误标 degraded，违背
   // 「默认不启用时板不崩」）。.filter 后 batch 内不再有 g.cdp 组，.then 无需再判 cdp。

@@ -14,7 +14,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { isCliMain } from './cli-main.mjs'
 
 const DEFAULT_DIR = path.join(
   process.env.HOME || '',
@@ -55,8 +55,7 @@ export const summarizeArtifacts = (date, root = DEFAULT_DIR, io = fs) => {
   return { ok: true, line: parts.join(' ') }
 }
 
-// argv[1] 可能是相对路径；path.resolve + pathToFileURL 才能和 import.meta.url 对齐。
-export const isCliMain = (metaUrl, argv1) => !!argv1 && metaUrl === pathToFileURL(path.resolve(argv1)).href
+export { isCliMain }
 if (isCliMain(import.meta.url, process.argv[1])) {
   const argv = process.argv.slice(2)
   const flag = n => {

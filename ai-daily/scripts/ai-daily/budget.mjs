@@ -8,7 +8,7 @@ export const computePhaseDeadlines = ({ harvest, discover, fetch, verify, verify
   Discover: harvest + discover,
   Fetch: harvest + discover + fetch,
   Verify: harvest + discover + fetch + verify - verifyInflightBuffer,
-  Synthesize: totalLimit,
+  Synthesize: totalLimit, // unused by template — 方案 D 入口不走 budgetGate('Synthesize')
 })
 
 // 工厂：elapsedFn 注入时钟（workflow 里 _wallMs 累加器，测试里 mock）——realm 时钟限制的正确解耦点。

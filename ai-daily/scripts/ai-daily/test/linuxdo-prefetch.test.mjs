@@ -122,6 +122,14 @@ test('源码：prefetch 调用 fetchLinuxDoNews34，不含 new WebSocket / /json
   assert.ok(!code.includes("'/json/close/'"), '不得复制 tab 关闭逻辑（由 linux.do.mjs finally 收敛）')
 })
 
+test('源码：CLI 入口用共享 isCliMain，相对 argv[1] 不得静默 no-op', () => {
+  const code = fs.readFileSync(path.join(HERE, '../linuxdo-prefetch.mjs'), 'utf8')
+  assert.ok(!code.includes("'file://' + process.argv[1]"), '不得用 file:// + argv[1]（相对路径永远对不上 import.meta.url）')
+  assert.ok(!code.includes('"file://" + process.argv[1]'), '不得用 file:// + argv[1] 双引号变体')
+  assert.match(code, /from '\.\/cli-main\.mjs'/, '复用宿主共享 isCliMain，禁止各 CLI 各写一份')
+  assert.match(code, /isCliMain\(import\.meta\.url,\s*process\.argv\[1\]\)/, '入口走 isCliMain(meta, argv1)')
+})
+
 // ── CLI 子进程边界 ──
 test('CLI：成功（mock CDP）→ exit 0，stdout 可解析 JSON 且 posts 有内容', () => {
   const res = runCli(['--host', '127.0.0.1:9222', '--max-sources', '10'], { mockCdp: true })

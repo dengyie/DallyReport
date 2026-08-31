@@ -53,6 +53,12 @@ test('SKILL.md: 方案 D synthesisLimitMs 在场，默认 600000', () => {
   assert.ok(SKILL.includes('"synthesisLimitMs": 600000'), 'args JSON 示例须带 synthesisLimitMs')
 })
 
+test('SKILL.md: build 检测 find 走 vault cwd 路径，不得用镜像仓 ai-daily/ 前缀', () => {
+  assert.doesNotMatch(SKILL, /find ai-daily\/scripts\/ai-daily/, 'find 不得带镜像布局前缀 ai-daily/scripts/ai-daily')
+  assert.doesNotMatch(SKILL, /ai-daily\/\.claude\/workflows/, '产物路径不得带镜像前缀 ai-daily/.claude')
+  assert.match(SKILL, /find scripts\/ai-daily -newer \.claude\/workflows\/ai-daily\.js/, 'find 相对 vault 根：scripts/ai-daily vs .claude/workflows/ai-daily.js')
+})
+
 test('SKILL.md: 合成入口与总墙钟脱钩（不得再写总墙钟守门/超限跳过合成）', () => {
   assert.ok(!SKILL.includes('report 由总墙钟唯一守门'), '不得保留「report 由总墙钟唯一守门」')
   assert.ok(!SKILL.includes('超限跳过合成直接降级'), '不得保留 totalLimitMs 超限跳过合成')

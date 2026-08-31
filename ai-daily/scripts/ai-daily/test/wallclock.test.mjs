@@ -152,11 +152,25 @@ test('P1 接线：withDeadline 超时把「真实经过 ≥ ms」喂给 WALL.obs
 test('P1 接线：Discover 批首查 BREAKER.open() 并跳余批（计数闸门不依赖时钟）', () => {
   assert.match(TPL, /if \(BREAKER\.open\(\)\) \{/, 'Discover 批边界消费断路器')
   assert.match(TPL, /BREAKER-OPEN Discover 余批跳过/, '跳闸有可 grep 日志')
-  // 闸门必须在 Discover 批循环内、且在放行代理之前（与既有 BUDGET-BREAK 同一位置层）。
+  // 闸门只拦 Discover **代理**。linuxdo 是宿主预抓通道，不在这扇门后面。
   const loop = TPL.indexOf("for (const batch of chunkArr(DISCOVER_GROUPS, DISCOVER_BATCH))")
   const gate = TPL.indexOf('if (BREAKER.open()) {')
-  const cdpBlock = TPL.indexOf('for (const g of batch) {')
-  assert.ok(loop > 0 && gate > loop && gate < cdpBlock, '闸门位于批循环内、放行任何本批工作之前')
+  const discAgents = TPL.indexOf('batch.filter(g => !g.cdp)')
+  assert.ok(loop > 0 && gate > loop && gate < discAgents, '闸门位于代理批循环内、放行 discover safeAgent 之前')
+})
+
+test('P2 接线：linuxdo 预抓消费在 Discover 代理批循环之前（断路器跳闸不得丢掉已预抓通道）', () => {
+  // linuxdo 在 DISCOVER_GROUPS 末位，DISCOVER_BATCH=3 → 第 2 批。Harvest consecutive=3
+  // 可在 Discover 起跑前跳闸；同批把 cdp 挪到 BREAKER.open 之前仍会在第 1 批 break 时丢掉。
+  const skip = TPL.indexOf("log('LINUXDO-SKIP no_cdp_host ")
+  const fail = TPL.indexOf("log('LINUXDO-FAIL no_fetch_realm")
+  const ok = TPL.indexOf("log('LINUXDO-OK prefetched ")
+  const loop = TPL.indexOf("for (const batch of chunkArr(DISCOVER_GROUPS, DISCOVER_BATCH))")
+  const gate = TPL.indexOf('if (BREAKER.open()) {')
+  assert.ok(skip > 0 && fail > 0 && ok > 0 && loop > 0, '三态消费与批循环都在场')
+  assert.ok(skip < loop && fail < loop && ok < loop,
+    'linuxdo 三态消费必须在 for (batch of chunkArr) 之前，否则 batch-1 跳闸会丢掉 batch-2 的预抓')
+  assert.ok(gate > loop, 'BREAKER.open 仍只闸代理批，不闸预抓消费')
 })
 
 test('P1 接线：safeAgent 三条终局路径全部记账，成功路径清零', () => {

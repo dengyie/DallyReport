@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { artifactPaths, summarizeArtifacts, isCliMain } from '../artifact-check.mjs'
@@ -87,4 +88,10 @@ test('P4：isCliMain 相对 argv[1] 经 path.resolve 对齐，不得因相对路
   assert.equal(isCliMain(import.meta.url, rel), true, '相对路径经 resolve 后命中')
   assert.equal(isCliMain(import.meta.url, undefined), false)
   assert.equal(isCliMain(import.meta.url, '/tmp/not-this-file.mjs'), false)
+})
+
+test('P4：artifact-check 复用宿主共享 isCliMain，不得各写一份', () => {
+  const src = fs.readFileSync(new URL('../artifact-check.mjs', import.meta.url), 'utf8')
+  assert.match(src, /from '\.\/cli-main\.mjs'/, '从 cli-main.mjs 导入，禁止本地再实现一份')
+  assert.doesNotMatch(src, /export const isCliMain =/, '不得在本文件再定义 isCliMain')
 })

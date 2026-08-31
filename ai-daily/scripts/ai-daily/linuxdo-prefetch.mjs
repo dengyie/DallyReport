@@ -15,6 +15,7 @@
 // 运行、不在 workflow realm 内——workflow realm 无 fetch/WebSocket/fs/process/require。
 
 import { fetchLinuxDoNews34, CDP_DEFAULTS } from './linuxdo.mjs'
+import { isCliMain } from './cli-main.mjs'
 
 /** 默认 cdp host（与 linuxdo.mjs CDP_DEFAULTS.cdpHost 一致）。 */
 export const DEFAULT_CDP_HOST = CDP_DEFAULTS.cdpHost
@@ -106,5 +107,6 @@ export async function main(argv) {
 }
 
 // 仅在作为脚本直接执行时运行 main（被 import 时不跑，测试可 import 接口）。
-const isMain = process.argv[1] && import.meta.url === 'file://' + process.argv[1]
-if (isMain) { main(process.argv.slice(2)) }
+// argv[1] 可能是相对路径，必须走 isCliMain（path.resolve + pathToFileURL），
+// 裸 `file://` + argv[1] 会对不上 import.meta.url → 静默 no-op。
+if (isCliMain(import.meta.url, process.argv[1])) { main(process.argv.slice(2)) }
