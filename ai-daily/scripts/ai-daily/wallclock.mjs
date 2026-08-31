@@ -28,13 +28,16 @@ export const starvationFactor = (realMs, accumDeltaMs) => {
  * 标定墙钟：包住 raw 累加器，用定时器观测校正其低估。
  * @param {() => number} rawElapsed 原始累加器读数（workflow 里 RUN_ELAPSED）
  * @param {{maxFactor?:number}} opts maxFactor 封顶防单次异常观测把倍率放飞（默认 20）
- * @returns {{elapsed, observe, factor, observations}}
+ * @returns {{elapsed, observe, factor, peakFactor, observations}}
  *   elapsed()  校正后的经过毫秒，**单调不减**（时间绝不倒流，即便倍率回落）
  *   observe(realMs, accumDeltaMs) 记一次标定观测（withDeadline 超时 / 周期标定器各调一次）
+ *   factor     最新观测倍率（网关恢复可回落）
+ *   peakFactor 本 run 见过的最高倍率（旗标/审计用，回落不抹）
  */
 export const makeCalibratedElapsed = (rawElapsed, opts) => {
   const maxFactor = (opts && typeof opts.maxFactor === 'number' && opts.maxFactor > 0) ? opts.maxFactor : 20
   let factor = 1
+  let peakFactor = 1
   let floor = 0
   let observations = 0
   const elapsed = () => {
@@ -52,9 +55,11 @@ export const makeCalibratedElapsed = (rawElapsed, opts) => {
       // 取最新观测（受 maxFactor 封顶）：饱和缓解时倍率应当能回落，
       // 而 elapsed() 的单调闸已保证读数不倒退——两者配合既跟得上变化又不会时间倒流。
       factor = Math.min(maxFactor, f)
+      if (factor > peakFactor) peakFactor = factor
       return factor
     },
     get factor() { return factor },
+    get peakFactor() { return peakFactor },
     get observations() { return observations },
   }
 }
@@ -71,8 +76,9 @@ export const makeCalibratedElapsed = (rawElapsed, opts) => {
  *   open() 是否已跳闸；reason() 跳闸原因串（未跳闸为 null）
  */
 export const makeCircuitBreaker = opts => {
-  const maxConsecutive = (opts && opts.consecutive) || 3
-  const maxTotal = (opts && opts.total) || 5
+  // 0 是合法阈值（关闭该跳闸条件），不得用 `|| 3` 把 0 吞成默认。
+  const maxConsecutive = (opts && typeof opts.consecutive === 'number') ? opts.consecutive : 3
+  const maxTotal = (opts && typeof opts.total === 'number') ? opts.total : 5
   let consecutive = 0
   let failures = 0
   let successes = 0
@@ -82,8 +88,9 @@ export const makeCircuitBreaker = opts => {
       if (ok) { successes++; consecutive = 0 } else {
         failures++; consecutive++
         if (!reason) {
-          if (consecutive >= maxConsecutive) reason = 'consecutive_failures:' + consecutive + (label ? '@' + label : '')
-          else if (failures >= maxTotal) reason = 'total_failures:' + failures + (label ? '@' + label : '')
+          // ≤0 = 关闭该条件（consecutive:0 + total:0 → 断路器永不跳闸）。
+          if (maxConsecutive > 0 && consecutive >= maxConsecutive) reason = 'consecutive_failures:' + consecutive + (label ? '@' + label : '')
+          else if (maxTotal > 0 && failures >= maxTotal) reason = 'total_failures:' + failures + (label ? '@' + label : '')
         }
       }
       return !reason

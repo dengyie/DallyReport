@@ -41,4 +41,20 @@ test('SKILL.md: P1 记录累加器「只低估」根因与两条修法，且新�
   assert.match(SKILL, /breaker_open:/, '跳闸旗标须文档化')
   assert.match(SKILL, /wallclock_starved:/, '饥饿旗标须文档化')
   assert.match(SKILL, /单调不减/, '须写明标定读数单调性（否则误以为读数会回落）')
+  assert.match(SKILL, /peak_factor/, 'meta 峰值倍率须文档化（旗标看峰值不看最新）')
+  assert.ok(SKILL.includes('不') && SKILL.includes('WALL.observe'), '须写明探针超时不喂 WALL.observe')
+})
+
+// 9/01 方案 D：合成入口与总墙钟脱钩。P1 标定落地后病态跑会正确把旧 synthAllowed 打成 false，
+// 已确认内容整份降 raw——入口闸门必须从文档里消失，换成 synthesisLimitMs 自身 timeout。
+test('SKILL.md: 方案 D synthesisLimitMs 在场，默认 600000', () => {
+  assert.match(SKILL, /synthesisLimitMs/, '合成自身 timeout arg 须文档化')
+  assert.match(SKILL, /synthesisLimitMs[`"]?\s*[（(]?默认 600/, '默认值 600s 与模板 : 600000 一致')
+  assert.ok(SKILL.includes('"synthesisLimitMs": 600000'), 'args JSON 示例须带 synthesisLimitMs')
+})
+
+test('SKILL.md: 合成入口与总墙钟脱钩（不得再写总墙钟守门/超限跳过合成）', () => {
+  assert.ok(!SKILL.includes('report 由总墙钟唯一守门'), '不得保留「report 由总墙钟唯一守门」')
+  assert.ok(!SKILL.includes('超限跳过合成直接降级'), '不得保留 totalLimitMs 超限跳过合成')
+  assert.ok(SKILL.includes('合成') && (SKILL.includes('脱钩') || SKILL.includes('不再看总墙钟')), '须写明合成与总墙钟脱钩')
 })

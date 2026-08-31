@@ -44,6 +44,21 @@ test('P1：elapsed 单调不减——倍率回落不得让已越线阶段「复�
   assert.ok(clock.elapsed() >= high, '读数不得倒退（时间绝不倒流）')
 })
 
+test('P1：peakFactor 记本 run 最高倍率，回落不抹（旗标/审计用）', () => {
+  let raw = 100000
+  const clock = makeCalibratedElapsed(() => raw)
+  assert.equal(clock.peakFactor, 1, '无观测时峰值=1')
+  clock.observe(360000, 40000)      // 9×
+  assert.equal(clock.factor, 9)
+  assert.equal(clock.peakFactor, 9)
+  clock.observe(360000, 360000)     // 恢复 1×
+  assert.equal(clock.factor, 1, '最新倍率回落')
+  assert.equal(clock.peakFactor, 9, '峰值保留，审计旗标不得被后续健康超时抹掉')
+  clock.observe(360000, 60000)      // 6×，低于峰值
+  assert.equal(clock.factor, 6)
+  assert.equal(clock.peakFactor, 9, '低于峰值的新观测不改 peak')
+})
+
 test('P1：无观测时等价于原始累加器（默认行为不变，健康跑零影响）', () => {
   let raw = 0
   const clock = makeCalibratedElapsed(() => raw)
@@ -101,6 +116,18 @@ test('P1：全成功永不跳闸（健康跑零副作用）', () => {
   assert.equal(cb.reason(), null)
 })
 
+test('P1：阈值 0 关闭该跳闸条件（不得被 || 默认吞成 3/5）', () => {
+  const offConsec = makeCircuitBreaker({ consecutive: 0, total: 99 })
+  for (let i = 0; i < 10; i++) assert.equal(offConsec.record(false, 'x'), true)
+  assert.equal(offConsec.open(), false, 'consecutive:0 关闭连续跳闸')
+  const offTotal = makeCircuitBreaker({ consecutive: 99, total: 0 })
+  for (let i = 0; i < 10; i++) assert.equal(offTotal.record(false, 'x'), true)
+  assert.equal(offTotal.open(), false, 'total:0 关闭累计跳闸')
+  const offBoth = makeCircuitBreaker({ consecutive: 0, total: 0 })
+  for (let i = 0; i < 20; i++) assert.equal(offBoth.record(false, 'x'), true)
+  assert.equal(offBoth.open(), false, '双 0 = 断路器永不跳闸')
+})
+
 // ── 模板接线（源级）：模块存在但没接上等于没修，8/31 的病症正是「闸门在场却读到假读数」。──
 
 test('P1 接线：所有墙钟消费点走标定后的 RUN_ELAPSED，原始累加器只喂 WALL', () => {
@@ -117,6 +144,9 @@ test('P1 接线：withDeadline 超时把「真实经过 ≥ ms」喂给 WALL.obs
   assert.match(TPL, /const t0 = _wallMs/, '超时窗口起点取累加器快照')
   assert.match(TPL, /WALL\.observe\(ms, _wallMs - t0\)/, '真超时 → observe(名义 ms, 同窗口累加器增量)')
   assert.match(TPL, /饥饿倍率/, '标定结果有可 grep 日志')
+  assert.match(TPL, /const withDeadline = \(p, ms, observe = true\)/, '第三参 observe 默认 true（safeAgent 标定）')
+  assert.match(TPL, /GATEWAY_PROBE_MS, false\)/, '探针超时不标定墙钟')
+  assert.doesNotMatch(TPL, /report 单次直出/, '超时日志不得再写 8/30 已废的「report 单次直出」')
 })
 
 test('P1 接线：Discover 批首查 BREAKER.open() 并跳余批（计数闸门不依赖时钟）', () => {
@@ -143,11 +173,13 @@ test('P1 接线：跳闸与饥饿写进 degraded + meta，run 后可审计', () 
   assert.match(TPL, /breaker: \{ open: BREAKER\.open\(\), reason: BREAKER\.reason\(\)/, 'meta 带 breaker 账')
 })
 
-test('P1 接线：wallclock_starved 阈值 1.5× 且要求有真实观测（健康跑不打旗标）', () => {
-  // 复刻模板条件，锁死「无观测不打标」「1.0× 不打标」「4.7× 打标」三态。
-  const flag = (observations, factor) => (observations > 0 && factor > 1.5) ? 'wallclock_starved:' + factor.toFixed(1) + 'x' : null
+test('P1 接线：wallclock_starved 看 peakFactor（先饿后恢复不得抹旗标）', () => {
+  // 复刻模板条件：旗标用峰值，不用最新 factor——否则 Harvest 7× 后一次健康超时会把病症从产物抹掉。
+  const flag = (observations, peakFactor) => (observations > 0 && peakFactor > 1.5) ? 'wallclock_starved:' + peakFactor.toFixed(1) + 'x' : null
   assert.equal(flag(0, 1), null, '健康跑（零观测）无旗标')
   assert.equal(flag(3, 1.2), null, '轻微抖动不打标')
   assert.equal(flag(2, 4.74), 'wallclock_starved:4.7x', '8/31 级饥饿打标')
-  assert.match(TPL, /WALL\.observations > 0 && WALL\.factor > 1\.5/, '模板条件与本测试同源')
+  assert.equal(flag(9, 7.2), 'wallclock_starved:7.2x', '峰值 7.2× 即使最新 factor 已回落仍打标')
+  assert.match(TPL, /WALL\.observations > 0 && WALL\.peakFactor > 1\.5/, '模板条件看 peakFactor 而非最新 factor')
+  assert.match(TPL, /peak_factor: Number\(WALL\.peakFactor\.toFixed\(2\)\)/, 'meta 同时记 peak_factor 供审计')
 })

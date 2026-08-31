@@ -40,21 +40,25 @@ const MAX_VERIFY = typeof args.maxVerify === 'number' && args.maxVerify > 0 ? ar
 const MAX_URLS_PER_BOARD = 6
 // 单代理最大存活时长。deepseek 网关偶发"发了工具结果后模型再无回复"的静默卡死：
 // 没有此上限时一个卡死代理会永久挡住整个 parallel/pipeline 闸门（实测 >10min 无产出）。
-// 超时 → 视作 null → 按阶段重试策略处理（harvest/discover/核查票不换新代理，fetch 换一次，report 单次直出）。
+// 超时 → 视作 null → 按阶段重试策略处理（harvest/discover/核查票不换新代理，fetch 换一次，report 有内容至多 2 试）。
 // 默认 6 分钟（8/15 起）：不再对昂贵代理做全新重跑，仅对"网关拥堵拖慢完整体"的静默挂起兜底。
 const AGENT_TIMEOUT_MS = typeof args.agentTimeoutMs === 'number' && args.agentTimeoutMs > 0 ? args.agentTimeoutMs : 360000
 
 // 8/17 第十一项：Synthesize 前网关健康探针超时 + 主脚本总墙钟上限（宽松兜底，防任一阶段挂起拖满整轮）。
 const GATEWAY_PROBE_MS = typeof args.probeTimeoutMs === 'number' && args.probeTimeoutMs > 0 ? args.probeTimeoutMs : 20000
 const TOTAL_LIMIT_MS = typeof args.totalLimitMs === 'number' && args.totalLimitMs > 0 ? args.totalLimitMs : 1800000
-// 8/17 第十四项：墙钟治理升级——TOTAL_LIMIT_MS（仅 Synthesize 前查一次的事后闸门）拆成各阶段累计死线，
+// 9/01 方案 D：合成入口与总墙钟脱钩。TOTAL_LIMIT_MS 只约束 Harvest–Verify 切片死线，不再当 Synthesize 入口闸门
+// （P1 标定落地后病态跑会正确把旧 synthAllowed 打成 false，已确认内容整份降 raw——入口设计错误，不是标定副作用）。
+// report 单次 timeout = SYNTHESIS_LIMIT_MS（默认 600s，覆盖现网包络）；有内容 ≤2 试，空板 1 试。
+const SYNTHESIS_LIMIT_MS = typeof args.synthesisLimitMs === 'number' && args.synthesisLimitMs > 0 ? args.synthesisLimitMs : 600000
+// 8/17 第十四项：墙钟治理升级——TOTAL_LIMIT_MS 拆成各阶段累计死线，
 // 每个阶段前 budgetGate 查墙钟，超限即跳过该阶段快速降级（病态运行不再拖满；健康跑远低于死线、永不触发）。
 // 切片和 = 9+8+8+5 = 30min 与 TOTAL_LIMIT_MS 对齐（8/19 第十五项调序：Harvest 增到 9、Discover 减到 8，
 // 依据见 HARVEST_BUDGET_MS 前的注释——discover 换 Tavily 兜底提速，harvest 保留 442-800s 慢但有效的 crops）；
 // 分配序：Harvest/Discover 留足慢但有效的包络，Verify 牺牲序最低。
 // 8/17 全量实测（Harvest 5.2 / Discover 9.2 / Fetch 7.3 / Verify 9.1min）证明 30min 盘子装不下 50 代理健康包络（合计 30.8min）：
 // 修复后健康跑尾部 Verify 被逐波重算硬停（尾部核查票如实降 unverified）；墙钟为软目标——批末 360s 在飞票与
-// report 重试（≤2×600s，仅真死网关时）可越过 TOTAL_LIMIT_MS，尾部由 synthAllowed 门禁 + render-md 降级兜底。
+// 真死网关时 report 重试（≤2×SYNTHESIS_LIMIT_MS）可越过 TOTAL_LIMIT_MS，由 report 自身 timeout + render-md 降级兜底。
 // 8/19 第十五项优化：Harvest/Discover 预算对调（480→540 / 540→480），零净盘子 30min 不变。
 // 依据：8/18 重跑实测 harvest:crops 442-800s 在 480s 死线上被砍（opensource 38min 后超时、cn-media/en-media crops），
 // 而 8/17 全量实测 harvest 健康包络 5.2min。Discover 因 8/19 的 --extra 4 改用 Tavily 快速兜底（~2-5s/查询，
@@ -145,15 +149,19 @@ const TRANSIENT = /(422|429|5\d\d|524|timeout|timed out|connection closed|model 
 // 8/31 P1：超时定时器是**真实时间的硬证据**——setTimeout(ms) 绝不早于 ms 真实毫秒触发，事件循环
 // 饱和只会让它更晚。所以每次真超时都给了「真实经过 ≥ ms」这一事实，与同窗口累加器增量相比即得
 // 饥饿倍率，喂给 WALL.observe 标定墙钟（见 wallclock.mjs）。这是 realm 内唯一能反推真实墙钟的通道。
-const withDeadline = (p, ms) => new Promise(resolve => {
+// observe=false：探针等短窗口超时不得喂 WALL——advisory 探针本不该成为墙钟标定样本
+// （10–20s 窗口 + tick 饥饿会把 factor 打到 cap，或一次准时超时把峰值抹成 1×）。
+const withDeadline = (p, ms, observe = true) => new Promise(resolve => {
   let done = false
   const t0 = _wallMs
   const settle = v => { if (!done) { done = true; clearTimeout(to); resolve(v) } }
   const to = setTimeout(() => {
     // 真超时：ms 真实毫秒已过，而累加器同窗口只涨了 (_wallMs - t0) → 标定饥饿倍率。
-    const f = WALL.observe(ms, _wallMs - t0)
-    log('agent 超时 ' + Math.round(ms / 1000) + 's 无产出 → 视为失败（按阶段重试策略：harvest/disc/票不换新代理，fetch 换一次，report 单次直出）'
-      + ' [墙钟标定 累加器仅计 ' + Math.round((_wallMs - t0) / 1000) + 's → 饥饿倍率 ' + (f || 1).toFixed(2) + '×]')
+    const f = observe ? WALL.observe(ms, _wallMs - t0) : null
+    log('agent 超时 ' + Math.round(ms / 1000) + 's 无产出 → 视为失败（按阶段重试策略：harvest/disc/票不换新代理，fetch 换一次，report 有内容至多 2 试）'
+      + (observe
+        ? ' [墙钟标定 累加器仅计 ' + Math.round((_wallMs - t0) / 1000) + 's → 饥饿倍率 ' + (f || 1).toFixed(2) + '×]'
+        : ' [探针/短窗超时不标定墙钟]'))
     settle(null)
   }, ms)
   p.then(v => settle(v), () => settle(null))
@@ -194,7 +202,7 @@ const now = () => _wallMs
 const RUN_START = now()
 const RUN_ELAPSED_RAW = () => now() - RUN_START
 // WALL 包住原始累加器：无观测时 factor=1 逐字节等价旧行为（健康跑零影响）；
-// withDeadline 每次真超时都 observe 一次，饱和下读数被放大到真实量级，闸门重新生效。
+// withDeadline 真超时且 observe=true 才标定（探针传 false，短窗不得污染倍率）。
 const WALL = makeCalibratedElapsed(RUN_ELAPSED_RAW)
 const RUN_ELAPSED = () => WALL.elapsed()
 // 8/31 P1-①：计数型断路器——不依赖时钟（饱和下计数信号依然准确），连续 3 次或累计 5 次代理失败即跳闸，
@@ -206,7 +214,7 @@ const BREAKER = makeCircuitBreaker({
 })
 const probeGateway = async label => {
   const t0 = now()
-  const p = await withDeadline(agent('仅回复 OK。', { label: 'probe:' + label, effort: 'low', timeoutMs: GATEWAY_PROBE_MS }), GATEWAY_PROBE_MS)
+  const p = await withDeadline(agent('仅回复 OK。', { label: 'probe:' + label, effort: 'low', timeoutMs: GATEWAY_PROBE_MS }), GATEWAY_PROBE_MS, false)
   const took = Math.round(now() - t0)
   // 8/30：探针由「合成否决权」降为「只观察」——探针失败不再跳过 report（8/29 实证：
   // 单次 20s 探针超时竟把 9 条已确认内容整体判死，report 代理其实从未被调用过）。
@@ -224,7 +232,7 @@ const PHASE_DEADLINES = computePhaseDeadlines({
 // 注意：HARVEST/DISCOVER/FETCH/VERIFY_BUDGET_MS 是"该阶段允许花多久"的切片（用户可单独调），
 // 死线必须累加——若误把切片当死线，Verify 切片 5min 会在健康跑（elapsed 早已 >5min）误判超时。
 // Verify 累计死线在切片和后另减 VERIFY_INFLIGHT_BUFFER_MS：为最后一批在飞票（固定 360s）预留空间，
-// 墙钟仅为软目标——极端尾批 / 真死网关时 report 重试（≤2×600s）可超 TOTAL_LIMIT_MS，由 synthAllowed 闸门 + render-md 降级兜底。
+// 墙钟仅为软目标——极端尾批 / 真死网关时 report 重试（≤2×SYNTHESIS_LIMIT_MS）可超 TOTAL_LIMIT_MS，由 report 自身 timeout + render-md 降级兜底。
 const budgetGate = makeBudgetGate(PHASE_DEADLINES, RUN_ELAPSED, stage =>
   log('BUDGET-SKIP ' + stage + ' elapsed=' + Math.round(RUN_ELAPSED() / 1000) + 's ≥ 死线 ' + Math.round(PHASE_DEADLINES[stage] / 1000) + 's → 跳过该阶段快速降级'))
 const budgetSkipped = budgetGate.skipped  // degraded 标记读取（makeBudgetGate 内同 stage 只记一次）
@@ -650,7 +658,7 @@ const voteClaim = async (c, timeoutMs) => {
 const voted = []
 const VERIFY_BATCH = 6
 // 8/20 第十六项：vtimeout 取固定 AGENT_TIMEOUT_MS，与 room 无关；批间 BREAK 守护留在批次边界，不进入单代理超时。
-// 缓冲保留以为末批（固定 360s）留空间；墙钟是软目标，尾批可超 TOTAL_LIMIT_MS（最坏：真死网关 report 重试 ≤2×600s），由 synthAllowed 闸门 + 降级兜底。
+// 缓冲保留以为末批（固定 360s）留空间；墙钟是软目标，尾批可超 TOTAL_LIMIT_MS（最坏：真死网关 report 重试 ≤2×SYNTHESIS_LIMIT_MS），由 report 自身 timeout + 降级兜底。
 // 8/28 账本修复（镜像 Fetch 的 stageFetchRan 一次性状态）：救护/后续批次不再调有副作用的 budgetGate('Verify')——
 // 只要首批正常跑过 or 救护首批跑过（voted 非空 / 有 claim 待核），就绝不把 Verify 误记成 budget_skipped:Verify。
 // 否则会再现 8/27 的「claims_verified>0 却同时上报 budget_skipped:Verify」自相矛盾。
@@ -784,16 +792,14 @@ const gatedMisses = outOfWindow.map(c => ({ name: c.claim.slice(0, 36) + (c.clai
 const windowMisses = []
 for (const m of discoveredMisses.concat(gatedMisses)) if (m && m.name && !windowMisses.some(w => w.name === m.name)) windowMisses.push(m)
 
-// ─── Synthesize（report 是一次性昂贵代理，唯一真正的软目标）───
+// ─── Synthesize（report 是一次性昂贵代理；入口与总墙钟脱钩）───
 phase('Synthesize')
-// 8/17 原意：report（上下文最重、最容易撞网关挂死）前先判总墙钟 + 探针，超限即降级防挂起。
-// 8/30 修复（2026-08-29 仍降级根因）：探针从「否决权」降为「只观察」。8/29 实测——探针（单发 20s）
-// 在高负载长会话里超时，曾把 9 条已确认内容整块降级成 raw archive，report 代理根本未被调用；
-// 探针返回 false ≠ 网关真死，不能以一票否决整份日报。修后探针只留日志；report 自身 600s 超时
-// + safeAgent 重试兜底——真死网关顶多多耗一轮也会如实沉降级路径，不再被探针一票判死。
-const synthAllowed = RUN_ELAPSED() <= TOTAL_LIMIT_MS
-if (synthAllowed) await probeGateway('report')  // advisory：探针失败仅留日志，不再跳过合成
-if (!synthAllowed) log('SYNTH-SKIP 总墙钟超限 → 归 raw archive（探针与网关抖动不再否决合成）')
+// 8/17 原意：report 前先判总墙钟 + 探针，超限即降级防挂起。
+// 8/30：探针从「否决权」降为「只观察」（8/29 单发 20s 探针超时曾把 9 条已确认内容整块降 raw）。
+// 9/01 方案 D：入口也不再看 TOTAL_LIMIT_MS。前置切片和 = 总盘子，病态跑（8/31 Harvest 70min +
+// Discover 129min）标定后会正确把旧 synthAllowed 打成 false——合成永远没份。治本：进入本阶段即
+// 无条件尝试 report，只受 SYNTHESIS_LIMIT_MS（默认 600s）× reportTries 约束；探针无条件 advisory。
+await probeGateway('report')  // advisory：探针失败仅留日志，不否决合成
 const reportBody = (confirmed.length ? confirmed.map((c, i) =>
   // 8/17 第十二项：quote 截断 140 字降 report 输入体积——合成只需要点，引语全文由核查阶段保证；大幅压单请求 payload（挂起敏感度 + token）。
   '### ' + (c.isMajorOut ? '[窗口外·重大] ' : '') + '[' + i + '] ' + c.claim + '\nVote: ' + (c.isMajorOut ? '—（未投票，多源公认行业里程碑）' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount) + ' · Source: ' + c.sourceUrl + ' (' + c.sourceQuality + ') · Date: ' + (c.publishDate || c.date || '?') + '\nQuote: "' + c.quote.slice(0, 140) + (c.quote.length > 140 ? '…' : '') + '"\n')
@@ -818,10 +824,10 @@ const missBlock = windowMisses.length ? '\n## 窗口外参考（次要超窗项�
 // 不能把整份 report 打成 raw archive（8/29 实证：9 条已确认内容因 report 未跑完而全量降级）。
 // 唯一的单次直出=当日全空（allClaims.length === 0），此时 nothing 可写，一次即可。
 const reportTries = allClaims.length === 0 ? 1 : 2
-const report = synthAllowed ? await safeAgent(reportPrompt({
+const report = await safeAgent(reportPrompt({
   ...ctxP, confirmedVerifyCount: confirmedVerify.length, majorOutCount: majorOutClaims.length,
   reportBody: reportBodyWithCluster, killedCount: killed.length, refutedList, unverifiedCount: unverified.length, unverifiedList, missBlock, coverBlock,
-}), { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: 600000 }, reportTries) : null
+}), { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: SYNTHESIS_LIMIT_MS }, reportTries)
 
 // ─── md 确定性渲染（report 成功 → 完整版；失败 → 降级版）。render-md.mjs，不再有 mdWriter 代理。───
 // report 成功 → md 必然成功（纯字符串拼接），md 产出不再受网关波动影响。
@@ -835,15 +841,13 @@ if (budgetSkipped.length > 0) degradedFlags.push('budget_skipped:' + budgetSkipp
 // 8/31 P1：断路器跳闸与墙钟饥饿都必须在产物里**可见**——8/31 那种 run 的病症（代理成批失败、
 // 事件循环饱和让墙钟低估 4.7–7.6×）在 meta/md 里完全无痕，只能靠翻 4h 的 workflow 日志才发现。
 if (BREAKER.open()) degradedFlags.push('breaker_open:' + BREAKER.reason())
-if (WALL.observations > 0 && WALL.factor > 1.5) degradedFlags.push('wallclock_starved:' + WALL.factor.toFixed(1) + 'x')
+if (WALL.observations > 0 && WALL.peakFactor > 1.5) degradedFlags.push('wallclock_starved:' + WALL.peakFactor.toFixed(1) + 'x')
 // 8/23 第二十一项：linuxdo 组失败/降级 → linuxdo_degraded 独立降级旗标（no_cdp_host 跳过不算降级）。
 const linuxdoFailedRows = discoverRows.filter(d => d.linuxdoFailed)
 if (linuxdoFailedRows.length) degradedFlags.push('linuxdo_degraded' + (linuxdoFailedRows.some(d => d.linuxdoReason) ? ':' + linuxdoFailedRows.map(d => d.linuxdoReason).join('+').slice(0, 80) : ''))
-// 8/30：reportErr 区分两种退化路径——总墙钟超限（压根没尝试汇总）vs report 代理真失败（尝试过但未产出）。
-// 8/29 报告失败时 meta 的 report_error 只看到后者字样，实际是前者（探针判死/墙钟超了），
-// 排查只能靠猜；现在因果链对 meta 如实声明（SYNTH-SKIP 也记）。
-const reportErr = !synthAllowed ? 'synth skipped (wall-clock over limit); reverting to raw archive'
-  : (report ? null : 'report agent failed; reverting to raw archive')
+// 9/01 方案 D：合成入口与总墙钟脱钩后，reportErr 只剩「代理真失败」一条路径
+// （墙钟跳过路径删除——进入 Synthesize 即尝试 report）。
+const reportErr = report ? null : 'report agent failed; reverting to raw archive'
 if (reportErr) degradedFlags.push('report_failed')
 // 归档 payload 数组（claimsJson 与降级 md 共用同一份同构数据，避免两处映射漂移）。
 const confirmedOut = confirmed.map(c => ({ claim: c.claim, quote: c.quote, source: c.sourceUrl, sourceQuality: c.sourceQuality, date: c.publishDate || c.date, window: c.isMajorOut ? 'major-out' : claimWindow(c), vote: c.isMajorOut ? '—' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, verifiedByVote: !c.isMajorOut, erroredCount: c.erroredCount || 0, confidence: (c.verdicts.filter(v => !v.refuted)[0] || {}).confidence || (c.isMajorOut ? 'high' : 'low') }))
@@ -892,6 +896,7 @@ const metaJson = JSON.stringify({
     raw_s: Math.round(RUN_ELAPSED_RAW() / 1000),
     calibrated_s: Math.round(RUN_ELAPSED() / 1000),
     starvation_factor: Number(WALL.factor.toFixed(2)),
+    peak_factor: Number(WALL.peakFactor.toFixed(2)),
     observations: WALL.observations,
   },
   breaker: { open: BREAKER.open(), reason: BREAKER.reason(), ...BREAKER.stats },

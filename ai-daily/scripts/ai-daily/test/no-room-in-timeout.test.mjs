@@ -29,5 +29,5 @@ test('fixed-bounds: 5 个固定上界在场（与 8/16 成功配置一致）', (
   assert.match(TPL, /timeoutMs:\s*g\.key === 'labs' \? 1800000 : 2400000/, 'discover labs?:1800000:2400000')
   assert.match(TPL, /timeoutMs:\s*AGENT_TIMEOUT_MS/, 'fetch 上界 AGENT_TIMEOUT_MS')
   assert.match(TPL, /vtimeout\s*=\s*AGENT_TIMEOUT_MS/, 'verify 上界 AGENT_TIMEOUT_MS')
-  assert.match(TPL, /timeoutMs:\s*600000/, 'report 上界 600000')
+  assert.match(TPL, /timeoutMs:\s*SYNTHESIS_LIMIT_MS/, 'report 上界 SYNTHESIS_LIMIT_MS（默认 600000，不写死魔法数）')
 })

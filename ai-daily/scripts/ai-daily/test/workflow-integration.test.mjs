@@ -202,14 +202,32 @@ test('模板：report safeAgent tries——只要有提取内容（allClaims>0�
   assert.ok(TPL.indexOf('confirmedVerify.length > 0') < 0, '不再以 confirmedVerify 判 tries（改以 allClaims 判）')
 })
 
-test('模板：探针只观察不否决——report 由总墙钟唯一守门（8/30 探针 advisory）', () => {
-  // 8/29 降级根因：探针单发 20s 失败把 synthAllowed 打成 false，report 从未被调用，
-  // 9 条已确认内容全量降 raw archive。修复后探针仅留日志，返回不再写进 synthAllowed。
-  assert.match(TPL, /const synthAllowed = RUN_ELAPSED\(\) <= TOTAL_LIMIT_MS/, 'synthAllowed 只由总墙钟决定')
-  assert.match(TPL, /if \(synthAllowed\) await probeGateway\('report'\)/, '探针 advisory：仅记录不参与否决')
-  // 旧 bug 形态：`const synthAllowed = RUN_ELAPSED() <= TOTAL_LIMIT_MS ? await probeGateway('report') : false`
-  // （同一行内短路探针）。修复后探针从决策表达式移出 → 断言不再出现该三元表达式。
-  assert.ok(!/const synthAllowed = RUN_ELAPSED\(\) <= TOTAL_LIMIT_MS \?/.test(TPL), 'synthAllowed 不再由探针短路（同行的旧三形态需消失）')
-  assert.ok(TPL.indexOf('const synthAllowed = RUN_ELAPSED() <= TOTAL_LIMIT_MS\nif (synthAllowed) await probeGateway') >= 0, 'report 由总墙钟唯一守门，探针仅独立记录')
-  assert.match(TPL, /if \(!synthAllowed\) log\('SYNTH-SKIP/, '只有总墙钟超限才 SYNTH-SKIP')
+test('模板：探针只观察不否决——合成入口与总墙钟脱钩（9/01 方案 D）', () => {
+  // 8/29 降级根因：探针单发 20s 失败把 synthAllowed 打成 false，report 从未被调用。
+  // 8/30 修：探针降为 advisory，但 synthAllowed 仍绑 TOTAL_LIMIT_MS——P1 标定落地后病态跑
+  // （8/31 Harvest 70min + Discover 129min）会正确把入口打成 false，已确认内容整份降 raw。
+  // 9/01 方案 D：入口不再看总墙钟；探针无条件 advisory；report 无条件尝试，只受自身 timeout 约束。
+  assert.ok(!TPL.includes('const synthAllowed = RUN_ELAPSED() <= TOTAL_LIMIT_MS'), 'synthAllowed 总墙钟门禁必须消失')
+  assert.ok(!/const synthAllowed = RUN_ELAPSED\(\) <= TOTAL_LIMIT_MS \?/.test(TPL), '旧三元短路（探针否决）不得回归')
+  assert.match(TPL, /await probeGateway\('report'\)/, '探针仍 advisory 调用')
+  assert.ok(!/if \(synthAllowed\) await probeGateway/.test(TPL), '探针不再套在 synthAllowed 里')
+  assert.ok(!TPL.includes("log('SYNTH-SKIP"), 'SYNTH-SKIP 总墙钟超限路径删除')
+  assert.ok(!TPL.includes('synth skipped (wall-clock over limit)'), 'reportErr 不再含墙钟跳过字样')
+  assert.match(TPL, /const reportErr = report \? null : 'report agent failed; reverting to raw archive'/, '合成失败只剩代理真失败')
+})
+
+test('模板：SYNTHESIS_LIMIT_MS 可配，默认 600s，接到 report timeoutMs', () => {
+  assert.match(TPL, /const SYNTHESIS_LIMIT_MS = typeof args\.synthesisLimitMs === 'number' && args\.synthesisLimitMs > 0 \? args\.synthesisLimitMs : 600000/, 'synthesisLimitMs 默认 600000')
+  assert.match(TPL, /timeoutMs: SYNTHESIS_LIMIT_MS/, 'report safeAgent 走 SYNTHESIS_LIMIT_MS')
+  assert.ok(!/timeoutMs: 600000/.test(TPL), 'report 不再写死 600000 魔法数')
+  // report 不再被 synthAllowed 三元短路
+  assert.match(TPL, /const report = await safeAgent\(reportPrompt/, 'report 无条件尝试（不套 synthAllowed）')
+})
+
+test('模板：agent/safeAgent 不覆盖模型（全链路走 CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-flash）', () => {
+  // 方案 D 模型项：现状已是 deepseek-v4-flash（环境变量），禁止在 opts 里写 model: 覆盖。
+  const agentCalls = TPL.split('\n').filter(l => /\b(agent|safeAgent)\s*\(/.test(l))
+  const withModel = agentCalls.filter(l => /\bmodel\s*:/.test(l))
+  assert.equal(withModel.length, 0, 'agent/safeAgent 调用不得传 model:，实得：' + JSON.stringify(withModel))
+  assert.ok(!/model:\s*['"]/.test(TPL), '模板不得出现 model: \'...\' 覆盖')
 })

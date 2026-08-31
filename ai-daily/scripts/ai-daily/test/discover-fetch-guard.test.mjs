@@ -35,14 +35,15 @@ test('guard: 模板 Discover 批首含 roomTo(Fetch) 闸门，避免慢批吞掉
   assert.match(TPL, /BUDGET-BREAK Discover 距 Fetch 死线/, '触发时有可 grep 日志（区别于整段 BUDGET-SKIP Fetch）')
 })
 
-test('guard: 修复不触碰单一 timeoutMs——仍遵守 no-room 五固定上界（harvest 1800000 / discover labs?:1800000:2400000 / fetch AGENT_TIMEOUT_MS / verify=vtimeout / report 600000）', () => {
+test('guard: 修复不触碰单一 timeoutMs——仍遵守 no-room 五固定上界（harvest 1800000 / discover labs?:1800000:2400000 / fetch AGENT_TIMEOUT_MS / verify=vtimeout / report SYNTHESIS_LIMIT_MS）', () => {
   // 8/26 修复的唯一抓手是批边界物质：timeoutMs 全部保持固定上界，不得因守卫改变。
   // 五条断言与 no-room-in-timeout 源级清单逐字一致，防本修复把 discover/fetch 上界悄悄收紧以「解」墙钟。
+  // 9/01 方案 D：report 上界从魔法数 600000 提升为 SYNTHESIS_LIMIT_MS（默认仍 600s，不随 room 收紧）。
   const codeLines = TPL.split('\n').filter(l => !l.trim().startsWith('//'))
   assert.ok(codeLines.some(l => /timeoutMs:\s*1800000/.test(l)), 'harvest 上界 1800000 在场')
   assert.ok(codeLines.some(l => /timeoutMs:\s*g\.key === 'labs' \? 1800000 : 2400000/.test(l)), 'discover labs?:1800000:2400000 在场')
   assert.ok(codeLines.some(l => /timeoutMs:\s*AGENT_TIMEOUT_MS/.test(l)), 'fetch 上界=AGENT_TIMEOUT_MS 在场')
-  assert.ok(codeLines.some(l => /timeoutMs:\s*600000/.test(l)), 'report 上界 600000 在场')
+  assert.ok(codeLines.some(l => /timeoutMs:\s*SYNTHESIS_LIMIT_MS/.test(l)), 'report 上界=SYNTHESIS_LIMIT_MS 在场')
   const vline = codeLines.find(l => /vtimeout\s*=/.test(l))
   assert.ok(vline && /AGENT_TIMEOUT_MS/.test(vline), 'vtimeout 仍取 AGENT_TIMEOUT_MS')
 })

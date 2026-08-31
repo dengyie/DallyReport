@@ -1,6 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { artifactPaths, summarizeArtifacts } from '../artifact-check.mjs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { artifactPaths, summarizeArtifacts, isCliMain } from '../artifact-check.mjs'
 
 // 8/31 P4：launchd 上下文 /bin/zsh 无 Full Disk Access，`wc -c`/`grep` 读 iCloud 产物被拒 →
 // 自检连续 6 次 run 打空壳 `ARTIFACT-OK md_bytes= confirmed= degraded=`。自检迁到 node 后，
@@ -76,4 +78,13 @@ test('P4：meta 字段缺失时降级为 ?，不得静默丢字段', () => {
   assert.match(line, /killed=\?/)
   assert.match(line, /urls=\?\/\?/)
   assert.match(line, /degraded=none/)
+})
+
+test('P4：isCliMain 相对 argv[1] 经 path.resolve 对齐，不得因相对路径静默不当 CLI', () => {
+  const abs = fileURLToPath(import.meta.url)
+  assert.equal(isCliMain(import.meta.url, abs), true, '绝对路径命中')
+  const rel = path.relative(process.cwd(), abs) || abs
+  assert.equal(isCliMain(import.meta.url, rel), true, '相对路径经 resolve 后命中')
+  assert.equal(isCliMain(import.meta.url, undefined), false)
+  assert.equal(isCliMain(import.meta.url, '/tmp/not-this-file.mjs'), false)
 })
