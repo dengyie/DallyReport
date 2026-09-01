@@ -250,12 +250,12 @@ test('模板 P1：Discover 入口 BREAKER.resetConsecutive() 在代理批循环�
   assert.ok(idxReset < idxLoop, 'resetConsecutive 在代理批循环之前（Harvest 垫的 consecutive 不得带进第一批）')
 })
 
-test('模板：report safeAgent tries——只要有提取内容（allClaims>0）就 2 次尝试', () => {
-  // 8/30 收紧：8/29 实证 9 条已确认内容因 report 单次未成功而全量降级 raw；只要当日有内容就给
-  // tries=2（一次 end_turn/抖动不判死整份 report）。只有全空（allClaims 0，纯空板）才单次 fast-fail。
+test('模板：reportTries 保留作零素材闸门，派生 reportLadder 而非裸 MODEL_LADDER', () => {
+  // 9/02 阶梯：reportTries 表达式逐字保留（有 claim→2、全空才 1），语义升级为「要不要进完整阶梯」。
+  // 零素材只跑首级；有素材才启用 MODEL_LADDER。不得把裸 MODEL_LADDER 直接传给 report。
   assert.match(TPL, /const reportTries = allClaims\.length === 0 \? 1 : 2/, '有 claim→tries=2，全空才 1 次')
-  assert.match(TPL, /}, reportTries\)/, 'safeAgent 第三个参数（tries）走 reportTries')
-  assert.ok(TPL.indexOf('allClaims.length === 0 ? 1 : 2') >= 0, '全空才单次尝试')
+  assert.match(TPL, /const reportLadder = reportTries === 1 \? \[MODEL_LADDER\[0\]\] : MODEL_LADDER/, '零素材只跑首级')
+  assert.match(TPL, /reportLadder, LADDER_BUDGET_MS\)/, 'report 传入派生的 reportLadder + 阶梯预算')
   assert.ok(TPL.indexOf('confirmedVerify.length > 0') < 0, '不再以 confirmedVerify 判 tries（改以 allClaims 判）')
 })
 
@@ -275,10 +275,10 @@ test('模板：探针只观察不否决——合成入口与总墙钟脱钩（9/
 
 test('模板：SYNTHESIS_LIMIT_MS 可配，默认 600s，接到 report timeoutMs', () => {
   assert.match(TPL, /const SYNTHESIS_LIMIT_MS = typeof args\.synthesisLimitMs === 'number' && args\.synthesisLimitMs > 0 \? args\.synthesisLimitMs : 600000/, 'synthesisLimitMs 默认 600000')
-  assert.match(TPL, /timeoutMs: SYNTHESIS_LIMIT_MS/, 'report safeAgent 走 SYNTHESIS_LIMIT_MS')
+  assert.match(TPL, /timeoutMs: SYNTHESIS_LIMIT_MS/, 'report 走 SYNTHESIS_LIMIT_MS')
   assert.ok(!/timeoutMs: 600000/.test(TPL), 'report 不再写死 600000 魔法数')
   // report 不再被 synthAllowed 三元短路
-  assert.match(TPL, /const report = await safeAgent\(reportPrompt/, 'report 无条件尝试（不套 synthAllowed）')
+  assert.match(TPL, /const report = await safeAgentWithLadder\(reportPrompt/, 'report 无条件尝试（阶梯包装，不套 synthAllowed）')
 })
 
 test('模板：从不 budgetGate(Synthesize)（方案 D 入口不走该字段）', () => {
@@ -292,10 +292,40 @@ test('模板：safeAgent 末次 null 打 fail 不打 retry', () => {
   assert.ok(nullLine.includes('fail'), '末次/分支须含 fail（throw 路径已是 fail；null 路径不得无条件 retry）')
 })
 
-test('模板：agent/safeAgent 不覆盖模型（全链路走 CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-flash）', () => {
-  // 方案 D 模型项：现状已是 deepseek-v4-flash（环境变量），禁止在 opts 里写 model: 覆盖。
-  const agentCalls = TPL.split('\n').filter(l => /\b(agent|safeAgent)\s*\(/.test(l))
-  const withModel = agentCalls.filter(l => /\bmodel\s*:/.test(l))
-  assert.equal(withModel.length, 0, 'agent/safeAgent 调用不得传 model:，实得：' + JSON.stringify(withModel))
-  assert.ok(!/model:\s*['"]/.test(TPL), '模板不得出现 model: \'...\' 覆盖')
+test('模板：model: 只允许阶梯常量引用，禁止字面量', () => {
+  // 9/02 阶梯：report/verify 必须传 model: m（变量）；禁止 model: 'deepseek-v4-flash' 这类字面量飘回。
+  const agentCalls = TPL.split('\n').filter(l => /\b(agent|safeAgent|safeAgentWithLadder)\s*\(/.test(l))
+  const withLiteral = agentCalls.filter(l => /\bmodel\s*:\s*['"`]/.test(l))
+  assert.equal(withLiteral.length, 0, 'agent 调用不得传 model: "..." 字面量，只允许 model: m（阶梯变量），实得：' + JSON.stringify(withLiteral))
+})
+
+test('模板：ladderBudgetMs 数字原样透传（含 0），缺省才回落 DEFAULT_LADDER_BUDGET_MS', () => {
+  // SKILL / 工厂契约：ladderBudgetMs<=0 关闭预算检查。模板不得用 >0 把 0 吞回 900000。
+  assert.match(
+    TPL,
+    /const LADDER_BUDGET_MS = typeof args\.ladderBudgetMs === 'number' \? args\.ladderBudgetMs : DEFAULT_LADDER_BUDGET_MS/,
+    '数字（含 0）原样透传；undefined 才用 DEFAULT_LADDER_BUDGET_MS',
+  )
+  assert.doesNotMatch(
+    TPL,
+    /LADDER_BUDGET_MS = typeof args\.ladderBudgetMs === 'number' && args\.ladderBudgetMs > 0/,
+    '不得用 >0 把 ladderBudgetMs:0 吞回默认 15min',
+  )
+})
+
+test('模板：report + verify 走阶梯，harvest/discover/fetch 仍 safeAgent', () => {
+  assert.match(TPL, /safeAgentWithLadder\(verifyPrompt/, '_voteBatch 走阶梯')
+  assert.match(TPL, /MODEL_LADDER, LADDER_BUDGET_MS/, 'verify 传完整 MODEL_LADDER + 预算')
+  assert.match(TPL, /safeAgent\(harvestPrompt/, 'harvest 不走阶梯')
+  assert.match(TPL, /safeAgent\(discoverPrompt/, 'discover 不走阶梯')
+  assert.match(TPL, /safeAgent\(fetchPrompt/, 'fetch 不走阶梯')
+  assert.match(TPL, /REPORT-FAIL 模型阶梯全废/, 'report 终局失败有明确日志')
+  assert.match(TPL, /ladder_used:/, 'degradedFlags 含 ladder_used')
+  assert.match(TPL, /ladder_exhausted:/, 'degradedFlags 含 ladder_exhausted')
+  const idxTick = TPL.indexOf('const _TICK_MS')
+  const idxLadderFn = TPL.indexOf('const safeAgentWithLadder')
+  assert.ok(idxTick >= 0 && idxLadderFn >= 0, '_TICK_MS 与 safeAgentWithLadder 都在场')
+  assert.ok(idxLadderFn > idxTick, 'safeAgentWithLadder 必须在时钟块之后（不得污染 safeAgent 切片）')
+  assert.match(TPL, /makeSafeAgentWithLadder\(/, '模板接线工厂')
+  assert.match(TPL, /generated_by: 'ai-daily \(' \+ MODEL_LADDER\[0\] \+ '\)'/, 'generated_by 跟阶梯首级走')
 })

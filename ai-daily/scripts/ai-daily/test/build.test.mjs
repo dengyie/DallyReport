@@ -17,7 +17,7 @@ import os from 'node:os'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const BUILD = path.join(HERE, '..', 'build.mjs')
 // 与 build.mjs 的 MODULES 常量逐字一致：url-polyfill 最先（注入 globalThis.URL），linuxdo 最后（零依赖纯导出）。
-const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'wallclock', 'fallback', 'prompts', 'render-md', 'cluster', 'linuxdo']
+const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'wallclock', 'ladder', 'fallback', 'prompts', 'render-md', 'cluster', 'linuxdo']
 // 每模块一个"关键标识"：命即证模块真的被 inline 进产物（若占位符替换丢模块/依赖序错，函数名/常量必缺）。
 // 全部取自各 .mjs 导出名（grep 实证），且为该模块唯一出现于产物中的标识。
 const MARKERS = {
@@ -28,6 +28,7 @@ const MARKERS = {
   dedup: 'allocateFetchBudget',
   budget: 'computePhaseDeadlines',
   wallclock: 'makeCalibratedElapsed',
+  ladder: 'makeSafeAgentWithLadder',
   fallback: 'buildFallback',
   prompts: 'reportPrompt',
   'render-md': 'buildCitationMap',
@@ -56,7 +57,7 @@ test('F1 --check-only 不改动真实产物文件（无副作用守卫）', () =
 })
 
 // 产物级断言：用 --out 把产物写进 os.tmpdir（仿真 build 内部同样走系统临时目录），读回断言后即删。
-test('F1 产物包含全部 11 个 MODULES 的关键标识（无模块丢失）', () => {
+test('F1 产物包含全部 MODULES 的关键标识（无模块丢失）', () => {
   const code = readBuiltProduct()
   for (const m of MODULES) {
     assert.ok(code.includes(MARKERS[m]), `产物应含模块 ${m} 的标识符 ${MARKERS[m]}`)

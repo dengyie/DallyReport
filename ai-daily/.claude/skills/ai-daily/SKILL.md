@@ -55,7 +55,9 @@ description: 生成 AI 每日日报（自动每天 08:40 由 launchd 触发，�
   "fetchBudgetMs": 480000,
   "verifyBudgetMs": 300000,
   "verifyInflightBufferMs": 60000,
-  "synthesisLimitMs": 600000
+  "synthesisLimitMs": 600000,
+  "modelLadder": ["deepseek-v4-flash", "grok-4.6", "claude-opus-4-8", "gemini-3.7-flash-high"],
+  "ladderBudgetMs": 900000
 }
 ```
 
@@ -71,7 +73,7 @@ description: 生成 AI 每日日报（自动每天 08:40 由 launchd 触发，�
 
 > **8/31 P1 墙钟标定与计数型断路器（新增可选 args）**：realm 唯一时钟是 `setTimeout` 链累加器，它计的是 **tick 发生次数 × 250ms**，事件循环饱和时 tick 被饿死 → **只低估、永不高估**（8/31 生产 run 实测 Fetch gate ≥4.7×、Verify ≥6.6×、synth ≥7.6×，4h13m 的 run 零 `BUDGET-SKIP`，30min 软目标形同不存在）。修法两条：① **墙钟标定**——`setTimeout(ms)` 绝不早于 ms 真实毫秒触发，故每次真超时都证明「真实经过 ≥ ms」，与同窗口累加器增量相比即得饥饿倍率（`wallclock.mjs`），所有闸门读的 `RUN_ELAPSED` 已是标定后读数（**单调不减**，倍率回落不让已越线阶段复活；倍率封顶 20×；无观测时逐字节等价旧行为，健康跑零影响）；② **计数型断路器**——失败计数不依赖时钟，饱和下依然准确，`safeAgent` 终局失败/成功均记账，Discover 批首查 `BREAKER.open()`，跳闸即跳**代理**余批直连 static-fallback → Fetch（8/31 实测 Harvest 烧 70min、Discover 再烧 129min，而失败信号早已密集）。**linuxdo 是宿主预抓通道，消费在代理批循环之前，断路器跳闸不得丢掉已预抓 posts。** **9/01**：`phase('Discover')` 入口调 `BREAKER.resetConsecutive()`（清连续计数，不清累计 failures；已跳闸仍 open），Harvest 垫高的 consecutive 不得让 Discover 第一失败即跳闸。新增可选 args：`breakerConsecutive`（默认 3，连续失败跳闸阈值）、`breakerTotal`（默认 5，累计失败跳闸阈值）。**可审计**：日志 `BREAKER-OPEN Discover 余批跳过`、`[墙钟标定 … 饥饿倍率 N.NN×]`；降级旗标 `breaker_open:<reason>`、`wallclock_starved:<N>x`（**峰值**倍率 >1.5 且有真实观测时——先饿后恢复不抹旗标）；meta 增 `wallclock{raw_s,calibrated_s,starvation_factor,peak_factor,observations}`（`starvation_factor` 为最新倍率、`peak_factor` 为本 run 最高）与 `breaker{open,reason,failures,successes,consecutive}` 便于与宿主侧 `run-daily.sh` 记录的**真实 epoch** 三方对账。探针超时 `withDeadline(..., false)` **不**喂 `WALL.observe`（短窗不得污染标定）。
 
-模型策略：本期全链路统一 deepseek-v4-flash（环境已配 `CLAUDE_CODE_SUBAGENT_MODEL`，无需在 args 指定）。勿覆盖模型。
+> **9/02 模型阶梯（仅 report + verify）**：`args.modelLadder` 默认 `deepseek-v4-flash` → `grok-4.6` → `claude-opus-4-8` → `gemini-3.7-flash-high`；`args.ladderBudgetMs` 默认 900000（15 分钟）。**仅 report / verify 走阶梯**（`safeAgentWithLadder`）；**harvest / discover / fetch 不走阶梯**，仍继承环境 `CLAUDE_CODE_SUBAGENT_MODEL` 经 `safeAgent`（不传 `model:` 字面量）。仅 TRANSIENT（422/429/5xx/524/timeout/gateway/cloudflare/model not found/upstream）或 `withDeadline` 超时 null 换级；schema / end_turn 等同级消化。中间级失败不 `BREAKER.record`；终局 null 才由调用方记账。预算在当前级失败后再查，超了停在当前级；`ladderBudgetMs<=0` 关闭检查。`reportTries` 仍是外层闸门（`allClaims.length === 0 ? 1 : 2`）：零素材只跑 `MODEL_LADDER[0]`，有素材才爬满四级。降级旗标 `ladder_used:<label>:<model>+…`（非首级救回）、`ladder_exhausted:report|verify`（该阶段阶梯耗尽）。
 
 ### 5. 收尾与汇报
 - 若 Workflow 返回 `artifacts` 且含 `payloads`：**4 个产物用 finalize 确定性落盘**——
@@ -86,7 +88,7 @@ description: 生成 AI 每日日报（自动每天 08:40 由 launchd 触发，�
   - 头条一句话：`headline`
   - 执行摘要：`summary`
   - 覆盖矩阵要点 + 确认无动态的厂商
-  - **降级标记 `degraded`**（如 discovery_degraded / discovery_recovered / verify_agent_errors / fetch_budget_dropped / budget_skipped）——必须如实转达。`discovery_recovered:<boards>` 表示这些板 discover 代理失败但已从 harvest entries 兜底救回 URL（通道仍 degraded、内容已补，不再标 missing）。
+  - **降级标记 `degraded`**（如 discovery_degraded / discovery_recovered / verify_agent_errors / fetch_budget_dropped / budget_skipped / `ladder_used:` / `ladder_exhausted:`）——必须如实转达。`discovery_recovered:<boards>` 表示这些板 discover 代理失败但已从 harvest entries 兜底救回 URL（通道仍 degraded、内容已补，不再标 missing）。`ladder_used:<label>:<model>+…` 表示 report/verify 在非首级模型救回；`ladder_exhausted:report|verify` 表示该阶段四级/预算耗尽。
 - 若 Workflow 返回 `error` 或产物缺失：降级处理，产出一份"未核查日报"到 `<iCloud DallyReport/<date>/<date>-ai日报.md>`（标注降级原因），并保留已归档 JSON；如实向用户说明失败点。
 - 不要向用户重复贴全文大 JSON；贴 md 文件路径 + 摘要即可。
 - **生成完成后清理本会话开起的浏览器/进程**：若本次生成过程中，我（编排器）为开发/调试而调用过 Playwright MCP / 启动过浏览器或 node 进程，则收尾时**只关闭我自己开起的那几个**（精确按本会话子进程/本会话写入的标记关闭，或用 `pkill -f 'playwright-mcp.*<本会话唯一标识>'`）。**绝不**去关用户自己开的 Chrome/浏览器/其他 Claude Code 会话的工具进程——那些不属于日报系统。关闭前用 `ps -o pid,etime,lstart,command` 复核该进程确实是本会话拉起、且不是其它会话/用户正在用的，再终止。本条为流程纪律：生成完日报即清理自身资源，不遗留占用。

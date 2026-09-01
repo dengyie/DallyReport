@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { renderMarkdown, renderDegradedMarkdown, buildCitationMap } from '../render-md.mjs'
 import { computeBoardStates } from '../boards.mjs'
+import { DEFAULT_LADDER } from '../ladder.mjs'
 
 const baseReport = {
   oneLiner: '今日 AI 行业一句话。',
@@ -183,7 +184,7 @@ test('完整版：frontmatter + 素材窗口横幅（meta 可选参数）', () =
   assert.ok(md.startsWith('---\ndate: 2026-08-21'), 'frontmatter 置于最顶')
   assert.ok(md.includes('window: 2026-08-19 ~ 2026-08-21'))
   assert.ok(md.includes('generator: ai-daily'))
-  assert.ok(md.includes('model: deepseek-v4-flash'))
+  assert.ok(md.includes('model: ' + DEFAULT_LADDER[0]))
   assert.ok(md.includes('tags: [日报, AI]'))
   assert.ok(md.includes('stats: {confirmed:30, major_out:14, killed:2, urls_fetched:7}'))
   assert.ok(md.includes('> **素材窗口**：当日素材 30 条；近几日来源 35 条。'))

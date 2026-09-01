@@ -120,6 +120,7 @@ const WEB_BUDGET_PER = 2
 /* @inline: dedup */
 /* @inline: budget */
 /* @inline: wallclock */
+/* @inline: ladder */
 /* @inline: fallback */
 /* @inline: prompts */
 /* @inline: render-md */
@@ -226,6 +227,17 @@ const probeGateway = async label => {
   if (!p) { log('PROBE-FAIL advisory ' + label + ' ' + took + 'ms 探针未通过（不否决合成）'); return false }
   log('PROBE-OK ' + label + ' ' + took + 'ms'); return true
 }
+// 9/02 模型阶梯：仅 report + verify 走四级降级。DEFAULT_LADDER 由 ladder.mjs inline 提供。
+// 必须放在时钟块（_TICK_MS / now）之后——workflow-integration 切片 const safeAgent … const _TICK_MS 不得被污染。
+const MODEL_LADDER = Array.isArray(args.modelLadder) && args.modelLadder.length > 0 ? args.modelLadder : DEFAULT_LADDER
+const LADDER_BUDGET_MS = typeof args.ladderBudgetMs === 'number' ? args.ladderBudgetMs : DEFAULT_LADDER_BUDGET_MS
+const ladderUsed = []
+const ladderExhaustedStages = new Set()
+const safeAgentWithLadder = makeSafeAgentWithLadder({
+  agent, withDeadline, now, log, TRANSIENT, AGENT_TIMEOUT_MS,
+  onRecovered: (label, model) => { ladderUsed.push(label + ':' + model) },
+  onExhausted: (label) => { ladderExhaustedStages.add(/^report/.test(String(label)) ? 'report' : 'verify') },
+})
 // 8/17 第十四项：阶段墙钟闸门——某阶段前查 RUN_ELAPSED 是否已过该阶段累计死线；超限即记 budget_skipped + log，返回 ok:false。
 // roomMs = 死线减已耗，供批内 timeoutMs 收紧（in-flight 硬停）。performance 不可用时 now()=0 → 恒放行（软兜底失效但不误杀已完成工作）；resume 重新起算仅宽松兜底。
 // budget.mjs：computePhaseDeadlines 算累计死线 + makeBudgetGate(stage) 闸门（elapsedFn 注入 RUN_ELAPSED，clock 解耦测试化）。
@@ -652,9 +664,13 @@ for (const k of boardKeysV) rankedClaims.push(...claimsByBoard.get(k).slice(0, q
 log('Verify: ' + rankedClaims.length + ' claims across ' + boardKeysV.length + ' boards [' + [...quota.entries()].map(e => e[0] + ':' + e[1]).join(' ') + '], adaptive 2+1 votes')
 phase('Verify')
 
-const _voteBatch = (c, n, startIdx, timeoutMs) => parallel(Array.from({ length: n }, (_, v) => () =>
-  safeAgent(verifyPrompt(c, ctxP), { label: 'v' + (startIdx + v) + ':' + (c.claim || '').slice(0, 30), phase: 'Verify', schema: VERDICT_SCHEMA, effort: 'low', timeoutMs }, 1)
-))
+const _voteBatch = (c, n, startIdx, timeoutMs) => parallel(Array.from({ length: n }, (_, v) => () => {
+  const label = 'v' + (startIdx + v) + ':' + (c.claim || '').slice(0, 30)
+  return safeAgentWithLadder(verifyPrompt(c, ctxP), { label, phase: 'Verify', schema: VERDICT_SCHEMA, effort: 'low', timeoutMs }, MODEL_LADDER, LADDER_BUDGET_MS).then(r => {
+    BREAKER.record(!!r, label)
+    return r
+  })
+}))
 // 8/15 自适应 2+1（语义无损）：round0 并发 2 票。双否→kill（2 票）；双非否→存活（2 票）；分歧/缺票→补 1 票终判。
 // 终判规则与 3 票时代逐字一致：survives ⇔ valid≥2 且 refuted<2；isRefuted ⇔ refuted≥2。平均 2.0-2.3 票/claim。
 const voteClaim = async (c, timeoutMs) => {
@@ -848,10 +864,17 @@ const missBlock = windowMisses.length ? '\n## 窗口外参考（次要超窗项�
 // 不能把整份 report 打成 raw archive（8/29 实证：9 条已确认内容因 report 未跑完而全量降级）。
 // 唯一的单次直出=当日全空（allClaims.length === 0），此时 nothing 可写，一次即可。
 const reportTries = allClaims.length === 0 ? 1 : 2
-const report = await safeAgent(reportPrompt({
+const reportLadder = reportTries === 1 ? [MODEL_LADDER[0]] : MODEL_LADDER
+const report = await safeAgentWithLadder(reportPrompt({
   ...ctxP, confirmedVerifyCount: confirmedVerify.length, majorOutCount: majorOutClaims.length,
   reportBody: reportBodyWithCluster, killedCount: killed.length, refutedList, unverifiedCount: unverified.length, unverifiedList, missBlock, coverBlock,
-}), { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: SYNTHESIS_LIMIT_MS }, reportTries)
+}), { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: SYNTHESIS_LIMIT_MS }, reportLadder, LADDER_BUDGET_MS)
+if (report) {
+  BREAKER.record(true, 'report')
+} else {
+  BREAKER.record(false, 'report')
+  log('REPORT-FAIL 模型阶梯全废，降级 raw archive')
+}
 
 // ─── md 确定性渲染（report 成功 → 完整版；失败 → 降级版）。render-md.mjs，不再有 mdWriter 代理。───
 // report 成功 → md 必然成功（纯字符串拼接），md 产出不再受网关波动影响。
@@ -869,6 +892,8 @@ if (WALL.observations > 0 && WALL.peakFactor > 1.5) degradedFlags.push('wallcloc
 // 8/23 第二十一项：linuxdo 组失败/降级 → linuxdo_degraded 独立降级旗标（no_cdp_host 跳过不算降级）。
 const linuxdoFailedRows = discoverRows.filter(d => d.linuxdoFailed)
 if (linuxdoFailedRows.length) degradedFlags.push('linuxdo_degraded' + (linuxdoFailedRows.some(d => d.linuxdoReason) ? ':' + linuxdoFailedRows.map(d => d.linuxdoReason).join('+').slice(0, 80) : ''))
+if (ladderUsed.length > 0) degradedFlags.push('ladder_used:' + ladderUsed.join('+'))
+if (ladderExhaustedStages.size) degradedFlags.push('ladder_exhausted:' + [...ladderExhaustedStages].join('+'))
 // 9/01 方案 D：合成入口与总墙钟脱钩后，reportErr 只剩「代理真失败」一条路径
 // （墙钟跳过路径删除——进入 Synthesize 即尝试 report）。
 const reportErr = report ? null : 'report agent failed; reverting to raw archive'
@@ -882,7 +907,7 @@ const md = report
   ? renderMarkdown({ date: DATE, window: WINDOW_LABEL, report, coverage, windowMisses, degraded: degradedFlags, meta: {
       date: DATE, window: WINDOW_LABEL,
       stats: { confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, urls_fetched: sources.length, urls_discovered: discoverRows.reduce((n, d) => n + d.urls.length, 0) },
-      generated_by: 'ai-daily (deepseek-v4-flash)',
+      generated_by: 'ai-daily (' + MODEL_LADDER[0] + ')',
     } })
   : renderDegradedMarkdown({ date: DATE, window: WINDOW_LABEL, confirmed: confirmedOut, refuted: refutedOut, coverage, windowMisses, degraded: degradedFlags, noNewsCompanies: noDynamicCompanies, reportError: reportErr })
 
@@ -895,7 +920,7 @@ const sourcesJson = JSON.stringify({ date: DATE, sources: sources.map(s => ({ ur
 const artifacts = [claimsPath, sourcesPath]  // md 由 orchestrator 从 payloads.md 落盘，artifact 清单列 JSON（3 个见下）
 
 const metaJson = JSON.stringify({
-  date: DATE, window: { from: WFROM, to: WTO || DATE }, generated_by: 'ai-daily (deepseek-v4-flash)',
+  date: DATE, window: { from: WFROM, to: WTO || DATE }, generated_by: 'ai-daily (' + MODEL_LADDER[0] + ')',
   boards: boards.length, urls_discovered: discoverRows.reduce((n, d) => n + d.urls.length, 0), urls_fetched: sources.length, claims_extracted: allClaims.length,
   claims_verified: voted.length, confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, unverified: unverified.length, out_of_window_confirmed: outOfWindow.length,
   window_misses: windowMisses,

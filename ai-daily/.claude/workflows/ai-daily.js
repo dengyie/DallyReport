@@ -739,6 +739,97 @@ const makeCircuitBreaker = opts => {
     get stats() { return { failures, successes, consecutive } },
   }
 }
+// ─── inline: ladder ───
+// ai-daily 模型阶梯降级 — 2026-09-02。
+//
+// 背景（9/01 生产 run 实证）：17 次 Cloudflare 524 打掉 report 两试 → raw archive，
+// 连带 3 张 verify 票。网关故障不在代码范围；本模块给 report + verify 一条
+// TRANSIENT-only 的四级换模通道，中间失败不计入断路器（调用方只在终局记账）。
+//
+// 语义：
+//   - 仅 TRANSIENT（524/5xx/429/timeout/gateway/…）换级；schema/end_turn 等行为问题同级消化。
+//   - null（withDeadline 超时）也换级——这是相对 safeAgent 的唯一偏离，524 超时正是要救的场景。
+//   - budgetMs<=0 关闭预算检查；正预算先跑当前级，失败后再看是否还够爬下一级。
+//   - 工厂不碰断路器：中间失败不得自吃 4 次计数把 total=5 吹断。
+//
+// 时钟只能用注入的 now（workflow realm 无 Date.now/performance）。
+
+const DEFAULT_LADDER = ['deepseek-v4-flash', 'grok-4.6', 'claude-opus-4-8', 'gemini-3.7-flash-high']
+const DEFAULT_LADDER_BUDGET_MS = 900000
+
+/**
+ * 模型阶梯降级包装：TRANSIENT / null 逐级换模型，终局才返回 null。
+ * @param {{agent, withDeadline, now, log, TRANSIENT, AGENT_TIMEOUT_MS, onRecovered?, onExhausted?}} deps
+ * @returns {(prompt:string, opts:object, ladder:string[], budgetMs:number) => Promise<object|null>}
+ */
+const makeSafeAgentWithLadder = (deps) => {
+  const {
+    agent, withDeadline, now, log, TRANSIENT, AGENT_TIMEOUT_MS,
+    onRecovered, onExhausted,
+  } = deps
+  const fail = (label) => {
+    if (typeof onExhausted === 'function') onExhausted(label)
+    return null
+  }
+  return async (prompt, opts, ladder, budgetMs) => {
+    const label = (opts && opts.label) || '?'
+    const list = Array.isArray(ladder) ? ladder : []
+    if (!list.length) {
+      log('LADDER-FAIL ' + label + ' (empty ladder)')
+      return fail(label)
+    }
+    const t0 = now()
+    const timeoutMs = (opts && opts.timeoutMs) || AGENT_TIMEOUT_MS
+    for (let i = 0; i < list.length; i++) {
+      const m = list[i]
+      let r = null
+      try {
+        r = await withDeadline(agent(prompt, { ...opts, model: m }), timeoutMs)
+      } catch (e) {
+        const msg = String(((e && (e.message || e.error)) || e) || '')
+        const isTrans = TRANSIENT.test(msg)
+        const hasNext = i < list.length - 1
+        const elapsed = now() - t0
+        const budgetOk = !(budgetMs > 0 && elapsed >= budgetMs)
+        if (!isTrans) {
+          log('LADDER-FAIL ' + label + ' at ' + m + ': ' + msg.slice(0, 120))
+          return fail(label)
+        }
+        if (!hasNext) {
+          log('LADDER-FAIL ' + label + ' at ' + m + ': ' + msg.slice(0, 120))
+          return fail(label)
+        }
+        if (!budgetOk) {
+          log('LADDER-BUDGET ' + label + ' 阶梯已用 ' + Math.round(elapsed / 1000) + 's ≥ 预算 ' + Math.round(budgetMs / 1000) + 's，停在 ' + m)
+          return fail(label)
+        }
+        log('LADDER-NEXT ' + label + ' ' + m + ' → ' + list[i + 1] + ': ' + msg.slice(0, 100))
+        continue
+      }
+      if (r) {
+        if (i > 0) {
+          log('LADDER-OK ' + label + ' recovered at ' + m)
+          if (typeof onRecovered === 'function') onRecovered(label, m)
+        }
+        return r
+      }
+      const hasNext = i < list.length - 1
+      const elapsed = now() - t0
+      const budgetOk = !(budgetMs > 0 && elapsed >= budgetMs)
+      if (!hasNext) {
+        log('LADDER-FAIL ' + label + ' (null at ' + m + ')')
+        return fail(label)
+      }
+      if (!budgetOk) {
+        log('LADDER-BUDGET ' + label + ' 阶梯已用 ' + Math.round(elapsed / 1000) + 's ≥ 预算 ' + Math.round(budgetMs / 1000) + 's，停在 ' + m)
+        return fail(label)
+      }
+      log('LADDER-NEXT ' + label + ' ' + m + ' → ' + list[i + 1] + ' (null)')
+    }
+    log('LADDER-FAIL ' + label + ' (exhausted)')
+    return fail(label)
+  }
+}
 // ─── inline: fallback ───
 // ai-daily discover 兜底构造器 — 纯函数，供 template inline 与测试直调。
 // 8/22 第二十项：disc 失败的组，从 harvest 已抓到的 digestByKey entries 补 URL 候选进 boardURLMap，
@@ -990,7 +1081,7 @@ const frontmatterLines = (meta, date, window) => {
   L.push('date: ' + (meta.date || date))
   L.push('window: ' + (meta.window || window))
   L.push('generator: ai-daily')
-  L.push('model: deepseek-v4-flash')
+  L.push('model: ' + DEFAULT_LADDER[0])
   L.push('tags: [日报, AI]')
   const statsParts = []
   if (num(st.confirmed) != null) statsParts.push('confirmed:' + st.confirmed)
@@ -1022,7 +1113,7 @@ const renderMarkdown = ({ date, window, report, coverage, windowMisses, degraded
     const hard = (typeof st.confirmed === 'number' ? st.confirmed : 0) + (typeof st.major_out === 'number' ? st.major_out : 0)
     if (hard < 8) L.push('> ⚠️ **低素材提示**：当日硬源不足 8 条，正文以近期趋势为主，请注意时效。')
   }
-  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（deepseek-v4-flash）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
+  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（' + DEFAULT_LADDER[0] + '）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
   L.push('')
   L.push('## 📌 今日一句话')
   L.push('')
@@ -1119,7 +1210,7 @@ const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, wi
   const L = []
   L.push('# 🤖 AI 日报 · ' + date)
   L.push('')
-  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（deepseek-v4-flash）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
+  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（' + DEFAULT_LADDER[0] + '）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
   L.push('')
   L.push('## ⚠️ 本日报为**降级快讯**（report 合成代理未产出，由编排器据已核查归档拼合）')
   L.push('')
@@ -1521,6 +1612,17 @@ const probeGateway = async label => {
   if (!p) { log('PROBE-FAIL advisory ' + label + ' ' + took + 'ms 探针未通过（不否决合成）'); return false }
   log('PROBE-OK ' + label + ' ' + took + 'ms'); return true
 }
+// 9/02 模型阶梯：仅 report + verify 走四级降级。DEFAULT_LADDER 由 ladder.mjs inline 提供。
+// 必须放在时钟块（_TICK_MS / now）之后——workflow-integration 切片 const safeAgent … const _TICK_MS 不得被污染。
+const MODEL_LADDER = Array.isArray(args.modelLadder) && args.modelLadder.length > 0 ? args.modelLadder : DEFAULT_LADDER
+const LADDER_BUDGET_MS = typeof args.ladderBudgetMs === 'number' ? args.ladderBudgetMs : DEFAULT_LADDER_BUDGET_MS
+const ladderUsed = []
+const ladderExhaustedStages = new Set()
+const safeAgentWithLadder = makeSafeAgentWithLadder({
+  agent, withDeadline, now, log, TRANSIENT, AGENT_TIMEOUT_MS,
+  onRecovered: (label, model) => { ladderUsed.push(label + ':' + model) },
+  onExhausted: (label) => { ladderExhaustedStages.add(/^report/.test(String(label)) ? 'report' : 'verify') },
+})
 // 8/17 第十四项：阶段墙钟闸门——某阶段前查 RUN_ELAPSED 是否已过该阶段累计死线；超限即记 budget_skipped + log，返回 ok:false。
 // roomMs = 死线减已耗，供批内 timeoutMs 收紧（in-flight 硬停）。performance 不可用时 now()=0 → 恒放行（软兜底失效但不误杀已完成工作）；resume 重新起算仅宽松兜底。
 // budget.mjs：computePhaseDeadlines 算累计死线 + makeBudgetGate(stage) 闸门（elapsedFn 注入 RUN_ELAPSED，clock 解耦测试化）。
@@ -1947,9 +2049,13 @@ for (const k of boardKeysV) rankedClaims.push(...claimsByBoard.get(k).slice(0, q
 log('Verify: ' + rankedClaims.length + ' claims across ' + boardKeysV.length + ' boards [' + [...quota.entries()].map(e => e[0] + ':' + e[1]).join(' ') + '], adaptive 2+1 votes')
 phase('Verify')
 
-const _voteBatch = (c, n, startIdx, timeoutMs) => parallel(Array.from({ length: n }, (_, v) => () =>
-  safeAgent(verifyPrompt(c, ctxP), { label: 'v' + (startIdx + v) + ':' + (c.claim || '').slice(0, 30), phase: 'Verify', schema: VERDICT_SCHEMA, effort: 'low', timeoutMs }, 1)
-))
+const _voteBatch = (c, n, startIdx, timeoutMs) => parallel(Array.from({ length: n }, (_, v) => () => {
+  const label = 'v' + (startIdx + v) + ':' + (c.claim || '').slice(0, 30)
+  return safeAgentWithLadder(verifyPrompt(c, ctxP), { label, phase: 'Verify', schema: VERDICT_SCHEMA, effort: 'low', timeoutMs }, MODEL_LADDER, LADDER_BUDGET_MS).then(r => {
+    BREAKER.record(!!r, label)
+    return r
+  })
+}))
 // 8/15 自适应 2+1（语义无损）：round0 并发 2 票。双否→kill（2 票）；双非否→存活（2 票）；分歧/缺票→补 1 票终判。
 // 终判规则与 3 票时代逐字一致：survives ⇔ valid≥2 且 refuted<2；isRefuted ⇔ refuted≥2。平均 2.0-2.3 票/claim。
 const voteClaim = async (c, timeoutMs) => {
@@ -2143,10 +2249,17 @@ const missBlock = windowMisses.length ? '\n## 窗口外参考（次要超窗项�
 // 不能把整份 report 打成 raw archive（8/29 实证：9 条已确认内容因 report 未跑完而全量降级）。
 // 唯一的单次直出=当日全空（allClaims.length === 0），此时 nothing 可写，一次即可。
 const reportTries = allClaims.length === 0 ? 1 : 2
-const report = await safeAgent(reportPrompt({
+const reportLadder = reportTries === 1 ? [MODEL_LADDER[0]] : MODEL_LADDER
+const report = await safeAgentWithLadder(reportPrompt({
   ...ctxP, confirmedVerifyCount: confirmedVerify.length, majorOutCount: majorOutClaims.length,
   reportBody: reportBodyWithCluster, killedCount: killed.length, refutedList, unverifiedCount: unverified.length, unverifiedList, missBlock, coverBlock,
-}), { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: SYNTHESIS_LIMIT_MS }, reportTries)
+}), { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: SYNTHESIS_LIMIT_MS }, reportLadder, LADDER_BUDGET_MS)
+if (report) {
+  BREAKER.record(true, 'report')
+} else {
+  BREAKER.record(false, 'report')
+  log('REPORT-FAIL 模型阶梯全废，降级 raw archive')
+}
 
 // ─── md 确定性渲染（report 成功 → 完整版；失败 → 降级版）。render-md.mjs，不再有 mdWriter 代理。───
 // report 成功 → md 必然成功（纯字符串拼接），md 产出不再受网关波动影响。
@@ -2164,6 +2277,8 @@ if (WALL.observations > 0 && WALL.peakFactor > 1.5) degradedFlags.push('wallcloc
 // 8/23 第二十一项：linuxdo 组失败/降级 → linuxdo_degraded 独立降级旗标（no_cdp_host 跳过不算降级）。
 const linuxdoFailedRows = discoverRows.filter(d => d.linuxdoFailed)
 if (linuxdoFailedRows.length) degradedFlags.push('linuxdo_degraded' + (linuxdoFailedRows.some(d => d.linuxdoReason) ? ':' + linuxdoFailedRows.map(d => d.linuxdoReason).join('+').slice(0, 80) : ''))
+if (ladderUsed.length > 0) degradedFlags.push('ladder_used:' + ladderUsed.join('+'))
+if (ladderExhaustedStages.size) degradedFlags.push('ladder_exhausted:' + [...ladderExhaustedStages].join('+'))
 // 9/01 方案 D：合成入口与总墙钟脱钩后，reportErr 只剩「代理真失败」一条路径
 // （墙钟跳过路径删除——进入 Synthesize 即尝试 report）。
 const reportErr = report ? null : 'report agent failed; reverting to raw archive'
@@ -2177,7 +2292,7 @@ const md = report
   ? renderMarkdown({ date: DATE, window: WINDOW_LABEL, report, coverage, windowMisses, degraded: degradedFlags, meta: {
       date: DATE, window: WINDOW_LABEL,
       stats: { confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, urls_fetched: sources.length, urls_discovered: discoverRows.reduce((n, d) => n + d.urls.length, 0) },
-      generated_by: 'ai-daily (deepseek-v4-flash)',
+      generated_by: 'ai-daily (' + MODEL_LADDER[0] + ')',
     } })
   : renderDegradedMarkdown({ date: DATE, window: WINDOW_LABEL, confirmed: confirmedOut, refuted: refutedOut, coverage, windowMisses, degraded: degradedFlags, noNewsCompanies: noDynamicCompanies, reportError: reportErr })
 
@@ -2190,7 +2305,7 @@ const sourcesJson = JSON.stringify({ date: DATE, sources: sources.map(s => ({ ur
 const artifacts = [claimsPath, sourcesPath]  // md 由 orchestrator 从 payloads.md 落盘，artifact 清单列 JSON（3 个见下）
 
 const metaJson = JSON.stringify({
-  date: DATE, window: { from: WFROM, to: WTO || DATE }, generated_by: 'ai-daily (deepseek-v4-flash)',
+  date: DATE, window: { from: WFROM, to: WTO || DATE }, generated_by: 'ai-daily (' + MODEL_LADDER[0] + ')',
   boards: boards.length, urls_discovered: discoverRows.reduce((n, d) => n + d.urls.length, 0), urls_fetched: sources.length, claims_extracted: allClaims.length,
   claims_verified: voted.length, confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, unverified: unverified.length, out_of_window_confirmed: outOfWindow.length,
   window_misses: windowMisses,

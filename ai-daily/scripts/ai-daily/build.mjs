@@ -21,7 +21,9 @@ const DEFAULT_OUT = path.resolve(HERE, '../../.claude/workflows/ai-daily.js')
 // 放最后即可；与模板占位符顺序保持一致）。
 // wallclock（8/31 P1）：墙钟标定 + 计数型断路器，纯函数零依赖，排在 budget 后（budget 不 import 它，
 // 但模板里 makeCalibratedElapsed 要包住 RUN_ELAPSED 再喂给 makeBudgetGate，顺序上必须先于使用点）。
-const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'wallclock', 'fallback', 'prompts', 'render-md', 'cluster', 'linuxdo']
+// ladder（9/02）：模型阶梯降级工厂 makeSafeAgentWithLadder，纯函数零依赖，排在 wallclock 后
+// （模板接线点在 probeGateway 之后，inline 顺序只需早于使用点；DEFAULT_LADDER 被 render-md import）。
+const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'wallclock', 'ladder', 'fallback', 'prompts', 'render-md', 'cluster', 'linuxdo']
 
 // 剥模块为可 inline 文本：去 import 行（依赖由顺序保证）、export 前缀、模块头注释。
 const stripModule = name => {

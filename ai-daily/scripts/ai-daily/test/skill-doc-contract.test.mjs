@@ -73,3 +73,21 @@ test('SKILL.md: 9/01 覆盖韧性——Fetch 首批混排、linuxdo snippet 直�
   assert.match(SKILL, /resetConsecutive/, 'Discover 入口 consecutive 复位须文档化')
   assert.ok(SKILL.includes('snippet') && SKILL.includes('直铸'), '须写明配额内 snippet 直铸、跳过 fetch 代理')
 })
+
+// 9/02 模型阶梯：仅 report+verify 走四级降级；harvest/discover/fetch 仍继承环境模型。
+test('SKILL.md: 9/02 模型阶梯 args modelLadder/ladderBudgetMs 在场', () => {
+  assert.match(SKILL, /modelLadder/, '阶梯 arg 须文档化')
+  assert.match(SKILL, /ladderBudgetMs/, '阶梯预算 arg 须文档化')
+  assert.ok(SKILL.includes('"ladderBudgetMs": 900000'), 'args JSON 示例须带 ladderBudgetMs: 900000')
+  assert.ok(SKILL.includes('"modelLadder"'), 'args JSON 示例须带 modelLadder')
+  assert.ok(/ladderBudgetMs/.test(SKILL) && /900000|15\s*min|15 分钟/.test(SKILL), '默认 900000 / 15min 须文档化')
+})
+
+test('SKILL.md: 阶梯仅 report+verify，旗标可查，旧「全链路勿覆盖」消失', () => {
+  assert.ok(SKILL.includes('ladder_used:'), '降级旗标 ladder_used 须文档化')
+  assert.ok(SKILL.includes('ladder_exhausted:'), '降级旗标 ladder_exhausted 须文档化')
+  assert.ok(SKILL.includes('report') && SKILL.includes('verify') && (SKILL.includes('阶梯') || SKILL.includes('modelLadder')), '须写明 report+verify 走阶梯')
+  assert.ok(SKILL.includes('harvest') && SKILL.includes('discover') && SKILL.includes('fetch'), '须点名 harvest/discover/fetch 不走阶梯')
+  assert.ok(!SKILL.includes('本期全链路统一 deepseek-v4-flash'), '旧「全链路统一」措辞必须消失')
+  assert.ok(!SKILL.includes('勿覆盖模型。'), '旧「勿覆盖模型」禁令必须改写（阶梯要传 model: m）')
+})

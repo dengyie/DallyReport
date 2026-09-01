@@ -9,6 +9,7 @@
 // workflow realm 缺失 URL 全局的最小 polyfill（见 url-polyfill.mjs；build inline 后自动注入）。
 // node:test 直跑时全局 URL 已存在，installUrlPolyfill 幂等跳过。
 import { installUrlPolyfill } from './url-polyfill.mjs'
+import { DEFAULT_LADDER } from './ladder.mjs'
 installUrlPolyfill()
 // 供 test/realm-url.test.mjs 模拟 realm（删 globalThis.URL）后重新注入用。
 export const setUrlPolyfillForRealm = () => { installUrlPolyfill() }
@@ -93,7 +94,7 @@ const frontmatterLines = (meta, date, window) => {
   L.push('date: ' + (meta.date || date))
   L.push('window: ' + (meta.window || window))
   L.push('generator: ai-daily')
-  L.push('model: deepseek-v4-flash')
+  L.push('model: ' + DEFAULT_LADDER[0])
   L.push('tags: [日报, AI]')
   const statsParts = []
   if (num(st.confirmed) != null) statsParts.push('confirmed:' + st.confirmed)
@@ -125,7 +126,7 @@ export const renderMarkdown = ({ date, window, report, coverage, windowMisses, d
     const hard = (typeof st.confirmed === 'number' ? st.confirmed : 0) + (typeof st.major_out === 'number' ? st.major_out : 0)
     if (hard < 8) L.push('> ⚠️ **低素材提示**：当日硬源不足 8 条，正文以近期趋势为主，请注意时效。')
   }
-  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（deepseek-v4-flash）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
+  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（' + DEFAULT_LADDER[0] + '）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
   L.push('')
   L.push('## 📌 今日一句话')
   L.push('')
@@ -222,7 +223,7 @@ export const renderDegradedMarkdown = ({ date, window, confirmed, refuted, cover
   const L = []
   L.push('# 🤖 AI 日报 · ' + date)
   L.push('')
-  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（deepseek-v4-flash）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
+  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（' + DEFAULT_LADDER[0] + '）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
   L.push('')
   L.push('## ⚠️ 本日报为**降级快讯**（report 合成代理未产出，由编排器据已核查归档拼合）')
   L.push('')
