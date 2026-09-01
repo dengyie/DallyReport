@@ -71,9 +71,10 @@ export const makeCalibratedElapsed = (rawElapsed, opts) => {
  *
  * @param {{consecutive?:number, total?:number}} opts 跳闸阈值
  *   consecutive 连续失败数（默认 3）；total 累计失败数（默认 5）
- * @returns {{record, open, reason, stats}}
+ * @returns {{record, open, reason, stats, resetConsecutive}}
  *   record(ok, label) 记一次代理结果（ok=false 即失败/超时/null 产出）
  *   open() 是否已跳闸；reason() 跳闸原因串（未跳闸为 null）
+ *   resetConsecutive() 清连续计数，不清 failures/successes/reason（阶段隔离；已跳闸仍 open）
  */
 export const makeCircuitBreaker = opts => {
   // 0 是合法阈值（关闭该跳闸条件），不得用 `|| 3` 把 0 吞成默认。
@@ -97,6 +98,7 @@ export const makeCircuitBreaker = opts => {
     },
     open: () => !!reason,
     reason: () => reason,
+    resetConsecutive: () => { consecutive = 0 },
     get stats() { return { failures, successes, consecutive } },
   }
 }

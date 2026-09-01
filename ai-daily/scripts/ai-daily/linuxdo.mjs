@@ -136,3 +136,23 @@ export function extractPostTextFromJson(raw) {
   const rawStr = c && c[0]?.cooked ? String(c[0].cooked).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : ''
   return rawStr || null
 }
+
+// 9/01 覆盖韧性：prefetch 已带 snippet，再走 fetch 代理砸 linux.do 是 403/524 弱路径。
+// 有非空 snippet 才铸一条对齐 Fetch 产出的 source（forum claim，走既有 Verify，不标 isMajorOut）。
+// 空 snippet → null，调用方仍把该项交给 fetch 代理（诚实失败，不造空 claim）。
+export function mintLinuxdoSource(post, date) {
+  if (!post || typeof post !== 'object') return null
+  const title = typeof post.title === 'string' ? post.title.trim() : ''
+  const url = typeof post.url === 'string' ? post.url.trim() : ''
+  const snippet = typeof post.snippet === 'string' ? post.snippet.trim() : ''
+  if (!title || !url || !snippet) return null
+  const quote = snippet.slice(0, 220)
+  const d = (typeof post.date === 'string' && post.date.trim()) ? post.date.trim() : date
+  return {
+    url, title, found_via: 'linuxdo-cdp', sourceQuality: 'forum', board: 'linuxdo', date: d,
+    claims: [{
+      claim: title, quote, importance: 'supporting',
+      sourceUrl: url, sourceTitle: title, sourceQuality: 'forum', date: d, board: 'linuxdo',
+    }],
+  }
+}

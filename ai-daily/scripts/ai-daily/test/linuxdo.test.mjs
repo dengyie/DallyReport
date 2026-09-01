@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CDP_DEFAULTS, extractTopicsFromJson, extractPostTextFromJson, fetchLinuxDoNews34 } from '../linuxdo.mjs'
+import { CDP_DEFAULTS, extractTopicsFromJson, extractPostTextFromJson, fetchLinuxDoNews34, mintLinuxdoSource } from '../linuxdo.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const TPL = fs.readFileSync(path.join(HERE, '../ai-daily.template.js'), 'utf8')
@@ -44,6 +44,54 @@ test('extractPostTextFromJson：Discourse 帖子 → 去 HTML 后纯文本（剥
   assert.ok(text.includes('Agent 能力'), '保留内联文本')
   assert.ok(!text.includes('<'), 'HTML 标签被剥离')
   assert.ok(!text.includes('第二楼'), '只取首帖（post_stream.posts[0]）')
+})
+
+test('mintLinuxdoSource：有 snippet 铸 forum claim，形状对齐 Fetch 产出', () => {
+  const src = mintLinuxdoSource({
+    id: 2830123,
+    title: 'OpenClaw 2.0 发布',
+    url: 'https://linux.do/t/2830123',
+    date: '2026-08-31',
+    snippet: '社区讨论 OpenClaw 2.0 正式发布，多 Agent 编排能力增强。',
+    likeCount: 12,
+  }, '2026-09-01')
+  assert.ok(src, '非空 snippet 必须铸出 source')
+  assert.equal(src.url, 'https://linux.do/t/2830123')
+  assert.equal(src.title, 'OpenClaw 2.0 发布')
+  assert.equal(src.found_via, 'linuxdo-cdp')
+  assert.equal(src.sourceQuality, 'forum')
+  assert.equal(src.board, 'linuxdo')
+  assert.equal(src.date, '2026-08-31')
+  assert.equal(src.claims.length, 1)
+  const c = src.claims[0]
+  assert.equal(c.claim, 'OpenClaw 2.0 发布')
+  assert.equal(c.quote, '社区讨论 OpenClaw 2.0 正式发布，多 Agent 编排能力增强。')
+  assert.equal(c.importance, 'supporting')
+  assert.equal(c.sourceUrl, src.url)
+  assert.equal(c.sourceTitle, src.title)
+  assert.equal(c.sourceQuality, 'forum')
+  assert.equal(c.date, '2026-08-31')
+  assert.equal(c.board, 'linuxdo')
+  assert.ok(!src.isMajorOut && !c.isMajorOut, 'mint 不得标 isMajorOut')
+})
+
+test('mintLinuxdoSource：空 snippet / 缺字段 → null（不造空 claim）', () => {
+  assert.equal(mintLinuxdoSource({ title: 'x', url: 'https://linux.do/t/1', snippet: '' }, '2026-09-01'), null)
+  assert.equal(mintLinuxdoSource({ title: 'x', url: 'https://linux.do/t/1', snippet: '   ' }, '2026-09-01'), null)
+  assert.equal(mintLinuxdoSource({ title: 'x', url: 'https://linux.do/t/1' }, '2026-09-01'), null)
+  assert.equal(mintLinuxdoSource(null, '2026-09-01'), null)
+  assert.equal(mintLinuxdoSource({ title: '', url: 'https://linux.do/t/1', snippet: '有正文' }, '2026-09-01'), null)
+  assert.equal(mintLinuxdoSource({ title: 'x', url: '', snippet: '有正文' }, '2026-09-01'), null)
+})
+
+test('mintLinuxdoSource：quote 截到 220 字；缺 date 用报告日', () => {
+  const long = '字'.repeat(300)
+  const src = mintLinuxdoSource({
+    title: 'Kimi API 下线讨论', url: 'https://linux.do/t/9', snippet: long,
+  }, '2026-09-01')
+  assert.equal(src.claims[0].quote.length, 220)
+  assert.equal(src.date, '2026-09-01', 'post.date 缺省 → 报告日')
+  assert.equal(src.claims[0].date, '2026-09-01')
 })
 
 test('extractPostTextFromJson：容错——非 JSON / 无 cooked → null', () => {

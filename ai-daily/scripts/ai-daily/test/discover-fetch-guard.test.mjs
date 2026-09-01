@@ -78,7 +78,8 @@ test('guard: Fetch 救护首批——已过死线仍抓首批（非零摄入）�
   // 这正是把「已 discover 结果摄入」从可能 0 撬到非 0 的实际杠杆。
   assert.match(TPL, /FETCH-SALVAGE/, '止血日志在场（fetch 救护首批）')
   // 需把救护与「整段跳过」区分清楚：救护 = 抓到 1 批、绝不标 budget_skipped:Fetch。
-  assert.match(TPL, /const salvageFirst\s*=\s*extracted\.length === 0\s*&&\s*fetchTargets\.length > 0\s*&&\s*budgetGate\.roomTo\('Fetch'\)\s*===\s*0/, '救护判定在场（纯读 roomTo === 0，不记 skipped）')
+  // 9/01：mint 会先写入 extracted，救护改看 !stageFetchRan（Fetch 批未跑），不再看 extracted.length===0。
+  assert.match(TPL, /const salvageFirst\s*=\s*!stageFetchRan\s*&&\s*fetchTargets\.length > 0\s*&&\s*budgetGate\.roomTo\('Fetch'\)\s*===\s*0/, '救护判定在场（Fetch 批未跑 + 纯读 roomTo === 0，不记 skipped）')
   assert.match(TPL, /if \(!salvageFirst\)\s*\{/, '非救护路径再弹普通 budgetGate(Fetch)')
   assert.ok(TPL.includes("const gate = budgetGate('Fetch')"), '非救护路径调用 budgetGate(Fetch) 保留（真整段跳过才记）')
   assert.match(TPL, /BUDGET-BREAK Fetch 余批跳过，用已完成批次结果/, '普通 BREAK 语义保留（非救护越线即停）')
@@ -92,5 +93,5 @@ test('guard: 救护首批后余批整批 break，不再调用 budgetGate(Fetch) 
   assert.match(TPL, /let salvaged = false/, 'salvaged 标记在场')
   assert.match(TPL, /if \(salvaged\) break/, '救护后余批顶部整批 break（不碰 budgetGate(Fetch)）')
   assert.match(TPL, /if \(salvageFirst\) salvaged = true/, '救护首批抓完即置 salvaged，供下轮 break')
-  // 救护判定只落在第一批（extracted.length===0）；SEAL 要求的「绝不把 Fetch 记 skipped」由上述 break 保证。
+  // 救护判定只落在第一批（!stageFetchRan）；SEAL 要求的「绝不把 Fetch 记 skipped」由上述 break 保证。
 })

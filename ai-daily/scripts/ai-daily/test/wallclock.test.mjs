@@ -116,6 +116,33 @@ test('P1：全成功永不跳闸（健康跑零副作用）', () => {
   assert.equal(cb.reason(), null)
 })
 
+test('P1：resetConsecutive 清连续计数、不清 failures/reason；已 open 仍 open', () => {
+  const cb = makeCircuitBreaker({ consecutive: 3, total: 99 })
+  cb.record(false, 'harv:a'); cb.record(false, 'harv:b')
+  assert.equal(cb.stats.consecutive, 2)
+  assert.equal(cb.stats.failures, 2)
+  assert.equal(cb.open(), false)
+  cb.resetConsecutive()
+  assert.equal(cb.stats.consecutive, 0, '只清 consecutive')
+  assert.equal(cb.stats.failures, 2, 'failures 保留（total 保险丝仍累计）')
+  assert.equal(cb.reason(), null)
+  assert.equal(cb.open(), false)
+  // Discover 第一失败不得因 Harvest 垫的计数跳闸
+  assert.equal(cb.record(false, 'disc:labs'), true, '复位后第 1 次 Discover 失败不跳闸')
+  assert.equal(cb.stats.consecutive, 1)
+  assert.equal(cb.open(), false)
+
+  const openCb = makeCircuitBreaker({ consecutive: 2, total: 99 })
+  openCb.record(false, 'a'); openCb.record(false, 'b')
+  const first = openCb.reason()
+  assert.equal(openCb.open(), true)
+  openCb.resetConsecutive()
+  assert.equal(openCb.stats.consecutive, 0)
+  assert.equal(openCb.open(), true, '已跳闸时复位不清 reason，open 仍 true')
+  assert.equal(openCb.reason(), first, 'reason 不被复位覆盖')
+  assert.equal(openCb.stats.failures, 2)
+})
+
 test('P1：阈值 0 关闭该跳闸条件（不得被 || 默认吞成 3/5）', () => {
   const offConsec = makeCircuitBreaker({ consecutive: 0, total: 99 })
   for (let i = 0; i < 10; i++) assert.equal(offConsec.record(false, 'x'), true)

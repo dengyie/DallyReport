@@ -30,6 +30,8 @@ test('模板：linuxdo 成功/失败两条路径都铺（OK 日志 + 配额塞 p
   assert.ok(TPL.includes('linuxdoMaxSources'), '配额参数在模板可见')
   assert.ok(TPL.includes('.slice(0, LINUXDO_MAX_SOURCES)'), '按 linuxdoMaxSources 配额轮换')
   assert.ok(TPL.includes("found_via: 'linuxdo-cdp'"), 'POST 转 URL 候选标 linuxdo-cdp')
+  // 9/01 P1：consume 必须保留 prefetch snippet，否则 mint 无正文可铸。
+  assert.match(TPL, /snippet:\s*p\.snippet/, 'consume 映射保留 snippet（mint 依赖）')
 })
 
 test('模板：linuxdo_degraded 独立降级旗标 + meta 补 linuxdo_posts/linuxdo_open_posts', () => {
@@ -90,17 +92,21 @@ test('模板 C1 侧：cluster 词法名不与 render-md 顶层冲突（clusterTo
   assert.ok(!/^const STOP_TOKENS =/.test(CLUSTER), 'cluster.mjs 不再声明裸名 top-level STOP_TOKENS')
 })
 
-// ─── 8/27 Task 1：静态候选排序 + Fetch 预算书账（stageFetchRan 一次性状态）───
+// ─── 9/01 覆盖韧性 P0：Fetch 首批必须是 prefer 通道混合物，不得二次静态前置 ───
+// 9/01 生产实证：allocateFetchBudget 已把 linuxdo-cdp 与 static-fallback 混进 fetchTargets 前缀，
+// 紧接着 preferStaticFirst + FETCH_FIRST_BATCH=max(FETCH_BATCH, staticCount) 把首批做成 100% 静态；
+// BUDGET-BREAK 后余批整跳 → 已获配额的 6 席 linuxdo 零抓取。函数本体留在 dedup.mjs，编排层不得再调。
 
-test('模板：preferStaticFirst 位于 allocation 后、Fetch 分批前', () => {
-  // preferStaticFirst 必须作用于 allocateFetchBudget 的结果（fetchTargets），且在任何分装（分批）之前。
+test('模板 P0：allocation 后不得调用 preferStaticFirst（编排层不得二次拆混排）', () => {
   const idxAlloc = TPL.indexOf('allocateFetchBudget(boardURLMap, MAX_FETCH)')
-  const idxPref = TPL.indexOf('preferStaticFirst(fetchTargets)')
-  const idxFirstBatch = TPL.indexOf('FETCH_FIRST_BATCH')
   const idxSlice = TPL.indexOf('fetchTargets.slice(0, FETCH_FIRST_BATCH)')
-  assert.ok(idxAlloc >= 0 && idxPref >= 0 && idxFirstBatch >= 0 && idxSlice >= 0, '四处在场')
-  assert.ok(idxPref > idxAlloc, 'preferStaticFirst 在 allocation 之后')
-  assert.ok(idxFirstBatch > idxPref && idxSlice > idxPref, '分批组装在 preferStaticFirst 之后（排序后按 staticCount 扩首批）')
+  assert.ok(idxAlloc >= 0 && idxSlice >= 0, 'allocation 与分批切片在场')
+  // 允许注释里提函数名；可执行调用 `preferStaticFirst(fetchTargets)` 才是 9/01 吸烟枪。
+  const callLines = TPL.split('\n').filter(l =>
+    /preferStaticFirst\s*\(/.test(l) && !l.trim().startsWith('//'))
+  assert.equal(callLines.length, 0,
+    '模板编排层不得调用 preferStaticFirst（allocate 已按通道轮询混排）；实得：' + JSON.stringify(callLines))
+  assert.ok(idxSlice > idxAlloc, '分批切片仍在 allocation 之后')
 })
 
 test('模板：allocateFetchBudget 走 8/27 prefer 通道（linuxdo-cdp/static-fallback 默认优先）', () => {
@@ -112,13 +118,17 @@ test('模板：allocateFetchBudget 走 8/27 prefer 通道（linuxdo-cdp/static-f
   assert.match(TPL, /linuxdo-cdp 进配额/, 'Dedup 日志含 linuxdo-cdp 进配额计数')
 })
 
-test('模板：首批大小 max(FETCH_BATCH, staticCount)，后续按 FETCH_BATCH 分批', () => {
-  // Fetch 分批不再用单一 chunkArr——首批取 max(FETCH_BATCH, staticCount)（装下全部静态项），
-  // 后续批固定 FETCH_BATCH（静态项只入首批，余批保持既有并发上限）。
-  assert.match(TPL, /const FETCH_FIRST_BATCH\s*=\s*Math\.max\(FETCH_BATCH,\s*staticCount\)/, '首批大小 = max(FETCH_BATCH, staticCount)')
+test('模板 P0：FETCH_FIRST_BATCH === FETCH_BATCH（不得用 staticCount 扩首批挤掉 linuxdo）', () => {
+  // 9/01：staticCount 扩首批只在静态前置后才「装下全部静态」——那正好把 linuxdo 挤出首批。
+  // 首批固定 FETCH_BATCH=6，allocate 前缀已混排，首 6 条同时含两通道。
+  assert.match(TPL, /const FETCH_FIRST_BATCH\s*=\s*FETCH_BATCH\b/, 'FETCH_FIRST_BATCH 就是 FETCH_BATCH，不再 max(..., staticCount)')
+  assert.doesNotMatch(TPL, /FETCH_FIRST_BATCH\s*=\s*Math\.max\(FETCH_BATCH,\s*staticCount\)/, '不得再按 staticCount 扩首批')
   assert.match(TPL, /const fetchBatches\s*=\s*\[\]/, 'fetchBatches 容器在场')
   assert.match(TPL, /for \(let i\s*=\s*FETCH_FIRST_BATCH;\s*i\s*<\s*fetchTargets\.length;\s*i\s*\+=\s*FETCH_BATCH\)/, '后续批次按 FETCH_BATCH 步进')
   assert.ok(!/chunkArr\(fetchTargets,\s*FETCH_BATCH\)/.test(TPL), 'Fetch 分批不再固定 chunkArr(fetchTargets, FETCH_BATCH)')
+  // SALVAGE 救护这一批本身，不再假装「先救完全部静态」
+  assert.match(TPL, /FETCH-SALVAGE[\s\S]{0,200}batch\.length/, 'SALVAGE 日志按本批 batch.length 计数')
+  assert.doesNotMatch(TPL, /Math\.min\(Math\.max\(FETCH_BATCH,\s*staticCount\),\s*batch\.length\)/, 'SALVAGE 不得再 max(FETCH_BATCH, staticCount)')
 })
 
 test('模板：stageFetchRan 一次性 + 后续批次 roomTo 纯读停止，不再把 Fetch 写 skip', () => {
@@ -136,6 +146,14 @@ test('模板：首批正常启动调 budgetGate(Fetch) 并前置 stageFetchRan�
   assert.match(TPL, /const gate = budgetGate\('Fetch'\)/, '非救护路径仍调用控 gate')
   assert.match(TPL, /stageFetchRan = true\s*\/\/ 首批正常启动/, '正常启动：await 前置 stageFetchRan')
   assert.match(TPL, /FETCH-SALVAGE/, '救护日志在场')
+})
+
+test('模板 P1：FETCH-SALVAGE 不因 mint 已写入 extracted 而关闭', () => {
+  // mint 在 Fetch 循环前 push extracted → 若救护仍看 extracted.length===0，linuxdo 直铸后
+  // 静态余批会在 roomTo=0 时走记账 gate 被整跳，9/01 的静态摄入也会一起蒸发。
+  assert.doesNotMatch(TPL, /salvageFirst = extracted\.length === 0/, '救护不得再看 extracted.length（mint 会先写入）')
+  assert.match(TPL, /const salvageFirst = !stageFetchRan && fetchTargets\.length > 0 && budgetGate\.roomTo\('Fetch'\) === 0/,
+    '救护条件：Fetch 批未跑 + 仍有待抓 URL + roomTo 纯读')
 })
 
 test('模板：静态注入不进 discoverRows.urls → urls_discovered 账本不变', () => {
@@ -201,6 +219,35 @@ test('模板：首批正常启动调 budgetGate(Verify) 并前置 stageVerifyRan
   assert.match(TPL, /const gate = budgetGate\('Verify'\)/, '非救护路径仍调用控 gate')
   assert.match(TPL, /stageVerifyRan = true\s/, '首批正常启动：await 前置 stageVerifyRan')
   assert.match(TPL, /BUDGET-BREAK Verify 余批跳过，用已完成批次结果/, '正常启动首批超线日志保留')
+})
+
+test('模板 P1：配额内 linuxdo+snippet 在 Fetch 循环前 mint，并从 fetch 批剔除', () => {
+  // 9/01：prefetch 已带 snippet，再走 fetch 代理砸 linux.do 是 524/403 弱路径。
+  // 已获配额且有 snippet 的项立刻 mint 推进 extracted，URL 不再进 safeAgent(fetchPrompt)。
+  const idxAlloc = TPL.indexOf('allocateFetchBudget(boardURLMap, MAX_FETCH)')
+  const idxMint = TPL.indexOf('mintLinuxdoSource(')
+  const idxPhaseFetch = TPL.indexOf("phase('Fetch')")
+  const idxFetchAgent = TPL.indexOf('safeAgent(fetchPrompt(')
+  assert.ok(idxAlloc >= 0 && idxMint >= 0 && idxPhaseFetch >= 0 && idxFetchAgent >= 0,
+    'allocation / mintLinuxdoSource / Fetch phase / fetchPrompt 都在场')
+  assert.ok(idxMint > idxAlloc, 'mint 在 allocateFetchBudget 之后（只铸已获配额项）')
+  assert.ok(idxMint < idxPhaseFetch, 'mint 在 phase(Fetch) 之前（BUDGET-BREAK 也保得住）')
+  assert.ok(idxFetchAgent > idxPhaseFetch, 'fetch 代理仍在 Fetch 阶段')
+  // 铸出的 URL 必须从 fetchTargets 剔除，否则同一帖既 mint 又 WebFetch。
+  assert.match(TPL, /mintLinuxdoSource/, 'mintLinuxdoSource 接线在场')
+  assert.match(TPL, /extracted\.push/, 'mint 产物推进 extracted')
+  // 剔除：按 URL 过滤 fetchTargets，或重建 fetchBatches 时跳过已 mint 的 URL。
+  assert.match(TPL, /fetchTargets\s*=\s*fetchTargets\.filter/, '已 mint 的 linuxdo URL 从 fetchTargets 剔除')
+})
+
+test('模板 P1：Discover 入口 BREAKER.resetConsecutive() 在代理批循环前', () => {
+  // Harvest 连续失败会垫高 Discover 门口 consecutive；阶段隔离只清 consecutive，不清 failures/reason。
+  const idxPhase = TPL.indexOf("phase('Discover')")
+  const idxReset = TPL.indexOf('BREAKER.resetConsecutive()')
+  const idxLoop = TPL.indexOf("for (const batch of chunkArr(DISCOVER_GROUPS, DISCOVER_BATCH))")
+  assert.ok(idxPhase >= 0 && idxReset >= 0 && idxLoop >= 0, 'Discover phase / resetConsecutive / 批循环都在场')
+  assert.ok(idxReset > idxPhase, 'resetConsecutive 在 phase(Discover) 之后')
+  assert.ok(idxReset < idxLoop, 'resetConsecutive 在代理批循环之前（Harvest 垫的 consecutive 不得带进第一批）')
 })
 
 test('模板：report safeAgent tries——只要有提取内容（allClaims>0）就 2 次尝试', () => {

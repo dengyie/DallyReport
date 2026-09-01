@@ -340,6 +340,9 @@ log('Harvest: ' + HARVEST_GROUPS.length + ' groups over ' + uniqueFeeds.length +
 
 // ─── Phase Discover ───
 phase('Discover')
+// 9/01 覆盖韧性：Harvest 连续失败会垫高 consecutive；Discover 入口只清连续计数，
+// 不清 failures/reason。已跳闸（Harvest 已烧穿阈值）仍 open，代理余批照跳。
+BREAKER.resetConsecutive()
 // 分组发现（8/15 第九项优化）：labs / opensource / academic 单板专代理；6 个媒体/垂类板合并为
 // media-cn（量子位+36氪）与 media-en（TechCrunch+TheVerge+qbitai）两组。共享 feed digest 只注入该组一次
 // （不再被 6 个板各注入一遍）；媒体组每条 URL 必须标 board 归属板。qbitai 在 media-en 出现是为保住
@@ -375,6 +378,7 @@ for (const g of DISCOVER_GROUPS) {
   log('LINUXDO-OK prefetched ' + LDP.topics + ' topics → ' + g.key + ' board（配额 ' + LINUXDO_MAX_SOURCES + '）')
   const srcs = LDP.posts.slice(0, LINUXDO_MAX_SOURCES).map(p => ({
     url: p.url, title: p.title, found_via: 'linuxdo-cdp', date: p.date || DATE, board: 'linuxdo',
+    snippet: p.snippet || '',
   }))
   discoverResults.push({ group: g, boards: g.boards, urls: srcs, noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: false, linuxdoTopics: LDP.topics, linuxdoPosts: LDP.posts.length })
 }
@@ -542,24 +546,39 @@ const staticDropped = budgetDropped.filter(d => staticUrls.some(u => u.url === d
 const otherDropped = budgetDropped.length - linuxdoDropped - staticDropped
 log('Dedup: ' + dupes.length + ' dupes, ' + budgetDropped.length + ' budget-dropped, fetching ' + fetchTargets.length +
   (linuxdoFetched ? ' · linuxdo-cdp 进配额 ' + linuxdoFetched + '（丢弃 ' + linuxdoDropped + '）' : ''))
-// 8/27 静态候选排序：static-fallback 项前置——预算紧张时优先摄入静态兜底（官方内容页）。
-fetchTargets = preferStaticFirst(fetchTargets)
+// 9/01 P0：不再 preferStaticFirst。allocateFetchBudget Phase 1 已按通道轮询混排 linuxdo-cdp
+// 与 static-fallback；二次静态前置会把 linuxdo 挤出 FETCH 首批，BUDGET-BREAK 后整席蒸发。
 // 诚实书账：staticCount 只统计已经进入 fetchTargets 的项（已在 allocation 内获配额），
 // 不统计被预算丢弃（budgetDropped）或未进入配额的候选——不虚报未获配额的静态候选。
 const staticCount = fetchTargets.filter(t => t.found_via === 'static-fallback').length
-if (staticCount > 0) log('STATIC-FALLBACK quota: ' + staticCount + ' 条静态兜底 URL 已获 fetch 配额并前置（fetchTargets 内实计）')
-// 首批大小取 max(FETCH_BATCH, staticCount)：静态项已全进 fetchTargets，要一并装进首批（不绕过 MAX_FETCH）。
-// 后续批次按 FETCH_BATCH 分批（静态项只入首批，余批保持既有并发上限）。
+if (staticCount > 0) log('STATIC-FALLBACK quota: ' + staticCount + ' 条静态兜底 URL 已获 fetch 配额（fetchTargets 内实计）')
+// 9/01 P1：配额内带 snippet 的 linuxdo 直铸 forum claim，不再进 fetch 代理（linux.do 无 cookie → 403）。
+// 空 snippet 仍走既有 fetch。配额外的 budgetDropped 不铸——MAX_FETCH 硬上限不变。
+const extracted = []
+{
+  const mintedUrls = new Set()
+  for (const t of fetchTargets) {
+    if (t.found_via !== 'linuxdo-cdp') continue
+    const minted = mintLinuxdoSource(t, DATE)
+    if (!minted) continue
+    extracted.push(minted)
+    mintedUrls.add(t.url)
+  }
+  if (mintedUrls.size) {
+    log('LINUXDO-MINT ' + mintedUrls.size + ' 条配额内 snippet 直铸（跳过 fetch 代理）')
+    fetchTargets = fetchTargets.filter(t => !mintedUrls.has(t.url))
+  }
+}
+// 首批固定 FETCH_BATCH：allocate 前缀已混排，不得用 staticCount 扩首批把 linuxdo 挤出。
 // 静态注入不在 discoverRows.urls → urls_discovered 账本不变（boardURLMap 仅从 discoverRows 派生）。
 const FETCH_BATCH = 6
-const FETCH_FIRST_BATCH = Math.max(FETCH_BATCH, staticCount)
+const FETCH_FIRST_BATCH = FETCH_BATCH
 const fetchBatches = []
 if (fetchTargets.length) fetchBatches.push(fetchTargets.slice(0, FETCH_FIRST_BATCH))
 for (let i = FETCH_FIRST_BATCH; i < fetchTargets.length; i += FETCH_BATCH) fetchBatches.push(fetchTargets.slice(i, i + FETCH_BATCH))
 
 // ─── Phase Fetch + Extract ───
 phase('Fetch')
-const extracted = []
 let stageFetchRan = false  // 8/27 一次性状态：Fetch 首批是否已正常启动（预算记账过 + 会在 await 前置位）
 let salvaged = false  // 8/26 修复：救护首批已标记——余批整批 break，不再碰 budgetGate('Fetch')，避免把已抓过批的 Fetch 误记成「整段跳过」
 for (const batch of fetchBatches) {
@@ -568,7 +587,8 @@ for (const batch of fetchBatches) {
   //  - 首批正常启动：调 budgetGate('Fetch')（记 skipped 的 gate）判定整段跳过/放行；放行则在 await 前置 stageFetchRan=true。
   //  - 首批越线：只允许现有救护语义（FETCH-SALVAGE），不调用记账 gate → 不把 Fetch 写进 skipped。
   //  - 后续批次：用纯读 budgetGate.roomTo('Fetch') === 0 停止，绝不再次把 Fetch 写入 skip。
-  const salvageFirst = extracted.length === 0 && fetchTargets.length > 0 && budgetGate.roomTo('Fetch') === 0
+  // 9/01：mint 会在循环前写入 extracted，救护不得再看 extracted.length===0（否则静态余批被记账 gate 整跳）。
+  const salvageFirst = !stageFetchRan && fetchTargets.length > 0 && budgetGate.roomTo('Fetch') === 0
   if (stageFetchRan) {
     // 后续批次：纯读停止（roomTo 无记账副作用），不再调用 budgetGate('Fetch')。
     if (budgetGate.roomTo('Fetch') === 0) { log('BUDGET-BREAK Fetch 余批跳过（首批已跑，roomTo=0 纯读停止，不记 budget_skipped:Fetch）'); break }
@@ -577,7 +597,7 @@ for (const batch of fetchBatches) {
     if (!gate.ok) { log('BUDGET-BREAK Fetch 余批跳过，用已完成批次结果'); break }
     stageFetchRan = true  // 首批正常启动：await 前置 one-time 状态（预算账本已钉在「已运行」）
   } else {
-    log('FETCH-SALVAGE 已过 Fetch 死线但执行救护首批：抓前 ' + Math.min(Math.max(FETCH_BATCH, staticCount), batch.length) + ' 条 URL（保证非 0 摄入）')
+    log('FETCH-SALVAGE 已过 Fetch 死线但执行救护首批：抓前 ' + batch.length + ' 条 URL（保证非 0 摄入）')
   }
   const batchRes = await parallel(batch.map(src => () =>
     safeAgent(fetchPrompt(src, ctxP), { label: 'fetch:' + hostOf(src.url), phase: 'Fetch', schema: EXTRACT_SCHEMA, effort: 'low', timeoutMs: AGENT_TIMEOUT_MS }, 2)

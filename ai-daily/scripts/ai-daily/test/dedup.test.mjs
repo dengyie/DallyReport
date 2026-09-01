@@ -248,3 +248,31 @@ test('P2：单通道场景行为不变（无第二通道时不因等分而缩水
     '唯一活跃通道仍吃满 preferCap（不因新等分逻辑缩水）')
   assert.ok(fetchTargets.some(t => t.board === 'labs'), '普通板轮询名额不受影响')
 })
+
+// ─── 9/01 覆盖韧性：allocation 结果本身已是混排，编排层不得再 preferStaticFirst ───
+// 9/01 形状：preferCap=8 两通道等分 → 前 8 条 4+4；MAX_FETCH=16 时 linuxdo 与 static 各拿 6。
+// 不经 preferStaticFirst 时，首 6 条必须两通道都在——这是 Fetch 首批 FETCH_BATCH=6 的输入契约。
+
+test('9/01 形状：6 static + 6 linuxdo 获配额时，不经 preferStaticFirst 的前 6 条必须两通道都在', () => {
+  // 6 条静态 + 24 linuxdo + 4 条普通 discover：preferCap=8 两通道 4+4，
+  // Phase 2 余 8 席按板轮询 → 再给 2 static + 2 linuxdo + 4 other = 配额内 6+6。
+  const m = new Map([
+    ['linuxdo', Array.from({ length: 24 }, (_, i) => ({
+      url: 'https://linux.do/t/' + (2830000 + i), title: 'p' + i, found_via: 'linuxdo-cdp', board: 'linuxdo' }))],
+    ...['labs', 'academic', 'funding', 'policy', 'safety', 'opensource'].map(b => [b, [
+      { url: 'https://' + b + '.example/official', title: b, found_via: 'static-fallback', board: b },
+    ]]),
+    ...['strategy', 'products', 'people', 'extra'].map(b => [b, [
+      { url: 'https://' + b + '.example/disc', title: b, found_via: 'discover', board: b },
+    ]]),
+  ])
+  const { fetchTargets } = allocateFetchBudget(m, 16)
+  const linuxdo = fetchTargets.filter(t => t.found_via === 'linuxdo-cdp')
+  const statics = fetchTargets.filter(t => t.found_via === 'static-fallback')
+  assert.equal(linuxdo.length, 6, 'linuxdo-cdp 进配额 6（9/01 现场账）')
+  assert.equal(statics.length, 6, 'static-fallback 进配额 6')
+  const first6 = fetchTargets.slice(0, 6)
+  const vias = new Set(first6.map(t => t.found_via))
+  assert.ok(vias.has('linuxdo-cdp'), '首 6 条含 linuxdo-cdp（allocate 通道轮询，未经静态前置）')
+  assert.ok(vias.has('static-fallback'), '首 6 条含 static-fallback')
+})

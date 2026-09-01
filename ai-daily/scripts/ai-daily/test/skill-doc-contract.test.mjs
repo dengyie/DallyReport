@@ -64,3 +64,12 @@ test('SKILL.md: 合成入口与总墙钟脱钩（不得再写总墙钟守门/超
   assert.ok(!SKILL.includes('超限跳过合成直接降级'), '不得保留 totalLimitMs 超限跳过合成')
   assert.ok(SKILL.includes('合成') && (SKILL.includes('脱钩') || SKILL.includes('不再看总墙钟')), '须写明合成与总墙钟脱钩')
 })
+
+test('SKILL.md: 9/01 覆盖韧性——Fetch 首批混排、linuxdo snippet 直铸、breaker 阶段隔离', () => {
+  assert.ok(SKILL.includes('FETCH_FIRST_BATCH') && SKILL.includes('FETCH_BATCH'), '须写明首批大小等于 FETCH_BATCH')
+  assert.ok(!SKILL.includes('preferStaticFirst 位于 allocation 后'), '不得再教编排层二次静态前置')
+  assert.match(SKILL, /mintLinuxdoSource/, 'linuxdo snippet 直铸函数须文档化')
+  assert.match(SKILL, /LINUXDO-MINT/, '直铸日志须文档化')
+  assert.match(SKILL, /resetConsecutive/, 'Discover 入口 consecutive 复位须文档化')
+  assert.ok(SKILL.includes('snippet') && SKILL.includes('直铸'), '须写明配额内 snippet 直铸、跳过 fetch 代理')
+})
