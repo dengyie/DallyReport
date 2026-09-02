@@ -194,6 +194,32 @@ test('完整版：frontmatter + 素材窗口横幅（meta 可选参数）', () =
   assert.ok(md.indexOf('> **素材窗口**') < md.indexOf('> 覆盖 '))
   // 标题随后仍是可读结构（frontmatter 后标题行）
   assert.ok(md.includes('\n# 🤖 AI 日报 · 2026-08-21'))
+  assert.ok(md.includes('model: deepseek-v4-flash'), 'generated_by 括号内模型写入 frontmatter')
+  assert.ok(md.includes('生成器 ai-daily（deepseek-v4-flash）'))
+})
+
+test('完整版：generated_by 换级模型写入 frontmatter 与横幅，不得永远 DEFAULT_LADDER[0]', () => {
+  const meta = {
+    date: '2026-09-02', window: '2026-08-31 ~ 2026-09-02',
+    stats: { confirmed: 3, major_out: 4, killed: 0, urls_fetched: 3, urls_discovered: 3 },
+    generated_by: 'ai-daily (grok-4.6)',
+  }
+  const md = renderMarkdown({ date: '2026-09-02', window: 'w', report: baseReport, coverage: baseCoverage, windowMisses: [], degraded: ['ladder_used:report:grok-4.6'], meta })
+  assert.ok(md.includes('model: grok-4.6'), 'frontmatter 须跟换级模型：' + md.slice(0, 180))
+  assert.ok(md.includes('生成器 ai-daily（grok-4.6）'), '横幅须跟换级模型')
+  assert.ok(!md.includes('model: ' + DEFAULT_LADDER[0]) || DEFAULT_LADDER[0] === 'grok-4.6', '不得在已换级时仍写首级')
+})
+
+test('降级版：generated_by 换级模型写入横幅', () => {
+  const md = renderDegradedMarkdown({
+    date: '2026-09-02', window: 'w',
+    confirmed: [], refuted: [], coverage: [], windowMisses: [],
+    degraded: ['ladder_exhausted:report'], noNewsCompanies: [],
+    reportError: 'report agent failed; reverting to raw archive',
+    generated_by: 'ai-daily (claude-opus-4-8)',
+  })
+  assert.ok(md.includes('生成器 ai-daily（claude-opus-4-8）'), '降级横幅须跟 generated_by')
+  assert.ok(!md.includes('生成器 ai-daily（' + DEFAULT_LADDER[0] + '）') || DEFAULT_LADDER[0] === 'claude-opus-4-8')
 })
 
 test('完整版：低素材提示仅当 confirmed+major_out < 8', () => {

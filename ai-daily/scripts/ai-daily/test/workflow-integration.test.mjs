@@ -327,5 +327,32 @@ test('模板：report + verify 走阶梯，harvest/discover/fetch 仍 safeAgent'
   assert.ok(idxTick >= 0 && idxLadderFn >= 0, '_TICK_MS 与 safeAgentWithLadder 都在场')
   assert.ok(idxLadderFn > idxTick, 'safeAgentWithLadder 必须在时钟块之后（不得污染 safeAgent 切片）')
   assert.match(TPL, /makeSafeAgentWithLadder\(/, '模板接线工厂')
-  assert.match(TPL, /generated_by: 'ai-daily \(' \+ MODEL_LADDER\[0\] \+ '\)'/, 'generated_by 跟阶梯首级走')
+  assert.match(TPL, /generated_by: generatedBy/, 'generated_by 走合成变量（换级后的 report 模型，而非永远 MODEL_LADDER[0]）')
+  assert.match(TPL, /const generatedBy = 'ai-daily \(' \+ reportModelUsed \+ '\)'/, 'generatedBy 由 report 实际模型拼出')
+  assert.match(TPL, /reportModelUsed/, 'report 换级模型必须入 generated_by')
+})
+
+test('模板：withDeadline reject 透传错误，不得抹成 null', () => {
+  // P2-1：生产 withDeadline 若 p.then(v => settle(v), () => settle(null))，工厂 catch 永死，
+  // schema 与 524 在生产里都长得像 (null)，烟测全是 LADDER-NEXT ...(null)。
+  assert.doesNotMatch(TPL, /p\.then\(v => settle\(v\), \(\) => settle\(null\)/, 'reject 不得无消息 settle(null)')
+  assert.match(TPL, /p\.then\(v => settle\(v\), e => fail\(/, 'reject 必须 fail(e) 进工厂 catch')
+  const probeSeg = TPL.slice(TPL.indexOf('const probeGateway'), TPL.indexOf('const MODEL_LADDER'))
+  assert.match(probeSeg, /try \{/, 'probeGateway 必须接住 withDeadline reject')
+  assert.match(probeSeg, /catch/, 'probeGateway reject → 视同探针失败，不得炸 workflow')
+})
+
+test('模板：verify 票共享阶段阶梯 t0，不得每票独立 now()', () => {
+  // P2-2：_voteBatch 若把满额 LADDER_BUDGET_MS 配每票自己的 t0，后批/补票会重新吃满 15min。
+  assert.match(TPL, /const verifyLadderT0 = now\(\)/, 'Verify 阶段钉一次 t0')
+  assert.ok(TPL.indexOf('const verifyLadderT0 = now()') > TPL.indexOf("phase('Verify')"), 't0 在 phase Verify 之后')
+  assert.ok(TPL.indexOf('const verifyLadderT0 = now()') < TPL.indexOf('const _voteBatch'), 't0 在 _voteBatch 之前，救护批也共享')
+  assert.match(TPL, /MODEL_LADDER, LADDER_BUDGET_MS, verifyLadderT0\)/, '票调用传入共享 t0')
+  assert.doesNotMatch(TPL, /opts\.ladderT0/, '共享 t0 走第 5 参，不得塞进 agent opts')
+})
+
+test('模板：超时日志不再写 report 有内容至多 2 试', () => {
+  assert.doesNotMatch(TPL, /report 有内容至多 2 试/, '超时日志不得再把阶梯说成 2 试')
+  assert.match(TPL, /零素材 1 级/, '超时日志须写零素材 1 级')
+  assert.match(TPL, /有素材走 MODEL_LADDER/, '超时日志须写有素材走 MODEL_LADDER')
 })

@@ -173,3 +173,68 @@ test('空 ladder：立即 null + onExhausted', async () => {
   assert.equal(h.calls.length, 0)
   assert.deepEqual(h.exhausted, ['report'])
 })
+
+test('生产形状 withDeadline：reject 透传 → schema 不换级、524 换级', async () => {
+  // 生产适配器必须让 agent reject 进入工厂 catch（TRANSIENT.test 才活）。
+  // 身份 withDeadline=async p=>p 已经透传；这里显式用 Promise reject 通道，
+  // 锁死「settle(null) 吞消息」不得回归。
+  const make = (byModel) => {
+    const calls = []
+    const logs = []
+    const agent = async (_p, opts) => {
+      calls.push(opts.model)
+      const spec = byModel[opts.model]
+      if (spec && spec.throw) throw new Error(spec.throw)
+      return spec && Object.prototype.hasOwnProperty.call(spec, 'value') ? spec.value : { ok: true }
+    }
+    const withDeadline = (p) => new Promise((resolve, reject) => p.then(resolve, reject))
+    const run = makeSafeAgentWithLadder({
+      agent, withDeadline, now: () => 0, log: s => logs.push(String(s)),
+      TRANSIENT, AGENT_TIMEOUT_MS: 360000,
+    })
+    return { run, calls, logs }
+  }
+  const schema = make({ 'deepseek-v4-flash': { throw: 'schema validation failed' } })
+  assert.equal(await schema.run('p', { label: 'report' }, LADDER, 900000), null)
+  assert.deepEqual(schema.calls, ['deepseek-v4-flash'])
+  assert.ok(!schema.logs.some(l => /LADDER-NEXT/.test(l)), 'schema reject 不得换级：' + schema.logs.join(' | '))
+
+  const gw = make({
+    'deepseek-v4-flash': { throw: TRANSIENT_MSG },
+    'grok-4.6': { value: { body: 'recovered' } },
+  })
+  assert.deepEqual(await gw.run('p', { label: 'report' }, LADDER, 900000), { body: 'recovered' })
+  assert.deepEqual(gw.calls, ['deepseek-v4-flash', 'grok-4.6'])
+  assert.ok(gw.logs.some(l => /LADDER-NEXT report deepseek-v4-flash → grok-4\.6/.test(l)))
+})
+
+test('共享 t0：两票串行对同一 600ms 预算，后票不得再独立爬 grok/opus', async () => {
+  // P2-2：verify 每票自己 t0=now() 会让后票（或后批）重新吃满 LADDER_BUDGET_MS。
+  // 共享阶段 t0 后：票 A 300+400 已超 600；票 B 只允许再试当前级（tier 0）然后停。
+  const calls = []
+  const logs = []
+  let t = 0
+  const costs = { 'deepseek-v4-flash': 300, 'grok-4.6': 400, 'claude-opus-4-8': 100, 'gemini-3.7-flash-high': 100 }
+  const agent = async (prompt, opts) => {
+    calls.push({ prompt, model: opts.model })
+    t += costs[opts.model] || 0
+    throw new Error(TRANSIENT_MSG)
+  }
+  const run = makeSafeAgentWithLadder({
+    agent, withDeadline: async (p) => p, now: () => t, log: s => logs.push(String(s)),
+    TRANSIENT, AGENT_TIMEOUT_MS: 360000,
+  })
+  const t0 = 0
+  const r1 = await run('vote-a', { label: 'v0:a' }, LADDER, 600, t0)
+  const r2 = await run('vote-b', { label: 'v0:b' }, LADDER, 600, t0)
+  assert.equal(r1, null)
+  assert.equal(r2, null)
+  assert.deepEqual(calls.filter(c => c.prompt === 'vote-a').map(c => c.model), ['deepseek-v4-flash', 'grok-4.6'])
+  assert.deepEqual(
+    calls.filter(c => c.prompt === 'vote-b').map(c => c.model),
+    ['deepseek-v4-flash'],
+    '后票共享 t0 已耗尽，只试 tier 0 即停，不得再爬 grok/opus：' + JSON.stringify(calls),
+  )
+  assert.ok(logs.some(l => /LADDER-BUDGET v0:b .*停在 deepseek-v4-flash/.test(l)), '后票须 LADDER-BUDGET：' + logs.join(' | '))
+  assert.ok(!calls.some(c => c.model === 'ladderT0' || c.prompt === undefined))
+})

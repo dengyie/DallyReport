@@ -17,29 +17,32 @@ export const DEFAULT_LADDER_BUDGET_MS = 900000
 
 /**
  * 模型阶梯降级包装：TRANSIENT / null 逐级换模型，终局才返回 null。
- * @param {{agent, withDeadline, now, log, TRANSIENT, AGENT_TIMEOUT_MS, onRecovered?, onExhausted?}} deps
- * @returns {(prompt:string, opts:object, ladder:string[], budgetMs:number) => Promise<object|null>}
+ * @param {{agent, withDeadline, now, log, TRANSIENT, AGENT_TIMEOUT_MS, onRecovered?, onExhausted?, onTried?}} deps
+ * @returns {(prompt:string, opts:object, ladder:string[], budgetMs:number, stageT0?:number) => Promise<object|null>}
  */
 export const makeSafeAgentWithLadder = (deps) => {
   const {
     agent, withDeadline, now, log, TRANSIENT, AGENT_TIMEOUT_MS,
-    onRecovered, onExhausted,
+    onRecovered, onExhausted, onTried,
   } = deps
   const fail = (label) => {
     if (typeof onExhausted === 'function') onExhausted(label)
     return null
   }
-  return async (prompt, opts, ladder, budgetMs) => {
+  return async (prompt, opts, ladder, budgetMs, stageT0) => {
     const label = (opts && opts.label) || '?'
     const list = Array.isArray(ladder) ? ladder : []
     if (!list.length) {
       log('LADDER-FAIL ' + label + ' (empty ladder)')
       return fail(label)
     }
-    const t0 = now()
+    // 第 5 参 stageT0：verify 多票共享阶段时钟。省略则本调用 now()（report 单次）。
+    // 正预算在当前级失败后再查；调用前已耗尽仍先跑 tier 0。
+    const t0 = typeof stageT0 === 'number' ? stageT0 : now()
     const timeoutMs = (opts && opts.timeoutMs) || AGENT_TIMEOUT_MS
     for (let i = 0; i < list.length; i++) {
       const m = list[i]
+      if (typeof onTried === 'function') onTried(label, m)
       let r = null
       try {
         r = await withDeadline(agent(prompt, { ...opts, model: m }), timeoutMs)

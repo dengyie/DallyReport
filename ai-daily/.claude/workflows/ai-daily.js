@@ -40,7 +40,7 @@ const MAX_VERIFY = typeof args.maxVerify === 'number' && args.maxVerify > 0 ? ar
 const MAX_URLS_PER_BOARD = 6
 // 单代理最大存活时长。deepseek 网关偶发"发了工具结果后模型再无回复"的静默卡死：
 // 没有此上限时一个卡死代理会永久挡住整个 parallel/pipeline 闸门（实测 >10min 无产出）。
-// 超时 → 视作 null → 按阶段重试策略处理（harvest/discover/核查票不换新代理，fetch 换一次，report 有内容至多 2 试）。
+// 超时 → 视作 null → 按阶段重试策略处理（harvest/discover 不换新代理，fetch 换一次，verify/report 走阶梯：零素材 1 级 / 有素材走 MODEL_LADDER）。
 // 默认 6 分钟（8/15 起）：不再对昂贵代理做全新重跑，仅对"网关拥堵拖慢完整体"的静默挂起兜底。
 const AGENT_TIMEOUT_MS = typeof args.agentTimeoutMs === 'number' && args.agentTimeoutMs > 0 ? args.agentTimeoutMs : 360000
 
@@ -759,29 +759,32 @@ const DEFAULT_LADDER_BUDGET_MS = 900000
 
 /**
  * 模型阶梯降级包装：TRANSIENT / null 逐级换模型，终局才返回 null。
- * @param {{agent, withDeadline, now, log, TRANSIENT, AGENT_TIMEOUT_MS, onRecovered?, onExhausted?}} deps
- * @returns {(prompt:string, opts:object, ladder:string[], budgetMs:number) => Promise<object|null>}
+ * @param {{agent, withDeadline, now, log, TRANSIENT, AGENT_TIMEOUT_MS, onRecovered?, onExhausted?, onTried?}} deps
+ * @returns {(prompt:string, opts:object, ladder:string[], budgetMs:number, stageT0?:number) => Promise<object|null>}
  */
 const makeSafeAgentWithLadder = (deps) => {
   const {
     agent, withDeadline, now, log, TRANSIENT, AGENT_TIMEOUT_MS,
-    onRecovered, onExhausted,
+    onRecovered, onExhausted, onTried,
   } = deps
   const fail = (label) => {
     if (typeof onExhausted === 'function') onExhausted(label)
     return null
   }
-  return async (prompt, opts, ladder, budgetMs) => {
+  return async (prompt, opts, ladder, budgetMs, stageT0) => {
     const label = (opts && opts.label) || '?'
     const list = Array.isArray(ladder) ? ladder : []
     if (!list.length) {
       log('LADDER-FAIL ' + label + ' (empty ladder)')
       return fail(label)
     }
-    const t0 = now()
+    // 第 5 参 stageT0：verify 多票共享阶段时钟。省略则本调用 now()（report 单次）。
+    // 正预算在当前级失败后再查；调用前已耗尽仍先跑 tier 0。
+    const t0 = typeof stageT0 === 'number' ? stageT0 : now()
     const timeoutMs = (opts && opts.timeoutMs) || AGENT_TIMEOUT_MS
     for (let i = 0; i < list.length; i++) {
       const m = list[i]
+      if (typeof onTried === 'function') onTried(label, m)
       let r = null
       try {
         r = await withDeadline(agent(prompt, { ...opts, model: m }), timeoutMs)
@@ -1003,6 +1006,14 @@ const setUrlPolyfillForRealm = () => { installUrlPolyfill() }
 
 const CONF_ZH = { high: '高', medium: '中', low: '低' }
 
+// generated_by: 'ai-daily (grok-4.6)' → grok-4.6；缺省回落阶梯首级（向后兼容无 meta / 旧调用）。
+const modelFromMeta = meta => {
+  const s = meta && meta.generated_by != null ? String(meta.generated_by) : ''
+  const m = s.match(/\(([^)]+)\)/)
+  const id = m && m[1] ? m[1].trim() : ''
+  return id || DEFAULT_LADDER[0]
+}
+
 // C.3(2026-08-22): 状态标签规范化——把代理产出的 status 各种写法归一后判定是否「未核查」类（未经窗口内对抗投票）。
 // 归一：全半角括号（[]()（）［］）→ 去掉、全角空白→半角、两端去空白、去内部空白、去全角·→. 后比较。
 // 真值（标未核查徽标）：[窗口外·重大] / 窗口外·重大 / 窗口外重大 / 未核查；已核查/已否决不算。
@@ -1081,7 +1092,7 @@ const frontmatterLines = (meta, date, window) => {
   L.push('date: ' + (meta.date || date))
   L.push('window: ' + (meta.window || window))
   L.push('generator: ai-daily')
-  L.push('model: ' + DEFAULT_LADDER[0])
+  L.push('model: ' + modelFromMeta(meta))
   L.push('tags: [日报, AI]')
   const statsParts = []
   if (num(st.confirmed) != null) statsParts.push('confirmed:' + st.confirmed)
@@ -1113,7 +1124,7 @@ const renderMarkdown = ({ date, window, report, coverage, windowMisses, degraded
     const hard = (typeof st.confirmed === 'number' ? st.confirmed : 0) + (typeof st.major_out === 'number' ? st.major_out : 0)
     if (hard < 8) L.push('> ⚠️ **低素材提示**：当日硬源不足 8 条，正文以近期趋势为主，请注意时效。')
   }
-  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（' + DEFAULT_LADDER[0] + '）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
+  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（' + modelFromMeta(meta) + '）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
   L.push('')
   L.push('## 📌 今日一句话')
   L.push('')
@@ -1192,7 +1203,7 @@ const dedupWindowMisses = (windowMisses, maj) => {
   })
 }
 
-const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, windowMisses, degraded, noNewsCompanies, reportError }) => {
+const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, windowMisses, degraded, noNewsCompanies, reportError, generated_by }) => {
   const S = s => String(s || '').replace(/\s+/g, ' ').trim()
   const voteTag = x => x.verifiedByVote ? '`✓' + (x.vote || '?') + '`' : '`◇' + (x.vote || '?') + '`'
   // 降级版来源形态为单 URL x.source（非数组），统一走 buildCitationMap 角标化（spec D.2）。
@@ -1210,7 +1221,7 @@ const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, wi
   const L = []
   L.push('# 🤖 AI 日报 · ' + date)
   L.push('')
-  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（' + DEFAULT_LADDER[0] + '）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
+  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（' + modelFromMeta({ generated_by }) + '）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
   L.push('')
   L.push('## ⚠️ 本日报为**降级快讯**（report 合成代理未产出，由编排器据已核查归档拼合）')
   L.push('')
@@ -1537,20 +1548,22 @@ const TRANSIENT = /(422|429|5\d\d|524|timeout|timed out|connection closed|model 
 // 饥饿倍率，喂给 WALL.observe 标定墙钟（见 wallclock.mjs）。这是 realm 内唯一能反推真实墙钟的通道。
 // observe=false：探针等短窗口超时不得喂 WALL——advisory 探针本不该成为墙钟标定样本
 // （10–20s 窗口 + tick 饥饿会把 factor 打到 cap，或一次准时超时把峰值抹成 1×）。
-const withDeadline = (p, ms, observe = true) => new Promise(resolve => {
+const withDeadline = (p, ms, observe = true) => new Promise((resolve, reject) => {
   let done = false
   const t0 = _wallMs
   const settle = v => { if (!done) { done = true; clearTimeout(to); resolve(v) } }
+  const fail = e => { if (!done) { done = true; clearTimeout(to); reject(e) } }
   const to = setTimeout(() => {
     // 真超时：ms 真实毫秒已过，而累加器同窗口只涨了 (_wallMs - t0) → 标定饥饿倍率。
     const f = observe ? WALL.observe(ms, _wallMs - t0) : null
-    log('agent 超时 ' + Math.round(ms / 1000) + 's 无产出 → 视为失败（按阶段重试策略：harvest/disc/票不换新代理，fetch 换一次，report 有内容至多 2 试）'
+    log('agent 超时 ' + Math.round(ms / 1000) + 's 无产出 → 视为失败（按阶段重试策略：harvest/disc 不换新代理，fetch 换一次，零素材 1 级 / 有素材走 MODEL_LADDER）'
       + (observe
         ? ' [墙钟标定 累加器仅计 ' + Math.round((_wallMs - t0) / 1000) + 's → 饥饿倍率 ' + (f || 1).toFixed(2) + '×]'
         : ' [探针/短窗超时不标定墙钟]'))
     settle(null)
   }, ms)
-  p.then(v => settle(v), () => settle(null))
+  // reject 必须 fail(e) 进工厂 catch：settle(null) 会抹掉 524 vs schema，生产里 TRANSIENT 永远匹配不到。
+  p.then(v => settle(v), e => fail(e))
 })
 const safeAgent = async (p, o, tries = 2) => {
   for (let i = 0; i < tries; i++) {
@@ -1604,13 +1617,20 @@ const BREAKER = makeCircuitBreaker({
 })
 const probeGateway = async label => {
   const t0 = now()
-  const p = await withDeadline(agent('仅回复 OK。', { label: 'probe:' + label, effort: 'low', timeoutMs: GATEWAY_PROBE_MS }), GATEWAY_PROBE_MS, false)
-  const took = Math.round(now() - t0)
-  // 8/30：探针由「合成否决权」降为「只观察」——探针失败不再跳过 report（8/29 实证：
-  // 单次 20s 探针超时竟把 9 条已确认内容整体判死，report 代理其实从未被调用过）。
-  // 探针只用于记录网关饱和度；真死网关由 report 自身 600s 超时 + safeAgent 重试兜底。
-  if (!p) { log('PROBE-FAIL advisory ' + label + ' ' + took + 'ms 探针未通过（不否决合成）'); return false }
-  log('PROBE-OK ' + label + ' ' + took + 'ms'); return true
+  // withDeadline reject 透传后，探针必须自己接住——advisory 失败不得炸 workflow。
+  try {
+    const p = await withDeadline(agent('仅回复 OK。', { label: 'probe:' + label, effort: 'low', timeoutMs: GATEWAY_PROBE_MS }), GATEWAY_PROBE_MS, false)
+    const took = Math.round(now() - t0)
+    // 8/30：探针由「合成否决权」降为「只观察」——探针失败不再跳过 report（8/29 实证：
+    // 单次 20s 探针超时竟把 9 条已确认内容整体判死，report 代理其实从未被调用过）。
+    // 探针只用于记录网关饱和度；真死网关由 report 自身 600s 超时 + 阶梯兜底。
+    if (!p) { log('PROBE-FAIL advisory ' + label + ' ' + took + 'ms 探针未通过（不否决合成）'); return false }
+    log('PROBE-OK ' + label + ' ' + took + 'ms'); return true
+  } catch (e) {
+    const took = Math.round(now() - t0)
+    log('PROBE-FAIL advisory ' + label + ' ' + took + 'ms 探针未通过（不否决合成）')
+    return false
+  }
 }
 // 9/02 模型阶梯：仅 report + verify 走四级降级。DEFAULT_LADDER 由 ladder.mjs inline 提供。
 // 必须放在时钟块（_TICK_MS / now）之后——workflow-integration 切片 const safeAgent … const _TICK_MS 不得被污染。
@@ -1618,8 +1638,10 @@ const MODEL_LADDER = Array.isArray(args.modelLadder) && args.modelLadder.length 
 const LADDER_BUDGET_MS = typeof args.ladderBudgetMs === 'number' ? args.ladderBudgetMs : DEFAULT_LADDER_BUDGET_MS
 const ladderUsed = []
 const ladderExhaustedStages = new Set()
+let reportModelUsed = MODEL_LADDER[0]
 const safeAgentWithLadder = makeSafeAgentWithLadder({
   agent, withDeadline, now, log, TRANSIENT, AGENT_TIMEOUT_MS,
+  onTried: (label, model) => { if (/^report/.test(String(label))) reportModelUsed = model },
   onRecovered: (label, model) => { ladderUsed.push(label + ':' + model) },
   onExhausted: (label) => { ladderExhaustedStages.add(/^report/.test(String(label)) ? 'report' : 'verify') },
 })
@@ -2048,10 +2070,12 @@ const rankedClaims = []
 for (const k of boardKeysV) rankedClaims.push(...claimsByBoard.get(k).slice(0, quota.get(k)))
 log('Verify: ' + rankedClaims.length + ' claims across ' + boardKeysV.length + ' boards [' + [...quota.entries()].map(e => e[0] + ':' + e[1]).join(' ') + '], adaptive 2+1 votes')
 phase('Verify')
+// 全 Verify 阶段共享一个阶梯 t0：6 票并发不得各自重新吃满 LADDER_BUDGET_MS（烟测 420s 已见后票把预算叠高）。
+const verifyLadderT0 = now()
 
 const _voteBatch = (c, n, startIdx, timeoutMs) => parallel(Array.from({ length: n }, (_, v) => () => {
   const label = 'v' + (startIdx + v) + ':' + (c.claim || '').slice(0, 30)
-  return safeAgentWithLadder(verifyPrompt(c, ctxP), { label, phase: 'Verify', schema: VERDICT_SCHEMA, effort: 'low', timeoutMs }, MODEL_LADDER, LADDER_BUDGET_MS).then(r => {
+  return safeAgentWithLadder(verifyPrompt(c, ctxP), { label, phase: 'Verify', schema: VERDICT_SCHEMA, effort: 'low', timeoutMs }, MODEL_LADDER, LADDER_BUDGET_MS, verifyLadderT0).then(r => {
     BREAKER.record(!!r, label)
     return r
   })
@@ -2283,6 +2307,7 @@ if (ladderExhaustedStages.size) degradedFlags.push('ladder_exhausted:' + [...lad
 // （墙钟跳过路径删除——进入 Synthesize 即尝试 report）。
 const reportErr = report ? null : 'report agent failed; reverting to raw archive'
 if (reportErr) degradedFlags.push('report_failed')
+const generatedBy = 'ai-daily (' + reportModelUsed + ')'
 // 归档 payload 数组（claimsJson 与降级 md 共用同一份同构数据，避免两处映射漂移）。
 const confirmedOut = confirmed.map(c => ({ claim: c.claim, quote: c.quote, source: c.sourceUrl, sourceQuality: c.sourceQuality, date: c.publishDate || c.date, window: c.isMajorOut ? 'major-out' : claimWindow(c), vote: c.isMajorOut ? '—' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, verifiedByVote: !c.isMajorOut, erroredCount: c.erroredCount || 0, confidence: (c.verdicts.filter(v => !v.refuted)[0] || {}).confidence || (c.isMajorOut ? 'high' : 'low') }))
 const refutedOut = killed.map(c => ({ claim: c.claim, source: c.sourceUrl, vote: (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, erroredCount: c.erroredCount || 0 }))
@@ -2292,9 +2317,9 @@ const md = report
   ? renderMarkdown({ date: DATE, window: WINDOW_LABEL, report, coverage, windowMisses, degraded: degradedFlags, meta: {
       date: DATE, window: WINDOW_LABEL,
       stats: { confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, urls_fetched: sources.length, urls_discovered: discoverRows.reduce((n, d) => n + d.urls.length, 0) },
-      generated_by: 'ai-daily (' + MODEL_LADDER[0] + ')',
+      generated_by: generatedBy,
     } })
-  : renderDegradedMarkdown({ date: DATE, window: WINDOW_LABEL, confirmed: confirmedOut, refuted: refutedOut, coverage, windowMisses, degraded: degradedFlags, noNewsCompanies: noDynamicCompanies, reportError: reportErr })
+  : renderDegradedMarkdown({ date: DATE, window: WINDOW_LABEL, confirmed: confirmedOut, refuted: refutedOut, coverage, windowMisses, degraded: degradedFlags, noNewsCompanies: noDynamicCompanies, reportError: reportErr, generated_by: generatedBy })
 
 const claimsJson = JSON.stringify({ date: DATE, window: WINDOW_LABEL, confirmed: confirmedOut, refuted: refutedOut, unverified: unverifiedOut, outOfWindow: outOfWindowOut }, null, 1)
 // JSON 归档不再走 writer 代理（base64 转录会被 LLM 损坏，曾导致 control-char 非法 JSON + 每失败代理烧 260KB）。
@@ -2305,7 +2330,7 @@ const sourcesJson = JSON.stringify({ date: DATE, sources: sources.map(s => ({ ur
 const artifacts = [claimsPath, sourcesPath]  // md 由 orchestrator 从 payloads.md 落盘，artifact 清单列 JSON（3 个见下）
 
 const metaJson = JSON.stringify({
-  date: DATE, window: { from: WFROM, to: WTO || DATE }, generated_by: 'ai-daily (' + MODEL_LADDER[0] + ')',
+  date: DATE, window: { from: WFROM, to: WTO || DATE }, generated_by: generatedBy,
   boards: boards.length, urls_discovered: discoverRows.reduce((n, d) => n + d.urls.length, 0), urls_fetched: sources.length, claims_extracted: allClaims.length,
   claims_verified: voted.length, confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, unverified: unverified.length, out_of_window_confirmed: outOfWindow.length,
   window_misses: windowMisses,

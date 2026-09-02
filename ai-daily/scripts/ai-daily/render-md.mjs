@@ -16,6 +16,14 @@ export const setUrlPolyfillForRealm = () => { installUrlPolyfill() }
 
 const CONF_ZH = { high: '高', medium: '中', low: '低' }
 
+// generated_by: 'ai-daily (grok-4.6)' → grok-4.6；缺省回落阶梯首级（向后兼容无 meta / 旧调用）。
+const modelFromMeta = meta => {
+  const s = meta && meta.generated_by != null ? String(meta.generated_by) : ''
+  const m = s.match(/\(([^)]+)\)/)
+  const id = m && m[1] ? m[1].trim() : ''
+  return id || DEFAULT_LADDER[0]
+}
+
 // C.3(2026-08-22): 状态标签规范化——把代理产出的 status 各种写法归一后判定是否「未核查」类（未经窗口内对抗投票）。
 // 归一：全半角括号（[]()（）［］）→ 去掉、全角空白→半角、两端去空白、去内部空白、去全角·→. 后比较。
 // 真值（标未核查徽标）：[窗口外·重大] / 窗口外·重大 / 窗口外重大 / 未核查；已核查/已否决不算。
@@ -94,7 +102,7 @@ const frontmatterLines = (meta, date, window) => {
   L.push('date: ' + (meta.date || date))
   L.push('window: ' + (meta.window || window))
   L.push('generator: ai-daily')
-  L.push('model: ' + DEFAULT_LADDER[0])
+  L.push('model: ' + modelFromMeta(meta))
   L.push('tags: [日报, AI]')
   const statsParts = []
   if (num(st.confirmed) != null) statsParts.push('confirmed:' + st.confirmed)
@@ -126,7 +134,7 @@ export const renderMarkdown = ({ date, window, report, coverage, windowMisses, d
     const hard = (typeof st.confirmed === 'number' ? st.confirmed : 0) + (typeof st.major_out === 'number' ? st.major_out : 0)
     if (hard < 8) L.push('> ⚠️ **低素材提示**：当日硬源不足 8 条，正文以近期趋势为主，请注意时效。')
   }
-  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（' + DEFAULT_LADDER[0] + '）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
+  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（' + modelFromMeta(meta) + '）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
   L.push('')
   L.push('## 📌 今日一句话')
   L.push('')
@@ -205,7 +213,7 @@ const dedupWindowMisses = (windowMisses, maj) => {
   })
 }
 
-export const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, windowMisses, degraded, noNewsCompanies, reportError }) => {
+export const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, windowMisses, degraded, noNewsCompanies, reportError, generated_by }) => {
   const S = s => String(s || '').replace(/\s+/g, ' ').trim()
   const voteTag = x => x.verifiedByVote ? '`✓' + (x.vote || '?') + '`' : '`◇' + (x.vote || '?') + '`'
   // 降级版来源形态为单 URL x.source（非数组），统一走 buildCitationMap 角标化（spec D.2）。
@@ -223,7 +231,7 @@ export const renderDegradedMarkdown = ({ date, window, confirmed, refuted, cover
   const L = []
   L.push('# 🤖 AI 日报 · ' + date)
   L.push('')
-  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（' + DEFAULT_LADDER[0] + '）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
+  L.push('> 覆盖 ' + window + ' 窗口 · 生成器 ai-daily（' + modelFromMeta({ generated_by }) + '）' + (degraded && degraded.length ? ' · 降级标记：`' + degraded.join('`、`') + '`' : ''))
   L.push('')
   L.push('## ⚠️ 本日报为**降级快讯**（report 合成代理未产出，由编排器据已核查归档拼合）')
   L.push('')

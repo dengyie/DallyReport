@@ -13,9 +13,11 @@ test('SKILL.md: 探针语义为 advisory 观察（8/30 契约，不得残留否�
   assert.ok(!SKILL.includes('探针把关'), '不得保留「探针把关」旧否决语义')
 })
 
-test('SKILL.md: report 不再「单次直出」，有内容可重试 2 次', () => {
+test('SKILL.md: report 不再「单次直出」，零素材 1 级 / 有素材走阶梯', () => {
   assert.ok(!SKILL.includes('report 单次直出'), '不得保留 report 单次直出旧措辞')
-  assert.match(SKILL, /report 至多 2 试/, '应写明「有内容时至多 2 试」')
+  assert.doesNotMatch(SKILL, /report 至多 2 试/, '不得再把阶梯说成「至多 2 试」')
+  assert.match(SKILL, /零素材只跑/, '应写明零素材只跑首级')
+  assert.match(SKILL, /有素材才爬满四级/, '应写明有素材走完整 MODEL_LADDER')
 })
 
 test('SKILL.md: verifyInflightBuffer 描述为 360s 固定在飞（非 60s 下限）', () => {
