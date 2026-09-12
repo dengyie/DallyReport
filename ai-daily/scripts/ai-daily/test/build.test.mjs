@@ -17,7 +17,8 @@ import os from 'node:os'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const BUILD = path.join(HERE, '..', 'build.mjs')
 // 与 build.mjs 的 MODULES 常量逐字一致：url-polyfill 最先（注入 globalThis.URL），linuxdo 最后（零依赖纯导出）。
-const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'wallclock', 'ladder', 'fallback', 'prompts', 'render-md', 'cluster', 'linuxdo']
+// 9/13 增 ledger（cluster 后——import clusterTokenize）与 cdp-core（linuxdo 前——linuxdo import CDP 层）。
+const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'wallclock', 'ladder', 'fallback', 'prompts', 'render-md', 'cluster', 'ledger', 'cdp-core', 'linuxdo']
 // 每模块一个"关键标识"：命即证模块真的被 inline 进产物（若占位符替换丢模块/依赖序错，函数名/常量必缺）。
 // 全部取自各 .mjs 导出名（grep 实证），且为该模块唯一出现于产物中的标识。
 const MARKERS = {
@@ -33,6 +34,8 @@ const MARKERS = {
   prompts: 'reportPrompt',
   'render-md': 'buildCitationMap',
   cluster: 'clusterTokenize',
+  ledger: 'filterReportedTargets',
+  'cdp-core': 'readBodyTextRaw',
   linuxdo: 'fetchLinuxDoNews34',
 }
 // 模板的唯一顶层 export（bundle 顶层 decl）；剥离后 new Function 才能编译合法的脚本体。
@@ -95,6 +98,16 @@ test('F2 产物含 linuxdoPrefetched 消费入口（Task 2 预抓注入契约）
   const code = readBuiltProduct()
   assert.ok(code.includes('linuxdoPrefetched'), '产物须含 linuxdoPrefetched（run-daily.sh 预抓注入 → Workflow consumer）')
   assert.ok(code.includes('no_fetch_realm'), '产物须含 no_fetch_realm 降级路径（无预抓时 realm 内不裸抓 CDP）')
+})
+
+test('F2 产物含 9/13 跨天账本与 9222 门控契约（ledger/webFetchViaCdp）', () => {
+  const code = readBuiltProduct()
+  assert.ok(code.includes('reportedLedger'), '产物须含 args.reportedLedger 消费入口（跨天去重）')
+  assert.ok(code.includes('filterReportedTargets('), '产物须调用账本硬过滤')
+  assert.ok(code.includes('splitSeeds('), '产物须调用种子退役')
+  assert.ok(code.includes('webFetchViaCdp'), '产物须含 webFetchViaCdp 门控（fetch 走 9222 CDP）')
+  assert.ok(code.includes('cdp-fetch.mjs'), '产物 prompt 须引用宿主 cdp-fetch CLI（fetch 子代理经 Bash 调用）')
+  assert.ok(!code.includes('acquireLock'), '锁信号量属宿主 CLI 实现，不得 inline 进 realm')
 })
 
 test('F2 宿主 CLI 辅助（cli-main / prefetch / artifact-check）不进 MODULES', () => {

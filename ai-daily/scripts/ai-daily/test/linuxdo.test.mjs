@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CDP_DEFAULTS, extractTopicsFromJson, extractPostTextFromJson, fetchLinuxDoNews34, mintLinuxdoSource } from '../linuxdo.mjs'
+import { extractTopicsFromJson, extractPostTextFromJson, fetchLinuxDoNews34, mintLinuxdoSource } from '../linuxdo.mjs'
+import { CDP_DEFAULTS } from '../cdp-core.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const TPL = fs.readFileSync(path.join(HERE, '../ai-daily.template.js'), 'utf8')

@@ -26,7 +26,7 @@ const MOCK_BODY = JSON.stringify({ topic_list: { topics: [
 function runCli(args, { mockCdp = false } = {}) {
   const argsJson = JSON.stringify(args)
   const mockSetup = mockCdp ? `
-    const { CDP_DEFAULTS: LD } = await import('./scripts/ai-daily/linuxdo.mjs')
+    const { CDP_DEFAULTS: LD } = await import('./scripts/ai-daily/cdp-core.mjs')
     LD.pollIntervalMs = 1
     LD.requestTimeoutMs = 500
     LD.pollMaxMs = 1000
@@ -56,7 +56,7 @@ function runCli(args, { mockCdp = false } = {}) {
 // ── 单元：prefetchLinuxDo 成功/失败形态（进程内 mock CDP）──
 test('prefetchLinuxDo：mock CDP 成功 → {ok:true, topics, posts 配额截断} 且可 JSON 序列化', async () => {
   const { prefetchLinuxDo } = await import('../linuxdo-prefetch.mjs')
-  const { CDP_DEFAULTS } = await import('../linuxdo.mjs')
+  const { CDP_DEFAULTS } = await import('../cdp-core.mjs')
   const oldPoll = CDP_DEFAULTS.pollIntervalMs
   CDP_DEFAULTS.pollIntervalMs = 1
   const opened = []

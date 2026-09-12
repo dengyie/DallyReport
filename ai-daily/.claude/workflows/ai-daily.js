@@ -77,6 +77,8 @@ const WTO = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.to)) ? 
 const OUT = typeof args.outDir === 'string' && args.outDir ? args.outDir : null
 const BOARDS_SELECTED = Array.isArray(args.boards) ? new Set(args.boards) : null
 const GROK_DIR = '/Users/mango/.claude/skills/grok-search'
+// 9/13 fetch 走 9222：宿主 CDP 抓取 CLI（fetch 子代理经 Bash 调用；realm 本身不碰 CDP，护栏不变）。
+const CDP_FETCH_CLI = '/Users/mango/project/claude-project/obsidian/scripts/ai-daily/cdp-fetch.mjs'
 // 8/23 第二十一项：linuxdo 接入（登录态 CDP 独立发现组）。linuxdoCdpHost 默认 null → 组保留在
 // DISCOVER_GROUPS（板不崩）但 LINUXDO-SKIP no_cdp_host → urls:[] 不降级（命令行/手动补跑默认不启用）；
 // linuxdoMaxSources 配额默认 24（帖子轮换进组返回行）。
@@ -94,6 +96,19 @@ const LINUXDO_PREFETCHED = (() => {
   if (!posts.length) return null
   return { ok: true, host: raw.host || '', topics: Number(raw.topics) || posts.length, posts }
 })()
+// 9/13 跨天账本（严格去重）：args.reportedLedger = 编排器 Read ~/.ai-daily/published-ledger.json 注入的
+// 条目数组（{day,url,tokens,title,major}，记录端 finalize.mjs）。严格校验形态，坏形态视同无账本
+// （fail-open + degraded 旗标 ledger_unavailable，不因账本问题阻断成稿）。
+const REPORTED_LEDGER = (() => {
+  const raw = args.reportedLedger
+  if (!Array.isArray(raw) || !raw.length) return null
+  const ok = raw.filter(e => e && typeof e === 'object' && typeof e.day === 'string' && Array.isArray(e.tokens))
+  return ok.length ? ok : null
+})()
+// 9/13 fetch 通道门控：headless 显式传 webFetchViaCdp:true → fetch 代理先走 9222 CDP（宿主 cdp-fetch.mjs，
+// 复用登录态/临时标签），失败回落 WebFetch。手动 /ai-daily 默认 false 维持纯 WebFetch（既有纪律：
+// 离开 9222 环境不裸抓；realm 本身仍不碰 CDP——抓取发生在 fetch 子代理的 Bash 里）。
+const WEB_FETCH_VIA_CDP = args.webFetchViaCdp === true
 
 if (!DATE || !OUT) {
   return { error: 'Args must include date (YYYY-MM-DD) and outDir (absolute path). window optional. got: ' + JSON.stringify(args) }
@@ -246,7 +261,9 @@ const EXTRACT_SCHEMA = {
     publishDate: { type: 'string' },
     claims: { type: 'array', maxItems: 3, items: {
       type: 'object', required: ['claim', 'quote', 'importance'],
-      properties: { claim: { type: 'string' }, quote: { type: 'string' }, importance: { enum: ['central', 'supporting', 'tangential'] } },
+      // sourceUrl 可选（9/13 索引页治理）：实际引用页与来源 URL 不同时必填（索引页选中的真实文章页）；
+      // template 注入点按 http(s) 合法性优先取 claim.sourceUrl，否则回落 src.url。
+      properties: { claim: { type: 'string' }, quote: { type: 'string' }, importance: { enum: ['central', 'supporting', 'tangential'] }, sourceUrl: { type: 'string' } },
     }},
   },
 }
@@ -941,16 +958,37 @@ const discoverPrompt = (g, ctx) => {
     '\n\n⚠️ 最终收口（呼应开头条目）：执行完上述步骤后，立即调用 StructuredOutput 工具返回结构化对象。**严禁 end_turn 返回纯文本**——这是最常见的失败模式（思考里说"我来调用 StructuredOutput"却以文字结束）。调工具即结束，勿在工具调用前/后铺垫文字。Structured output only.'
 }
 
-const fetchPrompt = (src, ctx) =>
-  '## Source Extractor\n\n窗口：' + ctx.WINDOW_LABEL + '。抓取并提取该来源的可证伪声明：\n' +
+// fetchPrompt（9/13 重构）：
+//   - ctx.webFetchViaCdp=true（headless）→ Step1 优先宿主 9222 CDP（cdp-fetch.mjs，复用登录态/临时标签），
+//     失败回落 WebFetch 文本抓取兜底；false（手动默认）→ 维持纯 WebFetch（既有纪律：离开 9222 环境不裸抓）。
+//   - 索引页治理：found_via=static-fallback 的来源是栏目/索引页——只做发现入口；从索引页选真实文章 URL
+//     逐条抓正文，claim.sourceUrl 必填真实文章页（引用/verify/角标落到文章页，不再拿分类页当引用源）。
+const fetchPrompt = (src, ctx) => {
+  const isIndex = src && src.found_via === 'static-fallback'
+  const step1 = (ctx && ctx.webFetchViaCdp)
+    ? '1. 优先用 9222 登录态 Chrome 抓正文（用 Bash 运行，命令与 URL 原样照抄）：\n' +
+      '   node ' + (ctx.CDP_FETCH_CLI || 'cdp-fetch.mjs') + " '" + src.url + "'\n" +
+      '   - 返回 ok:true → 直接以 JSON 的 text 字段作为页面正文进入第 3 步，**不要**再 WebFetch；\n' +
+      '   - 失败（ok:false / 非零退出 / 命令不可用，如 9222 未开）→ 改用 WebFetch 文本抓取兜底同一 URL；两者都失败 → claims:[] 且 sourceQuality:"unreliable"。\n'
+    : '1. 用 WebFetch 抓取页面。\n'
+  const indexNote = isIndex
+    ? '\n⚠️ **索引页纪律**：本 URL 是栏目/索引页（found_via=static-fallback）——它只是发现入口，不是新闻本体：\n' +
+      '- 从索引页内容里选出窗口内最相关的 1-3 条**真实文章链接**（完整 http(s) URL）；\n' +
+      '- 逐条抓取**文章正文**（' + ((ctx && ctx.webFetchViaCdp) ? 'cdp-fetch.mjs 同上用法' : 'WebFetch') + '），只基于文章正文提取 claim；\n' +
+      '- 每条 claim 的 `sourceUrl` 字段**必填**为该文章的真实 URL（不是本索引页）——引用与核查都落在文章页；\n' +
+      '- 索引页里没有窗口内文章链接 → claims:[] 且 sourceQuality:"unreliable"（不得拿索引页目录条目本身当 claim）。\n'
+    : ''
+  return '## Source Extractor\n\n窗口：' + ctx.WINDOW_LABEL + '。抓取并提取该来源的可证伪声明：\n' +
   '**URL:** ' + src.url + '\n**Title:** ' + src.title + '\n**Found via:** ' + src.board + ' / ' + src.found_via + '\n\n' +
   '## Task\n' +
-  '1. 用 WebFetch 抓取页面。\n' +
-  '⚠️ **禁止截图/图片输入**：本模型仅支持文本输入。禁止使用 Playwright 截图、禁止用图片方式读页面——使用 WebFetch 文本抓取。传入图片/screenshot 会直接导致 400 模型报错（Model only supports text input）。\n' +
+  step1 +
+  '⚠️ **禁止截图/图片输入**：本模型仅支持文本输入。禁止使用 Playwright 截图、禁止用图片方式读页面——一律文本抓取。传入图片/screenshot 会直接导致 400 模型报错（Model only supports text input）。\n' +
+  indexNote +
   '2. 判定来源质量：primary(官方/一手) / secondary(主流媒体报道) / blog / forum / unreliable。\n' +
-  '3. 提取 2-3 条与本板块日报问题相关、可核实、具体的声明（非空泛结论）；每条必须带原文引语 quote（**逐字抄录支撑该声明的完整原句，≤220 字，且必须包含声明中的全部具体细节——日期/数字/机构名/对比结论**，只截 40 字短句会导致核查票无据可依而误否决）、重要性 central/supporting/tangential。\n' +
+  '3. 提取 2-3 条与本板块日报问题相关、可核实、具体的声明（非空泛结论）；每条必须带原文引语 quote（**逐字抄录支撑该声明的完整原句，≤220 字，且必须包含声明中的全部具体细节——日期/数字/机构名/对比结论**，只截 40 字短句会导致核查票无据可依而误否决）、重要性 central/supporting/tangential；若实际引用页与上方 URL 不同（索引页选中的文章页），每条 claim 另带字段 sourceUrl=该文章真实 URL。\n' +
   '4. 注明页面/事件日期 publishDate（YYYY-MM-DD 或 MM-DD）；无日期则空。\n' +
   '5. 页面较长时只精读与日报相关且日期在窗口内的部分，其余快速略读；抓取失败/付费墙/无关页面 → 返回 claims:[] 且 sourceQuality:"unreliable"。\n\nStructured output only.'
+}
 
 // verifyPrompt 需要 VOTES_PER_CLAIM/REFUTATIONS_REQUIRED，经 ctx 传入。
 const verifyPrompt = (c, ctx) =>
@@ -967,6 +1005,7 @@ const reportPrompt = ctx =>
   (ctx.killedCount ? "\n## 被否决声明（不写入正文）\n" + ctx.refutedList : "") +
   (ctx.unverifiedCount ? "\n## 未验证声明（核查代理故障，只能进“待核实”小节）\n" + ctx.unverifiedList : "") +
   ctx.missBlock +
+  (ctx.reportedBlock || "") +
   "\n## 覆盖自检\n" + ctx.coverBlock + "\n\n## 编辑要求\n" +
   "0. **禁止调用任何工具**（禁 WebFetch、WebSearch、Read、curl 及一切工具调用）——只做纯推理合成；一旦发起工具调用即视为失败。\n" +
   "**✅ 收口纪律（最终唯一出口）**：本代理的最终动作**只能是调用 StructuredOutput 工具**返回结构化对象 { sections, oneLiner, execSummary, caveats, openQuestions }。思考过程中即使已得出全部结论、或素材为空（无已确认声明、仅少量未核查/超窗项），**最后一步也是调用 StructuredOutput 工具，而不是 end_turn 输出文字总结**。任何「我在思考里已经理清，现在用文字说明」的 end_turn 都算失败——主流程判定为 null，整篇日报降级为退化快讯。素材再少也要调用工具——哪怕返回 oneLiner 一句话 + sections 空数组 + execSummary 一句话，也必须通过 StructuredOutput 工具返回。\n\n" +
@@ -984,6 +1023,7 @@ const reportPrompt = ctx =>
   "  - 同一事件出现于多条已聚类素材 → 只写 ONE 条标题正文，其他绝不重复（不并排、不\"此外\"再造一条）。若不同条沿用不同口径数字，直接写\"M 为 X、N 为 Y，口径不一\"，不再分别作文。\n" +
   "  - 判定两条是同一事件的双重标准（全部满足）：①共享 ≥1 个实体 token（组织/人名）；②日期同域（≥2 天内）；③数字字段重叠（含数量级）。\n" +
   "  - 判定后你的摘要正文即为主合并 + 数字/口径自然呈现（如 4.25GW/$150-200B/$600B/$105B 并陈）。\n\n" +
+  "4.8.【已报道去重（9/13）】素材里的「## 已报道」名单 = 近 3 天已出现在日报正文的条目：与名单同事件的素材（同一 URL，或同事件换 URL/换表述/转手报道）**一律不写正文条目**——读者已读过，宁漏勿重。唯一例外：该事件确有**实质新增进展**，此时只写新增部分，summary 开头标注「前情提要：X 日已报道；本次新增：…」，status 沿用素材标注。判定看主体+事件（表述不同不影响判定）。\n\n" +
   "5. **板块组织**：不要机械按来源分板。**labs（新模型/模型能力）板块如果有内容，必须放在第一个板块**。如果某板块今天无重要新闻，该板块可以不出现在正文（但保留 coverage 自检）。重磅新闻放在最靠前的板块下。\n\n" +
   "3.2. **数字口径**：同事件多条素材数字口径不一（如 4.25GW/$150-200B/$600B/$105B）时，直接并陈不同口径、不各自成条、提醒勿相加。\n\n" +
   "6. **caveats**：注明弱来源/厂商口径/时间敏感。openQuestions 2-4 个。\n\n" +
@@ -1301,14 +1341,43 @@ const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, wi
 
 // 8/23 C1 复核修复：原名 STOP_TOKENS/tokenize 与 render-md 顶层同名冲突 → 改 clusterStopTokens/clusterTokenize。
 const clusterStopTokens = new Set(['news', 'note', 'report', 'model', 'models', 'open', 'new', 'blog', 'post', 'api', 'app', 'apps', 'ai', 'pro', 'free', 'beta', 'tool', 'tools', 'official', 'release', 'update', 'announce', 'launch', 'said'])
-const clusterTokenize = s => (String(s || '').toLowerCase().match(/[a-z0-9][a-z0-9.%\-]*/g) || []).filter(t => t.length >= 4 && !clusterStopTokens.has(t))
 
-// 聚为 unordered 对：a 与 b 的 claim/claims 任一共享 ≥1 token 即成对。
+// 9/13 中文聚类升级：旧版 tokenizer 只匹配 ASCII → 纯中文 claim token 集为空 → 永不聚类（同名事件
+// 连日重复成稿的帮凶之一）。CJK bigram 引入后必须压住误合：①虚字/代词单字停用表（bigram 含任一即弃）；
+// ②新闻套话 bigram 停用表（发布/推出/宣布……几乎每条标题都有，是「万物皆桥」的噪声源）；
+// ③clusterClaims 对 CJK 路径要求 ≥3 个共享 bigram（ASCII 路径保持 ≥1 不变——拉丁实体名本身即强身份）。
+const clusterCjkStopChars = new Set('的一是在不了有和人这中大为上个时来用们生到作地于出就分对成会可主发年动同进还也说要把被给跟与或及但很太更都也又再才只之所得自心又如其事吗吧呢啊嘛呀么'.split(''))
+const clusterCjkStopBigrams = new Set(['发布', '推出', '宣布', '上线', '开源', '报道', '消息', '披露', '据悉', '表示', '今日', '今天', '昨日', '昨天', '最新', '正式', '已经', '即将', '预计', '有望', '目前', '全新', '相关', '升级', '更新', '支持', '提供', '包括', '通过', '之后', '以前', '以后', '进行', '出现', '成为', '以及', '同时', '另外', '此外', '其中', '日报', '视频', '图片', '模型'])
+
+// 9/13 token 输出 = ASCII token（≥4、停用词过滤，既有契约）+ CJK bigram（≥2 汉字连续串内相邻对，
+// 双停用表过滤）。中文因此进入聚类/账本指纹；拉丁行为逐字节不变。
+const clusterTokenize = s => {
+  const text = String(s || '').toLowerCase()
+  const out = []
+  for (const t of (text.match(/[a-z0-9][a-z0-9.%\-]*/g) || [])) {
+    if (t.length >= 4 && !clusterStopTokens.has(t)) out.push(t)
+  }
+  for (const run of (text.match(/[\u4e00-\u9fff]+/g) || [])) {
+    for (let i = 0; i < run.length - 1; i++) {
+      const bg = run.slice(i, i + 2)
+      if (clusterCjkStopChars.has(bg[0]) || clusterCjkStopChars.has(bg[1])) continue
+      if (clusterCjkStopBigrams.has(bg)) continue
+      out.push(bg)
+    }
+  }
+  return out
+}
+
+// 聚为簇：①ASCII 路径——a 与 b 的 claim/claims 任一共享 ≥1 token 即成对（既有语义，拉丁实体名即强身份）；
+// ②CJK 路径（9/13）——bigram 共享 ≥CJK_MIN_SHARED(3) 才成对：无关中文条目常共享 1-2 个通用词
+// bigram（模型/权重/发布…后者已停用），弱信号不合并。多簇命中取计数最高，平局取最小 index（确定性）。
 // keyOf/unionTokens 供 clusterClaims 内部使用：claim 优先，次 title。
 const unionTokens = c => new Set([...(c.claim ? clusterTokenize(c.claim) : []), ...(c.title ? clusterTokenize(c.title) : [])])
+const CJK_RE = /[\u4e00-\u9fff]/
+const CJK_MIN_SHARED = 3
 
 /**
- * 把共享实体 token 的声明聚成簇。
+ * 把共享实体的声明聚成簇（ASCII token ≥1 或 CJK bigram ≥3）。
  * @param {Array} claims 声明数组，每项可含 claim/title/summary/sources/status/quote 等
  * @returns {Array<{key:string, items:Array}>} 簇：key 取首条 title/claim，items 为簇内声明（原样）
  * 确定性：按输入序首现注册 token，无随机性。
@@ -1316,11 +1385,25 @@ const unionTokens = c => new Set([...(c.claim ? clusterTokenize(c.claim) : []), 
 const clusterClaims = claims => {
   if (!claims || !Array.isArray(claims)) return []
   const clusters = []
-  const seen = new Map()   // token → cluster index（首现注册）
+  const seen = new Map()   // token → cluster index（首现注册；ASCII 与 CJK bigram 同表）
   for (const c of claims) {
-    const ts = unionTokens(c)
+    const ts = [...unionTokens(c)]
+    // ① ASCII 路径（既有语义）
     let idx = -1
-    for (const t of ts) if (seen.has(t)) { idx = seen.get(t); break }
+    for (const t of ts) if (!CJK_RE.test(t) && seen.has(t)) { idx = seen.get(t); break }
+    // ② CJK 路径（9/13）：bigram 计数配额
+    if (idx < 0) {
+      const counts = new Map()
+      for (const t of ts) {
+        if (!CJK_RE.test(t)) continue
+        const ci = seen.get(t)
+        if (ci !== undefined) counts.set(ci, (counts.get(ci) || 0) + 1)
+      }
+      let bestN = 0
+      for (const [ci, n] of counts) {
+        if (n >= CJK_MIN_SHARED && (n > bestN || (n === bestN && (idx < 0 || ci < idx)))) { idx = ci; bestN = n }
+      }
+    }
     if (idx < 0) {
       clusters.push({ key: c.title || c.claim, items: [c] })
       for (const t of ts) if (!seen.has(t)) seen.set(t, clusters.length - 1)
@@ -1363,15 +1446,127 @@ const mergeCluster = (items, dateLabel, majorOutMap) => {
   const out = { ...distinct[0], claim: key, summary, sources, ...(vote ? { status: vote } : {}), mergedCount: total }
   return out
 }
-// ─── inline: linuxdo ───
-// ai-daily linux.do 登录态抓取（2026-08-23 第二十一项 §A）——纯导出零调用模块，自身零副作用。
-// 背景（已核实）：Cloudflare cf_clearance 绑定浏览器 TLS 指纹，裸 fetch 必 403，唯一可靠客户端是
-// 9222 真 Chrome（登录态）。经 CDP 开启临时标签 → 等 .json 文档在 Chrome 内渲染为 body 文本 → 读回。
-// 两条路径都覆盖：环境已有 globalThis.WebSocket（Node v26 是 function）→ 真 WebSocket 走
-// Runtime.evaluate 轮询 body.innerText；无 WebSocket 全局（workflow realm 降级保险）→ CDP HTTP-only
-// polling（每片轮询等价于"关旧标签+开新标签+读 body"的幂等快照）。
-// 不启动任何进程；fetch/AbortSignal/setTimeout/WebSocket 都是环境已有全局，直接引用。
-// build.mjs 只能把纯 float/纯导出 inline 进产物（workflow realm 自包含），本文件满足该约束。
+// ─── inline: ledger ───
+// ai-daily 跨天已报道账本（9/13 重构新增）——治理「同一事件连续多天整条重复成稿」的 P0 缺口。
+// 旧架构跨 run 零状态：3 天窗口重叠让昨日头条今日仍窗内、KNOWN_MAJOR_OUT 种子 21 天逐日重注入，
+// 实证 V4-Flash-Vision-Exp 连续 3 天、水彩 RL/孙鹏加盟等连续 2 天整条重复（同 URL）。
+//
+// 双端分工：
+//   记录端 = finalize.mjs（宿主）：每轮成稿后把 confirmed/outOfWindow 条目追加进
+//     ~/.ai-daily/published-ledger.json（HOME 而非 iCloud——launchd TCC 读不了 Mobile Documents，
+//     8/31 P4 实证；HOME 路径有 linuxdo-prefetch.json 先例）。
+//   消费端 = workflow realm：args.reportedLedger 注入本模块的过滤函数——已报道 URL 硬过滤（fetch
+//     配额前）、已报道种子退役（major-out 注入前）、已报道名单进 report prompt（软网，兜同事件换 URL）。
+//
+// 本模块纯函数、可 inline（无 fs/fetch/Date.now；日期算术走 date-utils 的纯函数）。
+
+
+// 硬匹配阈值（保守取向：宁可漏放——软网 report prompt 还有一道；不可误杀——同名家族条目如
+// 「Gemini 3.8 Flash」vs「Gemini 3.8 Flash Cyber」overlap 天然偏高，靠「共享 ≥5 token」压误杀）。
+// overlap = |A∩B| / min(|A|,|B|)。
+const LEDGER_OVERLAP_MIN = 0.8
+const LEDGER_SHARE_MIN = 5
+// 常规条目回看窗：窗口为 D-2~D，跨天重叠最长 2 天 + 当日 = 3。
+const LEDGER_LOOKBACK_DAYS = 3
+// 账本保留天数（prune）。种子退役判定依赖账本在保留窗内命中即可——种子自身 age gate 21d < 60d。
+const LEDGER_KEEP_DAYS = 60
+// 单条指纹 token 上限（长 claim 防爆炸；截断侧仍保实体词——tokenizer 输出序 ASCII 在前）。
+const LEDGER_MAX_TOKENS = 64
+
+// 指纹 token：复用 cluster 的 tokenizer（ASCII ≥4 + CJK bigram、双停用表），Set 去重后截断。
+const fingerprintTokens = s => [...new Set(clusterTokenize(s))].slice(0, LEDGER_MAX_TOKENS)
+
+// 账本条目构造（finalize 记账与测试共用同一 shape）。
+const makeLedgerEntry = (day, url, claimText, major) => ({
+  day: String(day || ''),
+  url: String(url || ''),
+  tokens: fingerprintTokens(claimText),
+  title: String(claimText || '').slice(0, 80),
+  major: !!major,
+})
+
+const _overlap = (a, b) => {
+  const A = new Set(a), B = new Set(b)
+  if (!A.size || !B.size) return { shared: 0, ratio: 0 }
+  let shared = 0
+  for (const t of A) if (B.has(t)) shared++
+  return { shared, ratio: shared / Math.min(A.size, B.size) }
+}
+
+// 同一事件判定（硬）：URL 归一命中即同事件；否则指纹高重叠 + 足量共享 token。
+const storyMatch = (claimLike, entry) => {
+  if (!claimLike || !entry) return false
+  const u1 = normURL(claimLike.url || '')
+  if (u1 && entry.url && normURL(entry.url) === u1) return true
+  const { shared, ratio } = _overlap(claimLike.tokens || [], entry.tokens || [])
+  return shared >= LEDGER_SHARE_MIN && ratio >= LEDGER_OVERLAP_MIN
+}
+
+// entry.day 距 today 是否在 lookback 天内（含当日）。任一日期不可解析 → 视为在窗内（保守去重；
+// finalize 只写合法 day，该分支仅防御手工编辑的账本）。
+const _withinLookback = (entryDay, today, lookback) => {
+  const e = normalizeDate(entryDay), t = normalizeDate(today)
+  if (e == null || t == null) return true
+  const age = daysBetween(e, t)
+  return age >= 0 && age <= lookback
+}
+
+// 过滤近 lookbackDays 天已报道的 fetch 候选。返回 { keep, dropped }，不改输入数组。
+// fail-open：ledger 非数组/空 → 全保留（该轮无账本可用，软网在 report prompt）。
+const filterReportedTargets = (targets, ledger, opts) => {
+  const entries = Array.isArray(ledger) ? ledger : []
+  const today = opts && opts.today
+  const lookback = opts && typeof opts.lookbackDays === 'number' ? opts.lookbackDays : LEDGER_LOOKBACK_DAYS
+  const recent = entries.filter(e => _withinLookback(e && e.day, today, lookback))
+  const keep = [], dropped = []
+  for (const t of (targets || [])) {
+    const like = { url: t && t.url, tokens: fingerprintTokens((t && t.title) || (t && t.url) || '') }
+    const hit = recent.find(e => storyMatch(like, e))
+    if (hit) dropped.push({ url: t.url, board: t && t.board, matchedDay: hit.day, matchedUrl: hit.url || null })
+    else keep.push(t)
+  }
+  return { keep, dropped }
+}
+
+// 种子退役（严格策略）：已报道过的 KNOWN_MAJOR_OUT 种子不再注入正文（报过一次即退役）。
+// 不看 lookback——major-out 一旦成稿就不再逐日刷屏；账本 60d prune 兜底（> 种子 age gate 21d）。
+// 返回 { fresh, reported }；reported 项附 reportedDay 供日志。
+const splitSeeds = (seeds, ledger) => {
+  const entries = Array.isArray(ledger) ? ledger : []
+  const fresh = [], reported = []
+  for (const s of (seeds || [])) {
+    const like = { url: (s && s.url) || '', tokens: fingerprintTokens(((s && s.name) || '') + ' ' + ((s && s.note) || '')) }
+    const hit = entries.find(e => storyMatch(like, e))
+    if (hit) reported.push({ ...s, reportedDay: hit.day })
+    else fresh.push(s)
+  }
+  return { fresh, reported }
+}
+
+// prune：只保留近 keepDays 天条目；day 不可解析的条目剔除（账本卫生）。today 缺失 → 原样返回。
+const pruneLedger = (entries, today, keepDays) => {
+  if (!Array.isArray(entries)) return []
+  const keep = typeof keepDays === 'number' ? keepDays : LEDGER_KEEP_DAYS
+  const t = normalizeDate(today)
+  if (t == null) return entries
+  return entries.filter(e => {
+    const d = normalizeDate(e && e.day)
+    if (d == null) return false
+    const age = daysBetween(d, t)
+    return age >= 0 && age <= keep
+  })
+}
+// ─── inline: cdp-core ───
+// ai-daily CDP 核心层（9/13 从 linuxdo.mjs 抽出）——「经 9222 已运行 Chrome 开临时标签读正文」的唯一实现。
+// 消费方：linuxdo.mjs（linux.do Discourse JSON 专用，JSON-only 过滤）与 cdp-fetch.mjs（宿主 CLI，
+// fetch 子代理经 Bash 调用，通用文章页正文）。
+//
+// 纪律（8/26 起、不变）：
+//   - 不启动任何浏览器进程；只对已运行在 127.0.0.1:9222 的现有 Chrome 发 CDP /json/new + /json/close。
+//   - 只关本函数 json/new 自己开的 targetId（try/finally 收敛），绝不误关用户其它标签、绝不关浏览器本体。
+//   - 两条读取路径：环境已有 WebSocket（Node v26）→ Runtime.evaluate 轮询 body.innerText；
+//     无 WebSocket（workflow realm 保险路径）→ CDP HTTP-only polling。
+//   - realm 可 inline（无 fs/require/process；fetch/AbortSignal/setTimeout/WebSocket 引用环境全局）。
 
 const CDP_DEFAULTS = {
   cdpHost: '127.0.0.1:9222',
@@ -1393,7 +1588,9 @@ async function closeTab(host, targetId) {
   try { await fetch(`http://${host}/json/close/${targetId}`, { method: 'PUT', signal: AbortSignal.timeout(3000) }) } catch {}
 }
 
-async function readBodyText(host, url) {
+// 原始正文读取：返回页面 body.innerText（任意内容；空/失败 → null）。9/13 从 readBodyText 拆出——
+// 旧版只接受 `{` 开头文本（Discourse .json 专用），通用文章页会被误判 null。
+async function readBodyTextRaw(host, url) {
   const res = await fetch(`http://${host}/json/new?${encodeURIComponent(url)}`, { method: 'PUT', signal: AbortSignal.timeout(CDP_DEFAULTS.requestTimeoutMs) })
   // 8/23 复核修复：/json/new 非 2xx 时 target 未建立、无标签可关，直接 throw（无泄漏，无需 closeTab）。
   if (!res.ok) throw new Error('open-tab HTTP ' + res.status)
@@ -1407,7 +1604,7 @@ async function readBodyText(host, url) {
     const wsUrl = target.webSocketDebuggerUrl
     let text = null
     if (hasW()) {
-      // 真 WebSocket：轮询内文取 JSON。
+      // 真 WebSocket：轮询内文。
       const ws = new WebSocket(wsUrl)
       await new Promise((ok, no) => { ws.onopen = ok; ws.onerror = () => { ws.close(); no(new Error('ws open')) } })
       let n = 0; const pend = new Map()
@@ -1423,7 +1620,7 @@ async function readBodyText(host, url) {
       for (let i = 0; i < Math.ceil(CDP_DEFAULTS.pollMaxMs / CDP_DEFAULTS.pollIntervalMs); i++) {
         const { result } = await send('Runtime.evaluate', { expression: 'document.body ? document.body.innerText : null', returnByValue: true })
         const v = result?.result?.value
-        if (v && String(v).trimStart().startsWith('{')) { text = v; break }
+        if (v && String(v).trim()) { text = v; break }
         await new Promise(r => setTimeout(r, CDP_DEFAULTS.pollIntervalMs))
       }
       ws.close()
@@ -1439,7 +1636,7 @@ async function readBodyText(host, url) {
         await new Promise(r => setTimeout(r, CDP_DEFAULTS.pollIntervalMs))
       }
     }
-    return text && String(text).trimStart().startsWith('{') ? text : null
+    return text && String(text).trim() ? String(text) : null
   } finally {
     // 8/23 复核修复：唯一关闭点用 finally 收敛 —— WS open 失败 / 中途抛错 / send 挂起超时被
     // withDeadline 化前（workflow 召唤层）都能兜到底。只关本函数 json/new 自己开的 targetId，
@@ -1447,6 +1644,24 @@ async function readBodyText(host, url) {
     await closeTab(host, targetId)
   }
 }
+
+// linux.do Discourse JSON 专用：只接受 `{` 开头文本（.json 端点在 Chrome 内渲染为纯 JSON 文本）。
+async function readBodyText(host, url) {
+  const text = await readBodyTextRaw(host, url)
+  return text && String(text).trimStart().startsWith('{') ? text : null
+}
+// ─── inline: linuxdo ───
+// ai-daily linux.do 登录态抓取（2026-08-23 第二十一项 §A）——纯导出零调用模块，自身零副作用。
+// 背景（已核实）：Cloudflare cf_clearance 绑定浏览器 TLS 指纹，裸 fetch 必 403，唯一可靠客户端是
+// 9222 真 Chrome（登录态）。经 CDP 开启临时标签 → 等 .json 文档在 Chrome 内渲染为 body 文本 → 读回。
+//
+// 9/13 重构：CDP 协议层（closeTab/readBodyText/CDP_DEFAULTS）抽到 cdp-core.mjs（与新增宿主 CLI
+// cdp-fetch.mjs 共享）；本文件只保留 linux.do 域逻辑——Discourse JSON 解析、分页遍历、snippet 直铸。
+// export CDP_DEFAULTS 移至 cdp-core.mjs（linuxdo.test/linuxdo-prefetch 的 import 同步改指 cdp-core）。
+//
+// build.mjs 只能把纯导出 inline 进产物（workflow realm 自包含）；CDP 层经 import 在 inline 后可用。
+// 本文件满足约束：无 fs/require/process；fetch/AbortSignal/setTimeout/WebSocket 引用环境全局。
+
 
 // 深抓单帖：GET https://linux.do/t/<id>.json 官方 JSON 接口（JSON 文档在 Chrome 内直接渲染为文本）。
 async function deepFetchTopic(host, id) {
@@ -1699,7 +1914,8 @@ for (const g of GROUPS_RAW) {
   if (feeds.length) HARVEST_GROUPS.push({ key: g.key, label: g.label, feeds })
 }
 // base prompt ctx：harvest/verify 仅需常量级字段，不依赖 digest（discover 才需）。
-const ctxBase = { WINDOW_LABEL, WFROM, WTO, DATE, GROK_DIR, feedMaxChars, VOTES_PER_CLAIM, REFUTATIONS_REQUIRED }
+// 9/13：webFetchViaCdp 门控 + cdp-fetch CLI 路径进 ctx（fetchPrompt 按门控切换抓取指令）。
+const ctxBase = { WINDOW_LABEL, WFROM, WTO, DATE, GROK_DIR, CDP_FETCH_CLI, webFetchViaCdp: WEB_FETCH_VIA_CDP, feedMaxChars, VOTES_PER_CLAIM, REFUTATIONS_REQUIRED }
 const harvestResults = []
 const HARVEST_BATCH = 3
 for (const batch of chunkArr(HARVEST_GROUPS, HARVEST_BATCH)) {
@@ -1953,6 +2169,30 @@ if (staticFallbackBoards.size) {
   log('STATIC-FALLBACK ' + [...staticFallbackBoards].join('+') + '：discover 全组 0 候选/通道坏 或 missing → 注入精选常驻一级/官方新闻页 URL，fetch 仍对抗式处理（degraded 保留如实上报）')
 }
 
+// ─── 9/13 跨天账本硬过滤（严格去重）：近 3 天已报道的 URL/同事件候选不进 fetch 配额 ───
+// 治理 P0 实证缺口：3 天窗口重叠 + 种子逐日重注入 → 同一事件连日重复（V4-Flash-Vision 连续 3 天等）。
+// 按 title/url 指纹比对（ledger.mjs filterReportedTargets，URL 归一命中或 token overlap≥0.8 且共享≥5）。
+// fail-open：REPORTED_LEDGER 缺失（首跑/编排器未注入）→ 全保留，degraded 旗标 ledger_unavailable 如实上报。
+let reportedDeduped = 0
+const reportedDroppedDetail = []
+if (REPORTED_LEDGER) {
+  for (const [b, urls] of boardURLMap) {
+    if (!urls.length) continue
+    const { keep, dropped } = filterReportedTargets(urls, REPORTED_LEDGER, { today: DATE })
+    if (dropped.length) {
+      reportedDeduped += dropped.length
+      for (const d of dropped) reportedDroppedDetail.push({ ...d, board: b })
+      boardURLMap.set(b, keep)
+    }
+  }
+  if (reportedDeduped) {
+    log('LEDGER-FILTER 近 ' + LEDGER_LOOKBACK_DAYS + ' 天已报道候选丢弃 ' + reportedDeduped + ' 条（硬去重，不进 fetch 配额）：' +
+      reportedDroppedDetail.slice(0, 6).map(d => '[' + (d.matchedDay || '?') + '] ' + String(d.url).slice(0, 64)).join(' ; '))
+  }
+} else {
+  log('LEDGER-SKIP 无 args.reportedLedger（首跑或编排器未注入账本）→ 本轮跨天去重关闭')
+}
+
 let { fetchTargets, dupes, budgetDropped } = allocateFetchBudget(boardURLMap, MAX_FETCH)
 // 8/27 prefer 通道：linuxdo-cdp 与 static-fallback 候选优先占位（预抓/兜底=已投入资源，真实进 Fetch），
 // 其余走轮询公平；MAX_FETCH 仍是硬上限（单板墙量配额经 preferCap=floor(MAX_FETCH×0.5) 封顶）。
@@ -2024,7 +2264,10 @@ for (const batch of fetchBatches) {
         if (!ext) return null
         src.sourceQuality = ext.sourceQuality
         src.publishDate = ext.publishDate
-        src.claims = (ext.claims || []).map(c => ({ ...c, sourceUrl: src.url, sourceTitle: src.title, sourceQuality: ext.sourceQuality, date: src.date, board: src.board }))
+        // 9/13 索引页治理：claim 自带合法 http(s) sourceUrl（从索引页选中的真实文章页）时优先——
+        // 引用/verify/角标链落到真实文章页；索引页 URL 仍兜底（src.url），不丢 found_via 溯源。
+        const _httpUrl = u => (typeof u === 'string' && /^https?:\/\//i.test(u)) ? u : null
+        src.claims = (ext.claims || []).map(c => ({ ...c, sourceUrl: _httpUrl(c.sourceUrl) || src.url, sourceTitle: src.title, sourceQuality: ext.sourceQuality, date: src.date, board: src.board }))
         return src
       }).catch(e => ({ ...src, sourceQuality: 'unreliable', claims: [] }))
   ))
@@ -2137,20 +2380,8 @@ for (const batch of chunkArr(rankedClaims, VERIFY_BATCH)) {
 }
 
 const confirmedVerify = voted.filter(c => c.survives && claimWindow(c) !== 'out')
-// ─── 8/23 第二十一项：双轨聚类主视图（verify→report 之间）───
-// clustered = clusterClaims(confirmedVerify)：只聚类、不放行。多条目簇经 mergeCluster 合并成单一
-// 编排同构主视图塞进 reportBody 的「已聚类」区（打标 [cluster 已合并 N 条]，精准供 report prompt 4.7 识别）；
-// 被合并项仍保留在 confirmed 原样（report 收到"主视图 + 多视角原样"，同一事件只写 ONE 条、不同口径并陈）。
-// 不传 clustered 给 ctxP——report prompt 输入契约（reportBody/refutedList/unverifiedList/missBlock/coverBlock）不变。
-const clustered = clusterClaims(confirmedVerify)
-const clusteredMerged = clustered.filter(cl => cl.items.length > 1).map(cl => mergeCluster(cl.items, DATE, null))
-const clusteredBlock = clusteredMerged.length
-  ? '## 已聚类（cluster 合并 ' + clusteredMerged.reduce((n, c) => n + c.mergedCount, 0) + ' 条→主视图）\n' + clusteredMerged.map((c, i) =>
-      '\n[已聚类·' + (i + 1) + '] [cluster 已合并 ' + c.mergedCount + ' 条] ' + c.claim.split('\n').join(' / ') + '\n' +
-      (c.summary ? '主视图摘要：' + c.summary + '\n' : '') +
-      (c.sources && c.sources.length ? '来源：' + c.sources.join('、') : '')
-    ).join('\n')
-  : ''
+// 9/13：聚类块移至 major-out 注入之后（clusterClaims(confirmed)）——旧版只聚 confirmedVerify，
+// 种子/超窗条目与窗口内同事件条目永不互聚，是「同事件双写」缺口的一半。
 const confirmed = [...confirmedVerify]  // copy：后续 major-out 注入不许污染 confirmedVerify 计数（reportPrompt 分开统计）
 const outOfWindow = voted.filter(c => c.survives && claimWindow(c) === 'out')
 const killed = voted.filter(c => c.isRefuted)
@@ -2162,13 +2393,40 @@ log('Verify done: ' + voted.length + ' → ' + confirmedVerify.length + ' verifi
 // mkMajor/majorKey/去重覆盖逻辑在 dedup.mjs（makeAddMajor + majorKey，测试固化三历史 bug）。
 const majorOutClaims = []
 const _addMajor = makeAddMajor(majorOutClaims)
-for (const d of discoverRows) for (const m of (d.majorOutOfWindow || [])) if (m && m.name) _addMajor(m, d.boards[0])
+// 9/13 MAJOR-DUP 指纹互斥：候选与既有正文条目（窗口内已核查 + 已注入 major-out）指纹命中 → 跳过注入。
+// 旧版只靠 majorKey 手写清单互斥（清单外实体落到「去括号拼接」兜底指纹，跨措辞几乎不命中）→
+// 同事件「已核查条目 + [窗口外·重大]」双写成稿。storyMatch（URL 归一 / token overlap≥0.8 且共享≥5）兜住。
+const _majorDupCheck = candidate => {
+  const like = { url: (candidate && candidate.url) || '', tokens: fingerprintTokens(((candidate && candidate.name) || '') + ' ' + ((candidate && candidate.note) || '')) }
+  for (const e of majorOutClaims) if (storyMatch(like, { url: e.sourceUrl, tokens: fingerprintTokens(e.claim) })) return 'major-out'
+  for (const e of confirmedVerify) if (storyMatch(like, { url: e.sourceUrl, tokens: fingerprintTokens(e.claim) })) return 'in-window'
+  return null
+}
+let majorDupSkipped = 0
+for (const d of discoverRows) for (const m of (d.majorOutOfWindow || [])) {
+  if (!(m && m.name)) continue
+  const dup = _majorDupCheck(m)
+  if (dup) { majorDupSkipped++; log('MAJOR-DUP 跳过 major-out 注入（' + dup + ' 已有同事件条目）：' + String(m.name).slice(0, 60)); continue }
+  _addMajor(m, d.boards[0])
+}
 // 种子 KNOWN_MAJOR_OUT 作为保底（未被发现代理上报的补上）
 const REPORT_DAY = normalizeDate(DATE)
 const MAX_SEED_AGE_DAYS = 21
 const _seedResult = filterSeedsByAge(KNOWN_MAJOR_OUT, REPORT_DAY, MAX_SEED_AGE_DAYS)
-const freshSeeds = _seedResult.kept
-for (const m of freshSeeds) _addMajor(m, 'labs')
+// 9/13 严格去重：已报道过的种子退役（splitSeeds 命中任何历史账本条目）→ 不再 21 天内逐日刷屏
+// （实证 V4-Flash-Vision-Exp 连续 3 天整条重复）。fail-open：无账本 → 全保留。
+const _seedLedgerSplit = REPORTED_LEDGER ? splitSeeds(_seedResult.kept, REPORTED_LEDGER) : { fresh: _seedResult.kept, reported: [] }
+const freshSeeds = _seedLedgerSplit.fresh
+if (_seedLedgerSplit.reported.length) {
+  log('SEED-LEDGER 已报道种子退役 ' + _seedLedgerSplit.reported.length + ' 条（报过一次即退役，不再逐日注入）：' +
+    _seedLedgerSplit.reported.map(s => s.name + '(报于 ' + (s.reportedDay || '?') + ')').join('; '))
+}
+let seedDupSkipped = 0
+for (const m of freshSeeds) {
+  const dup = _majorDupCheck(m)
+  if (dup) { seedDupSkipped++; log('MAJOR-DUP 跳过种子注入（' + dup + ' 已有同事件条目）：' + String(m.name).slice(0, 60)); continue }
+  _addMajor(m, 'labs')
+}
 if (REPORT_DAY == null) {
   log('SEED-AGE: 注入 ' + freshSeeds.length + ' / ' + KNOWN_MAJOR_OUT.length + ' 种子 · REPORT_DAY unknown → fail-open 全注入')
 } else {
@@ -2182,7 +2440,36 @@ if (REPORT_DAY == null) {
   log(msg)
 }
 confirmed.push(...majorOutClaims)
-log('majorOut: ' + majorOutClaims.length + ' industry milestones injected into confirmed')
+log('majorOut: ' + majorOutClaims.length + ' industry milestones injected into confirmed（MAJOR-DUP 跳过 ' + (majorDupSkipped + seedDupSkipped) + '）')
+
+// ─── 8/23 第二十一项：双轨聚类主视图（verify→report 之间；9/13 起范围 = confirmed 全体含 major-out）───
+// clustered = clusterClaims(confirmed)：只聚类、不放行。多条目簇经 mergeCluster 合并成单一
+// 编排同构主视图塞进 reportBody 的「已聚类」区（打标 [cluster 已合并 N 条]，精准供 report prompt 4.7 识别）；
+// 被合并项仍保留在 confirmed 原样（report 收到"主视图 + 多视角原样"，同一事件只写 ONE 条、不同口径并陈）。
+// 9/13 tokenizer 升级后纯中文 claim 也可聚（CJK bigram ≥3 共享成簇）；种子与窗口内同事件条目在此互聚兜底。
+// 不传 clustered 给 ctxP——report prompt 输入契约（reportBody/refutedList/unverifiedList/missBlock/coverBlock）不变。
+const clustered = clusterClaims(confirmed)
+const clusteredMerged = clustered.filter(cl => cl.items.length > 1).map(cl => mergeCluster(cl.items, DATE, null))
+const clusteredBlock = clusteredMerged.length
+  ? '## 已聚类（cluster 合并 ' + clusteredMerged.reduce((n, c) => n + c.mergedCount, 0) + ' 条→主视图）\n' + clusteredMerged.map((c, i) =>
+      '\n[已聚类·' + (i + 1) + '] [cluster 已合并 ' + c.mergedCount + ' 条] ' + c.claim.split('\n').join(' / ') + '\n' +
+      (c.summary ? '主视图摘要：' + c.summary + '\n' : '') +
+      (c.sources && c.sources.length ? '来源：' + c.sources.join('、') : '')
+    ).join('\n')
+  : ''
+// 9/13 已报道名单（软网）：近 3 天账本条目注入 report 输入，兜「同事件换 URL」的漏网——
+// 硬过滤只能拦 URL/指纹命中的候选，换 URL 的新报道由 report 代理按名单判断不重复成文。
+// 账本按时间序追加 → 近窗条目须按 day 过滤（不能 slice 头部——头部是最老条目）。
+const _recentLedger = REPORTED_LEDGER ? REPORTED_LEDGER.filter(e => {
+  const ed = normalizeDate(e && e.day), td = normalizeDate(DATE)
+  if (ed == null || td == null) return true
+  const age = daysBetween(ed, td)
+  return age >= 0 && age <= LEDGER_LOOKBACK_DAYS
+}) : []
+const reportedBlock = _recentLedger.length
+  ? '\n## 已报道（近 ' + LEDGER_LOOKBACK_DAYS + ' 天已出现在日报正文的条目，禁止重复成文）\n' +
+    _recentLedger.slice(-40).map(e => '- [' + (e.day || '?') + ']' + (e.major ? '[窗口外·重大]' : '') + ' ' + (e.title || e.url || '')).join('\n')
+  : ''
 
 // ─── Coverage self-check (deterministic) ───
 const boardClaimCount = new Map()
@@ -2276,7 +2563,7 @@ const reportTries = allClaims.length === 0 ? 1 : 2
 const reportLadder = reportTries === 1 ? [MODEL_LADDER[0]] : MODEL_LADDER
 const report = await safeAgentWithLadder(reportPrompt({
   ...ctxP, confirmedVerifyCount: confirmedVerify.length, majorOutCount: majorOutClaims.length,
-  reportBody: reportBodyWithCluster, killedCount: killed.length, refutedList, unverifiedCount: unverified.length, unverifiedList, missBlock, coverBlock,
+  reportBody: reportBodyWithCluster, killedCount: killed.length, refutedList, unverifiedCount: unverified.length, unverifiedList, missBlock, coverBlock, reportedBlock,
 }), { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: SYNTHESIS_LIMIT_MS }, reportLadder, LADDER_BUDGET_MS)
 if (report) {
   BREAKER.record(true, 'report')
@@ -2303,6 +2590,8 @@ const linuxdoFailedRows = discoverRows.filter(d => d.linuxdoFailed)
 if (linuxdoFailedRows.length) degradedFlags.push('linuxdo_degraded' + (linuxdoFailedRows.some(d => d.linuxdoReason) ? ':' + linuxdoFailedRows.map(d => d.linuxdoReason).join('+').slice(0, 80) : ''))
 if (ladderUsed.length > 0) degradedFlags.push('ladder_used:' + ladderUsed.join('+'))
 if (ladderExhaustedStages.size) degradedFlags.push('ladder_exhausted:' + [...ladderExhaustedStages].join('+'))
+// 9/13 跨天账本：无账本 → 跨天去重本轮关闭，如实上报（fail-open 不阻断成稿）。
+if (!REPORTED_LEDGER) degradedFlags.push('ledger_unavailable')
 // 9/01 方案 D：合成入口与总墙钟脱钩后，reportErr 只剩「代理真失败」一条路径
 // （墙钟跳过路径删除——进入 Synthesize 即尝试 report）。
 const reportErr = report ? null : 'report agent failed; reverting to raw archive'
@@ -2335,6 +2624,11 @@ const metaJson = JSON.stringify({
   claims_verified: voted.length, confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, unverified: unverified.length, out_of_window_confirmed: outOfWindow.length,
   window_misses: windowMisses,
   url_dupes: dupes.length, fetches_dropped: budgetDropped.length, verify_agent_errors: toolError,
+  // 9/13 跨天账本书账：reported_deduped = 硬过滤丢弃的已报道候选数；major_dup_skipped = MAJOR-DUP
+  // 跳过的 major-out/种子注入数；ledger_entries = 注入账本条目数（0 = 无账本，见 degraded.ledger_unavailable）。
+  reported_deduped: reportedDeduped,
+  major_dup_skipped: majorDupSkipped + seedDupSkipped,
+  ledger_entries: REPORTED_LEDGER ? REPORTED_LEDGER.length : 0,
   // 8/27 Task 2 (dropped 明细可审计)：fetch_budget_dropped 只给总数，不够归因。
   // dropped_detail 给出"丢的到底是谁"的逐类账：linuxdo_cdp（预抓的帖/URL 被预算丢）、
   // static_fallback（静态兜底被丢）、其它（普通 discover 候选被丢）。

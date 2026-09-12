@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { reportPrompt } from '../prompts.mjs'
+import { reportPrompt, fetchPrompt } from '../prompts.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PROMPTS = fs.readFileSync(path.join(HERE, '../prompts.mjs'), 'utf8')
@@ -71,7 +71,42 @@ test('fetchPrompt：禁止截图/图片输入（8/27 修复 linuxdo fetch 400）
   assert.match(PROMPTS, /禁止截图\/图片输入/, 'fetchPrompt 含禁止截图规则')
   assert.match(PROMPTS, /禁止使用 Playwright 截图/, '明确禁止 Playwright 截图')
   assert.match(PROMPTS, /Model only supports text input/, '引述模型限制（text-only）')
-  assert.match(PROMPTS, /WebFetch 文本抓取/, '唯一推荐方式为 WebFetch 文本抓取')
+  assert.match(PROMPTS, /WebFetch 文本抓取/, 'WebFetch 文本抓取作为兜底方式仍在场')
+})
+
+// ─── 9/13 重构：fetch 走 9222 门控 + 索引页治理 + 已报道去重 ───
+
+test('fetchPrompt：webFetchViaCdp=true → cdp-fetch 优先 + WebFetch 兜底；false → 纯 WebFetch（手动默认）', () => {
+  const src = { url: 'https://a.example/x', title: 'T', board: 'labs', found_via: 'discover' }
+  const on = fetchPrompt(src, { WINDOW_LABEL: 'W', webFetchViaCdp: true, CDP_FETCH_CLI: '/opt/cdp-fetch.mjs' })
+  assert.match(on, /node \/opt\/cdp-fetch\.mjs 'https:\/\/a\.example\/x'/, 'Step1 = 宿主 cdp-fetch CLI（URL 原样）')
+  assert.match(on, /ok:true.*不要[\s\S]*再 WebFetch/, 'ok:true 直接用 text，不再 WebFetch')
+  assert.match(on, /改用 WebFetch 文本抓取兜底/, '失败回落 WebFetch 兜底')
+  assert.ok(!/索引页纪律/.test(on), '非 static-fallback 来源不注入索引页指令')
+  const off = fetchPrompt(src, { WINDOW_LABEL: 'W', webFetchViaCdp: false })
+  assert.match(off, /1\. 用 WebFetch 抓取页面/, '门控关 = 既有行为（纯 WebFetch）')
+  assert.ok(!/cdp-fetch/.test(off), '门控关时 prompt 不出现 cdp-fetch')
+})
+
+test('fetchPrompt：static-fallback 索引页 → 只做发现入口，claim.sourceUrl 必填真实文章 URL', () => {
+  const src = { url: 'https://techcrunch.com/category/artificial-intelligence/', title: 'TechCrunch AI', board: 'strategy', found_via: 'static-fallback' }
+  const p = fetchPrompt(src, { WINDOW_LABEL: 'W', webFetchViaCdp: true, CDP_FETCH_CLI: '/opt/cdp-fetch.mjs' })
+  assert.match(p, /索引页纪律/, '索引页专用指令在场')
+  assert.match(p, /真实文章链接/, '要求选中真实文章')
+  assert.match(p, /sourceUrl.*必填/, 'claim.sourceUrl 必填真实文章 URL')
+  assert.match(p, /不得拿索引页目录条目本身当 claim/, '禁止拿目录条目当 claim')
+})
+
+test('reportPrompt：已报道名单块 + 4.8 去重纪律（严格策略软网）', () => {
+  const ctx = { ...reportCtx, reportedBlock: '\n## 已报道（近 3 天已出现在日报正文的条目，禁止重复成文）\n- [2026-09-05] 某事件' }
+  const p = reportPrompt(ctx)
+  assert.match(p, /## 已报道（近 3 天已出现在日报正文的条目，禁止重复成文）\n- \[2026-09-05\] 某事件/, '名单块原样注入')
+  assert.match(p, /4\.8\.【已报道去重/, '4.8 纪律段落在场')
+  assert.match(p, /一律不写正文条目/, '同事件换 URL 也不写正文')
+  assert.match(p, /前情提要：/, '实质新增进展只写增量并标注前情提要')
+  // 无名单（首跑/无账本）→ prompt 不含已报道名单块头（4.8 纪律文本提及「## 已报道」不算注入）
+  const p2 = reportPrompt(reportCtx)
+  assert.ok(!/## 已报道（近 3 天已出现在日报正文的条目，禁止重复成文）/.test(p2), '无 reportedBlock 时不注入名单块')
 })
 
 const reportCtx = {

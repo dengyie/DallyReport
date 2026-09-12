@@ -40,8 +40,13 @@ test('模板：linuxdo_degraded 独立降级旗标 + meta 补 linuxdo_posts/linu
   assert.ok(TPL.includes('linuxdo_open_posts: discoverRows.filter'), 'meta 补 linuxdo_open_posts 统计')
 })
 
-test('模板：cluster 双轨——confirmedVerify 后 clusterClaims，报告体注入「已聚类」块且不改 ctxP 契约', () => {
-  assert.ok(TPL.includes('const clustered = clusterClaims(confirmedVerify)'), 'confirmedVerify 后立即聚类')
+test('模板：cluster 双轨——major-out 注入后 clusterClaims(confirmed)，报告体注入「已聚类」块且不改 ctxP 契约', () => {
+  // 9/13 重构：聚类范围从 confirmedVerify 扩到 confirmed（含 major-out）——种子与窗口内同事件条目互聚，
+  // 治理「同事件双写」。聚类块必须位于 confirmed.push(...majorOutClaims) 之后。
+  assert.ok(TPL.includes('const clustered = clusterClaims(confirmed)'), 'confirmed 全体（含 major-out）聚类')
+  const pushIdx = TPL.indexOf('confirmed.push(...majorOutClaims)')
+  const clusterIdx = TPL.indexOf('const clustered = clusterClaims(confirmed)')
+  assert.ok(pushIdx >= 0 && clusterIdx > pushIdx, '聚类在 major-out 注入之后（顺序锁死）')
   assert.ok(TPL.includes('cluster 合并 '), '聚类块标注合并条数')
   assert.ok(TPL.includes('[cluster 已合并 '), '每条主视图打 cluster 标（prompt 4.7 识别）')
   assert.ok(TPL.includes('reportBody: reportBodyWithCluster'), 'reportBody 使用已聚类版本')
@@ -49,8 +54,10 @@ test('模板：cluster 双轨——confirmedVerify 后 clusterClaims，报告体
   assert.ok(!TPL.match(/clustered:/), 'reportPrompt 输入无 clustered 新字段')
 })
 
-test('模板：linuxdo/cluster 已在 build MODULES 且占位符在场（成品自包含）', () => {
+test('模板：linuxdo/cluster/ledger/cdp-core 已在 build MODULES 且占位符在场（成品自包含）', () => {
   assert.ok(TPL.includes('/* @inline: cluster */'), 'cluster 占位符在场')
+  assert.ok(TPL.includes('/* @inline: ledger */'), 'ledger 占位符在场（9/13 跨天账本）')
+  assert.ok(TPL.includes('/* @inline: cdp-core */'), 'cdp-core 占位符在场（9/13 CDP 协议层）')
   assert.ok(TPL.includes('/* @inline: linuxdo */'), 'linuxdo 占位符在场')
 })
 
@@ -355,4 +362,40 @@ test('模板：超时日志不再写 report 有内容至多 2 试', () => {
   assert.doesNotMatch(TPL, /report 有内容至多 2 试/, '超时日志不得再把阶梯说成 2 试')
   assert.match(TPL, /零素材 1 级/, '超时日志须写零素材 1 级')
   assert.match(TPL, /有素材走 MODEL_LADDER/, '超时日志须写有素材走 MODEL_LADDER')
+})
+
+// ─── 9/13 重构：跨天账本 + fetch 9222 门控接线契约 ───
+
+test('模板：账本硬过滤在 allocateFetchBudget 之前，fail-open 旗标与 meta 计数接线', () => {
+  assert.match(TPL, /const REPORTED_LEDGER = \(\(\) => \{/, 'args.reportedLedger 严格校验 IIFE 在场')
+  assert.match(TPL, /filterReportedTargets\(urls, REPORTED_LEDGER, \{ today: DATE \}\)/, 'boardURLMap 逐板过滤')
+  const filterIdx = TPL.indexOf('LEDGER-FILTER')
+  const allocIdx = TPL.indexOf('allocateFetchBudget(boardURLMap, MAX_FETCH)')
+  assert.ok(filterIdx > 0 && allocIdx > filterIdx, '硬过滤必须先于 fetch 配额分配（丢弃候选不占 MAX_FETCH）')
+  assert.match(TPL, /LEDGER-SKIP 无 args\.reportedLedger/, '无账本 fail-open 分支在场')
+  assert.match(TPL, /ledger_unavailable/, '无账本 → degraded 旗标如实上报')
+  assert.match(TPL, /reported_deduped: reportedDeduped/, 'meta 记账 reported_deduped')
+  assert.match(TPL, /ledger_entries: REPORTED_LEDGER \? REPORTED_LEDGER\.length : 0/, 'meta 记账 ledger_entries')
+})
+
+test('模板：major-out 注入带 MAJOR-DUP 指纹互斥 + 已报道种子退役', () => {
+  assert.match(TPL, /const _majorDupCheck = candidate => \{/, 'MAJOR-DUP 检查函数在场')
+  assert.match(TPL, /MAJOR-DUP 跳过 major-out 注入/, 'discover 超窗项互斥')
+  assert.match(TPL, /splitSeeds\(_seedResult\.kept, REPORTED_LEDGER\)/, '种子过账本退役')
+  assert.match(TPL, /SEED-LEDGER 已报道种子退役/, '退役日志在场')
+  const dupIdx = TPL.indexOf('_majorDupCheck(m)')
+  const addMajorIdx = TPL.indexOf('for (const m of freshSeeds) {')
+  assert.ok(dupIdx > 0 && addMajorIdx > 0, '种子注入循环用 _majorDupCheck 守卫')
+})
+
+test('模板：已报道名单进 report ctx（软网），近窗过滤按 day', () => {
+  assert.match(TPL, /const reportedBlock = _recentLedger\.length/, 'reportedBlock 条件构造')
+  assert.match(TPL, /age >= 0 && age <= LEDGER_LOOKBACK_DAYS/, '近 3 天过滤（不 slice 头部——账本按时间序追加）')
+  assert.match(TPL, /coverBlock, reportedBlock,/, 'reportedBlock 进 reportPrompt ctx')
+})
+
+test('模板：fetch claim sourceUrl 优先取合法 http(s) 文章页（索引页治理）', () => {
+  assert.match(TPL, /sourceUrl: _httpUrl\(c\.sourceUrl\) \|\| src\.url/, 'claim 自带合法 sourceUrl 优先，src.url 兜底')
+  assert.match(TPL, /const CDP_FETCH_CLI = '\/Users\/mango\/project\/claude-project\/obsidian\/scripts\/ai-daily\/cdp-fetch\.mjs'/, 'cdp-fetch CLI 绝对路径常量在场')
+  assert.match(TPL, /webFetchViaCdp: WEB_FETCH_VIA_CDP/, 'ctx 携带门控标志')
 })

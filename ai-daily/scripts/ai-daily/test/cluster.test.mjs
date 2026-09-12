@@ -46,11 +46,16 @@ test('clusterClaims：共享任一 token 即成对（半共享合并，传递闭
   assert.equal(clusters[0].items.length, 3)
 })
 
-test('tokenize：与 render-md 同款正则（长度≥4、STOP_TOKENS 过滤、中文不进 token）', () => {
-  assert.deepEqual(clusterTokenize('NVIDIA 与 OpenAI'), ['nvidia', 'openai'], '长度≥4 拉丁/数字 token')
+test('tokenize：ASCII ≥4/停用词过滤（既有契约）+ CJK bigram（9/13 中文聚类升级）', () => {
+  assert.deepEqual(clusterTokenize('NVIDIA 与 OpenAI'), ['nvidia', 'openai'], '长度≥4 拉丁/数字 token（「与」单字不成 bigram）')
   assert.deepEqual(clusterTokenize('AI news update official'), [], 'STOP_TOKENS（ai/news/update/official）全过滤')
-  assert.deepEqual(clusterTokenize('4.25GW 工厂'), ['4.25gw'], '数字+单位合一 token；中文不进')
+  assert.deepEqual(clusterTokenize('4.25GW 工厂'), ['4.25gw', '工厂'], '数字+单位合一 token；中文进 bigram（9/13 起）')
   assert.deepEqual(clusterTokenize(''), [], '空串 → []')
+  // CJK bigram 停用：虚字单字（的/了/在…）与新闻套话（发布/推出/消息…）不进 token
+  assert.deepEqual(clusterTokenize('的了吗'), [], '纯虚字串全停用')
+  assert.deepEqual(clusterTokenize('发布新的消息'), ['布新'], '套话/虚字 bigram 停用，仅残余真实搭配')
+  // 同一实体中文串产出稳定 bigram（按相邻对插入序，确定性）
+  assert.deepEqual(clusterTokenize('星尘智能'), ['星尘', '尘智', '智能'], '两字名拆相邻对（插入序）')
 })
 
 test('mergeCluster：sources 去重、mergedCount 记数、claim 为合并 key、title/summary 保首条', () => {

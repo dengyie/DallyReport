@@ -77,6 +77,8 @@ const WTO = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.to)) ? 
 const OUT = typeof args.outDir === 'string' && args.outDir ? args.outDir : null
 const BOARDS_SELECTED = Array.isArray(args.boards) ? new Set(args.boards) : null
 const GROK_DIR = '/Users/mango/.claude/skills/grok-search'
+// 9/13 fetch 走 9222：宿主 CDP 抓取 CLI（fetch 子代理经 Bash 调用；realm 本身不碰 CDP，护栏不变）。
+const CDP_FETCH_CLI = '/Users/mango/project/claude-project/obsidian/scripts/ai-daily/cdp-fetch.mjs'
 // 8/23 第二十一项：linuxdo 接入（登录态 CDP 独立发现组）。linuxdoCdpHost 默认 null → 组保留在
 // DISCOVER_GROUPS（板不崩）但 LINUXDO-SKIP no_cdp_host → urls:[] 不降级（命令行/手动补跑默认不启用）；
 // linuxdoMaxSources 配额默认 24（帖子轮换进组返回行）。
@@ -94,6 +96,19 @@ const LINUXDO_PREFETCHED = (() => {
   if (!posts.length) return null
   return { ok: true, host: raw.host || '', topics: Number(raw.topics) || posts.length, posts }
 })()
+// 9/13 跨天账本（严格去重）：args.reportedLedger = 编排器 Read ~/.ai-daily/published-ledger.json 注入的
+// 条目数组（{day,url,tokens,title,major}，记录端 finalize.mjs）。严格校验形态，坏形态视同无账本
+// （fail-open + degraded 旗标 ledger_unavailable，不因账本问题阻断成稿）。
+const REPORTED_LEDGER = (() => {
+  const raw = args.reportedLedger
+  if (!Array.isArray(raw) || !raw.length) return null
+  const ok = raw.filter(e => e && typeof e === 'object' && typeof e.day === 'string' && Array.isArray(e.tokens))
+  return ok.length ? ok : null
+})()
+// 9/13 fetch 通道门控：headless 显式传 webFetchViaCdp:true → fetch 代理先走 9222 CDP（宿主 cdp-fetch.mjs，
+// 复用登录态/临时标签），失败回落 WebFetch。手动 /ai-daily 默认 false 维持纯 WebFetch（既有纪律：
+// 离开 9222 环境不裸抓；realm 本身仍不碰 CDP——抓取发生在 fetch 子代理的 Bash 里）。
+const WEB_FETCH_VIA_CDP = args.webFetchViaCdp === true
 
 if (!DATE || !OUT) {
   return { error: 'Args must include date (YYYY-MM-DD) and outDir (absolute path). window optional. got: ' + JSON.stringify(args) }
@@ -125,6 +140,8 @@ const WEB_BUDGET_PER = 2
 /* @inline: prompts */
 /* @inline: render-md */
 /* @inline: cluster */
+/* @inline: ledger */
+/* @inline: cdp-core */
 /* @inline: linuxdo */
 
 // boards 由 BOARDS 花名册按选区派生（BOARDS 已 inline 就绪，此时访问无 TDZ）。
@@ -303,7 +320,8 @@ for (const g of GROUPS_RAW) {
   if (feeds.length) HARVEST_GROUPS.push({ key: g.key, label: g.label, feeds })
 }
 // base prompt ctx：harvest/verify 仅需常量级字段，不依赖 digest（discover 才需）。
-const ctxBase = { WINDOW_LABEL, WFROM, WTO, DATE, GROK_DIR, feedMaxChars, VOTES_PER_CLAIM, REFUTATIONS_REQUIRED }
+// 9/13：webFetchViaCdp 门控 + cdp-fetch CLI 路径进 ctx（fetchPrompt 按门控切换抓取指令）。
+const ctxBase = { WINDOW_LABEL, WFROM, WTO, DATE, GROK_DIR, CDP_FETCH_CLI, webFetchViaCdp: WEB_FETCH_VIA_CDP, feedMaxChars, VOTES_PER_CLAIM, REFUTATIONS_REQUIRED }
 const harvestResults = []
 const HARVEST_BATCH = 3
 for (const batch of chunkArr(HARVEST_GROUPS, HARVEST_BATCH)) {
@@ -557,6 +575,30 @@ if (staticFallbackBoards.size) {
   log('STATIC-FALLBACK ' + [...staticFallbackBoards].join('+') + '：discover 全组 0 候选/通道坏 或 missing → 注入精选常驻一级/官方新闻页 URL，fetch 仍对抗式处理（degraded 保留如实上报）')
 }
 
+// ─── 9/13 跨天账本硬过滤（严格去重）：近 3 天已报道的 URL/同事件候选不进 fetch 配额 ───
+// 治理 P0 实证缺口：3 天窗口重叠 + 种子逐日重注入 → 同一事件连日重复（V4-Flash-Vision 连续 3 天等）。
+// 按 title/url 指纹比对（ledger.mjs filterReportedTargets，URL 归一命中或 token overlap≥0.8 且共享≥5）。
+// fail-open：REPORTED_LEDGER 缺失（首跑/编排器未注入）→ 全保留，degraded 旗标 ledger_unavailable 如实上报。
+let reportedDeduped = 0
+const reportedDroppedDetail = []
+if (REPORTED_LEDGER) {
+  for (const [b, urls] of boardURLMap) {
+    if (!urls.length) continue
+    const { keep, dropped } = filterReportedTargets(urls, REPORTED_LEDGER, { today: DATE })
+    if (dropped.length) {
+      reportedDeduped += dropped.length
+      for (const d of dropped) reportedDroppedDetail.push({ ...d, board: b })
+      boardURLMap.set(b, keep)
+    }
+  }
+  if (reportedDeduped) {
+    log('LEDGER-FILTER 近 ' + LEDGER_LOOKBACK_DAYS + ' 天已报道候选丢弃 ' + reportedDeduped + ' 条（硬去重，不进 fetch 配额）：' +
+      reportedDroppedDetail.slice(0, 6).map(d => '[' + (d.matchedDay || '?') + '] ' + String(d.url).slice(0, 64)).join(' ; '))
+  }
+} else {
+  log('LEDGER-SKIP 无 args.reportedLedger（首跑或编排器未注入账本）→ 本轮跨天去重关闭')
+}
+
 let { fetchTargets, dupes, budgetDropped } = allocateFetchBudget(boardURLMap, MAX_FETCH)
 // 8/27 prefer 通道：linuxdo-cdp 与 static-fallback 候选优先占位（预抓/兜底=已投入资源，真实进 Fetch），
 // 其余走轮询公平；MAX_FETCH 仍是硬上限（单板墙量配额经 preferCap=floor(MAX_FETCH×0.5) 封顶）。
@@ -628,7 +670,10 @@ for (const batch of fetchBatches) {
         if (!ext) return null
         src.sourceQuality = ext.sourceQuality
         src.publishDate = ext.publishDate
-        src.claims = (ext.claims || []).map(c => ({ ...c, sourceUrl: src.url, sourceTitle: src.title, sourceQuality: ext.sourceQuality, date: src.date, board: src.board }))
+        // 9/13 索引页治理：claim 自带合法 http(s) sourceUrl（从索引页选中的真实文章页）时优先——
+        // 引用/verify/角标链落到真实文章页；索引页 URL 仍兜底（src.url），不丢 found_via 溯源。
+        const _httpUrl = u => (typeof u === 'string' && /^https?:\/\//i.test(u)) ? u : null
+        src.claims = (ext.claims || []).map(c => ({ ...c, sourceUrl: _httpUrl(c.sourceUrl) || src.url, sourceTitle: src.title, sourceQuality: ext.sourceQuality, date: src.date, board: src.board }))
         return src
       }).catch(e => ({ ...src, sourceQuality: 'unreliable', claims: [] }))
   ))
@@ -741,20 +786,8 @@ for (const batch of chunkArr(rankedClaims, VERIFY_BATCH)) {
 }
 
 const confirmedVerify = voted.filter(c => c.survives && claimWindow(c) !== 'out')
-// ─── 8/23 第二十一项：双轨聚类主视图（verify→report 之间）───
-// clustered = clusterClaims(confirmedVerify)：只聚类、不放行。多条目簇经 mergeCluster 合并成单一
-// 编排同构主视图塞进 reportBody 的「已聚类」区（打标 [cluster 已合并 N 条]，精准供 report prompt 4.7 识别）；
-// 被合并项仍保留在 confirmed 原样（report 收到"主视图 + 多视角原样"，同一事件只写 ONE 条、不同口径并陈）。
-// 不传 clustered 给 ctxP——report prompt 输入契约（reportBody/refutedList/unverifiedList/missBlock/coverBlock）不变。
-const clustered = clusterClaims(confirmedVerify)
-const clusteredMerged = clustered.filter(cl => cl.items.length > 1).map(cl => mergeCluster(cl.items, DATE, null))
-const clusteredBlock = clusteredMerged.length
-  ? '## 已聚类（cluster 合并 ' + clusteredMerged.reduce((n, c) => n + c.mergedCount, 0) + ' 条→主视图）\n' + clusteredMerged.map((c, i) =>
-      '\n[已聚类·' + (i + 1) + '] [cluster 已合并 ' + c.mergedCount + ' 条] ' + c.claim.split('\n').join(' / ') + '\n' +
-      (c.summary ? '主视图摘要：' + c.summary + '\n' : '') +
-      (c.sources && c.sources.length ? '来源：' + c.sources.join('、') : '')
-    ).join('\n')
-  : ''
+// 9/13：聚类块移至 major-out 注入之后（clusterClaims(confirmed)）——旧版只聚 confirmedVerify，
+// 种子/超窗条目与窗口内同事件条目永不互聚，是「同事件双写」缺口的一半。
 const confirmed = [...confirmedVerify]  // copy：后续 major-out 注入不许污染 confirmedVerify 计数（reportPrompt 分开统计）
 const outOfWindow = voted.filter(c => c.survives && claimWindow(c) === 'out')
 const killed = voted.filter(c => c.isRefuted)
@@ -766,13 +799,40 @@ log('Verify done: ' + voted.length + ' → ' + confirmedVerify.length + ' verifi
 // mkMajor/majorKey/去重覆盖逻辑在 dedup.mjs（makeAddMajor + majorKey，测试固化三历史 bug）。
 const majorOutClaims = []
 const _addMajor = makeAddMajor(majorOutClaims)
-for (const d of discoverRows) for (const m of (d.majorOutOfWindow || [])) if (m && m.name) _addMajor(m, d.boards[0])
+// 9/13 MAJOR-DUP 指纹互斥：候选与既有正文条目（窗口内已核查 + 已注入 major-out）指纹命中 → 跳过注入。
+// 旧版只靠 majorKey 手写清单互斥（清单外实体落到「去括号拼接」兜底指纹，跨措辞几乎不命中）→
+// 同事件「已核查条目 + [窗口外·重大]」双写成稿。storyMatch（URL 归一 / token overlap≥0.8 且共享≥5）兜住。
+const _majorDupCheck = candidate => {
+  const like = { url: (candidate && candidate.url) || '', tokens: fingerprintTokens(((candidate && candidate.name) || '') + ' ' + ((candidate && candidate.note) || '')) }
+  for (const e of majorOutClaims) if (storyMatch(like, { url: e.sourceUrl, tokens: fingerprintTokens(e.claim) })) return 'major-out'
+  for (const e of confirmedVerify) if (storyMatch(like, { url: e.sourceUrl, tokens: fingerprintTokens(e.claim) })) return 'in-window'
+  return null
+}
+let majorDupSkipped = 0
+for (const d of discoverRows) for (const m of (d.majorOutOfWindow || [])) {
+  if (!(m && m.name)) continue
+  const dup = _majorDupCheck(m)
+  if (dup) { majorDupSkipped++; log('MAJOR-DUP 跳过 major-out 注入（' + dup + ' 已有同事件条目）：' + String(m.name).slice(0, 60)); continue }
+  _addMajor(m, d.boards[0])
+}
 // 种子 KNOWN_MAJOR_OUT 作为保底（未被发现代理上报的补上）
 const REPORT_DAY = normalizeDate(DATE)
 const MAX_SEED_AGE_DAYS = 21
 const _seedResult = filterSeedsByAge(KNOWN_MAJOR_OUT, REPORT_DAY, MAX_SEED_AGE_DAYS)
-const freshSeeds = _seedResult.kept
-for (const m of freshSeeds) _addMajor(m, 'labs')
+// 9/13 严格去重：已报道过的种子退役（splitSeeds 命中任何历史账本条目）→ 不再 21 天内逐日刷屏
+// （实证 V4-Flash-Vision-Exp 连续 3 天整条重复）。fail-open：无账本 → 全保留。
+const _seedLedgerSplit = REPORTED_LEDGER ? splitSeeds(_seedResult.kept, REPORTED_LEDGER) : { fresh: _seedResult.kept, reported: [] }
+const freshSeeds = _seedLedgerSplit.fresh
+if (_seedLedgerSplit.reported.length) {
+  log('SEED-LEDGER 已报道种子退役 ' + _seedLedgerSplit.reported.length + ' 条（报过一次即退役，不再逐日注入）：' +
+    _seedLedgerSplit.reported.map(s => s.name + '(报于 ' + (s.reportedDay || '?') + ')').join('; '))
+}
+let seedDupSkipped = 0
+for (const m of freshSeeds) {
+  const dup = _majorDupCheck(m)
+  if (dup) { seedDupSkipped++; log('MAJOR-DUP 跳过种子注入（' + dup + ' 已有同事件条目）：' + String(m.name).slice(0, 60)); continue }
+  _addMajor(m, 'labs')
+}
 if (REPORT_DAY == null) {
   log('SEED-AGE: 注入 ' + freshSeeds.length + ' / ' + KNOWN_MAJOR_OUT.length + ' 种子 · REPORT_DAY unknown → fail-open 全注入')
 } else {
@@ -786,7 +846,36 @@ if (REPORT_DAY == null) {
   log(msg)
 }
 confirmed.push(...majorOutClaims)
-log('majorOut: ' + majorOutClaims.length + ' industry milestones injected into confirmed')
+log('majorOut: ' + majorOutClaims.length + ' industry milestones injected into confirmed（MAJOR-DUP 跳过 ' + (majorDupSkipped + seedDupSkipped) + '）')
+
+// ─── 8/23 第二十一项：双轨聚类主视图（verify→report 之间；9/13 起范围 = confirmed 全体含 major-out）───
+// clustered = clusterClaims(confirmed)：只聚类、不放行。多条目簇经 mergeCluster 合并成单一
+// 编排同构主视图塞进 reportBody 的「已聚类」区（打标 [cluster 已合并 N 条]，精准供 report prompt 4.7 识别）；
+// 被合并项仍保留在 confirmed 原样（report 收到"主视图 + 多视角原样"，同一事件只写 ONE 条、不同口径并陈）。
+// 9/13 tokenizer 升级后纯中文 claim 也可聚（CJK bigram ≥3 共享成簇）；种子与窗口内同事件条目在此互聚兜底。
+// 不传 clustered 给 ctxP——report prompt 输入契约（reportBody/refutedList/unverifiedList/missBlock/coverBlock）不变。
+const clustered = clusterClaims(confirmed)
+const clusteredMerged = clustered.filter(cl => cl.items.length > 1).map(cl => mergeCluster(cl.items, DATE, null))
+const clusteredBlock = clusteredMerged.length
+  ? '## 已聚类（cluster 合并 ' + clusteredMerged.reduce((n, c) => n + c.mergedCount, 0) + ' 条→主视图）\n' + clusteredMerged.map((c, i) =>
+      '\n[已聚类·' + (i + 1) + '] [cluster 已合并 ' + c.mergedCount + ' 条] ' + c.claim.split('\n').join(' / ') + '\n' +
+      (c.summary ? '主视图摘要：' + c.summary + '\n' : '') +
+      (c.sources && c.sources.length ? '来源：' + c.sources.join('、') : '')
+    ).join('\n')
+  : ''
+// 9/13 已报道名单（软网）：近 3 天账本条目注入 report 输入，兜「同事件换 URL」的漏网——
+// 硬过滤只能拦 URL/指纹命中的候选，换 URL 的新报道由 report 代理按名单判断不重复成文。
+// 账本按时间序追加 → 近窗条目须按 day 过滤（不能 slice 头部——头部是最老条目）。
+const _recentLedger = REPORTED_LEDGER ? REPORTED_LEDGER.filter(e => {
+  const ed = normalizeDate(e && e.day), td = normalizeDate(DATE)
+  if (ed == null || td == null) return true
+  const age = daysBetween(ed, td)
+  return age >= 0 && age <= LEDGER_LOOKBACK_DAYS
+}) : []
+const reportedBlock = _recentLedger.length
+  ? '\n## 已报道（近 ' + LEDGER_LOOKBACK_DAYS + ' 天已出现在日报正文的条目，禁止重复成文）\n' +
+    _recentLedger.slice(-40).map(e => '- [' + (e.day || '?') + ']' + (e.major ? '[窗口外·重大]' : '') + ' ' + (e.title || e.url || '')).join('\n')
+  : ''
 
 // ─── Coverage self-check (deterministic) ───
 const boardClaimCount = new Map()
@@ -880,7 +969,7 @@ const reportTries = allClaims.length === 0 ? 1 : 2
 const reportLadder = reportTries === 1 ? [MODEL_LADDER[0]] : MODEL_LADDER
 const report = await safeAgentWithLadder(reportPrompt({
   ...ctxP, confirmedVerifyCount: confirmedVerify.length, majorOutCount: majorOutClaims.length,
-  reportBody: reportBodyWithCluster, killedCount: killed.length, refutedList, unverifiedCount: unverified.length, unverifiedList, missBlock, coverBlock,
+  reportBody: reportBodyWithCluster, killedCount: killed.length, refutedList, unverifiedCount: unverified.length, unverifiedList, missBlock, coverBlock, reportedBlock,
 }), { label: 'report', phase: 'Synthesize', schema: REPORT_SCHEMA, timeoutMs: SYNTHESIS_LIMIT_MS }, reportLadder, LADDER_BUDGET_MS)
 if (report) {
   BREAKER.record(true, 'report')
@@ -907,6 +996,8 @@ const linuxdoFailedRows = discoverRows.filter(d => d.linuxdoFailed)
 if (linuxdoFailedRows.length) degradedFlags.push('linuxdo_degraded' + (linuxdoFailedRows.some(d => d.linuxdoReason) ? ':' + linuxdoFailedRows.map(d => d.linuxdoReason).join('+').slice(0, 80) : ''))
 if (ladderUsed.length > 0) degradedFlags.push('ladder_used:' + ladderUsed.join('+'))
 if (ladderExhaustedStages.size) degradedFlags.push('ladder_exhausted:' + [...ladderExhaustedStages].join('+'))
+// 9/13 跨天账本：无账本 → 跨天去重本轮关闭，如实上报（fail-open 不阻断成稿）。
+if (!REPORTED_LEDGER) degradedFlags.push('ledger_unavailable')
 // 9/01 方案 D：合成入口与总墙钟脱钩后，reportErr 只剩「代理真失败」一条路径
 // （墙钟跳过路径删除——进入 Synthesize 即尝试 report）。
 const reportErr = report ? null : 'report agent failed; reverting to raw archive'
@@ -939,6 +1030,11 @@ const metaJson = JSON.stringify({
   claims_verified: voted.length, confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, unverified: unverified.length, out_of_window_confirmed: outOfWindow.length,
   window_misses: windowMisses,
   url_dupes: dupes.length, fetches_dropped: budgetDropped.length, verify_agent_errors: toolError,
+  // 9/13 跨天账本书账：reported_deduped = 硬过滤丢弃的已报道候选数；major_dup_skipped = MAJOR-DUP
+  // 跳过的 major-out/种子注入数；ledger_entries = 注入账本条目数（0 = 无账本，见 degraded.ledger_unavailable）。
+  reported_deduped: reportedDeduped,
+  major_dup_skipped: majorDupSkipped + seedDupSkipped,
+  ledger_entries: REPORTED_LEDGER ? REPORTED_LEDGER.length : 0,
   // 8/27 Task 2 (dropped 明细可审计)：fetch_budget_dropped 只给总数，不够归因。
   // dropped_detail 给出"丢的到底是谁"的逐类账：linuxdo_cdp（预抓的帖/URL 被预算丢）、
   // static_fallback（静态兜底被丢）、其它（普通 discover 候选被丢）。

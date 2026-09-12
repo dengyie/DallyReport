@@ -50,16 +50,37 @@ export const discoverPrompt = (g, ctx) => {
     '\n\n⚠️ 最终收口（呼应开头条目）：执行完上述步骤后，立即调用 StructuredOutput 工具返回结构化对象。**严禁 end_turn 返回纯文本**——这是最常见的失败模式（思考里说"我来调用 StructuredOutput"却以文字结束）。调工具即结束，勿在工具调用前/后铺垫文字。Structured output only.'
 }
 
-export const fetchPrompt = (src, ctx) =>
-  '## Source Extractor\n\n窗口：' + ctx.WINDOW_LABEL + '。抓取并提取该来源的可证伪声明：\n' +
+// fetchPrompt（9/13 重构）：
+//   - ctx.webFetchViaCdp=true（headless）→ Step1 优先宿主 9222 CDP（cdp-fetch.mjs，复用登录态/临时标签），
+//     失败回落 WebFetch 文本抓取兜底；false（手动默认）→ 维持纯 WebFetch（既有纪律：离开 9222 环境不裸抓）。
+//   - 索引页治理：found_via=static-fallback 的来源是栏目/索引页——只做发现入口；从索引页选真实文章 URL
+//     逐条抓正文，claim.sourceUrl 必填真实文章页（引用/verify/角标落到文章页，不再拿分类页当引用源）。
+export const fetchPrompt = (src, ctx) => {
+  const isIndex = src && src.found_via === 'static-fallback'
+  const step1 = (ctx && ctx.webFetchViaCdp)
+    ? '1. 优先用 9222 登录态 Chrome 抓正文（用 Bash 运行，命令与 URL 原样照抄）：\n' +
+      '   node ' + (ctx.CDP_FETCH_CLI || 'cdp-fetch.mjs') + " '" + src.url + "'\n" +
+      '   - 返回 ok:true → 直接以 JSON 的 text 字段作为页面正文进入第 3 步，**不要**再 WebFetch；\n' +
+      '   - 失败（ok:false / 非零退出 / 命令不可用，如 9222 未开）→ 改用 WebFetch 文本抓取兜底同一 URL；两者都失败 → claims:[] 且 sourceQuality:"unreliable"。\n'
+    : '1. 用 WebFetch 抓取页面。\n'
+  const indexNote = isIndex
+    ? '\n⚠️ **索引页纪律**：本 URL 是栏目/索引页（found_via=static-fallback）——它只是发现入口，不是新闻本体：\n' +
+      '- 从索引页内容里选出窗口内最相关的 1-3 条**真实文章链接**（完整 http(s) URL）；\n' +
+      '- 逐条抓取**文章正文**（' + ((ctx && ctx.webFetchViaCdp) ? 'cdp-fetch.mjs 同上用法' : 'WebFetch') + '），只基于文章正文提取 claim；\n' +
+      '- 每条 claim 的 `sourceUrl` 字段**必填**为该文章的真实 URL（不是本索引页）——引用与核查都落在文章页；\n' +
+      '- 索引页里没有窗口内文章链接 → claims:[] 且 sourceQuality:"unreliable"（不得拿索引页目录条目本身当 claim）。\n'
+    : ''
+  return '## Source Extractor\n\n窗口：' + ctx.WINDOW_LABEL + '。抓取并提取该来源的可证伪声明：\n' +
   '**URL:** ' + src.url + '\n**Title:** ' + src.title + '\n**Found via:** ' + src.board + ' / ' + src.found_via + '\n\n' +
   '## Task\n' +
-  '1. 用 WebFetch 抓取页面。\n' +
-  '⚠️ **禁止截图/图片输入**：本模型仅支持文本输入。禁止使用 Playwright 截图、禁止用图片方式读页面——使用 WebFetch 文本抓取。传入图片/screenshot 会直接导致 400 模型报错（Model only supports text input）。\n' +
+  step1 +
+  '⚠️ **禁止截图/图片输入**：本模型仅支持文本输入。禁止使用 Playwright 截图、禁止用图片方式读页面——一律文本抓取。传入图片/screenshot 会直接导致 400 模型报错（Model only supports text input）。\n' +
+  indexNote +
   '2. 判定来源质量：primary(官方/一手) / secondary(主流媒体报道) / blog / forum / unreliable。\n' +
-  '3. 提取 2-3 条与本板块日报问题相关、可核实、具体的声明（非空泛结论）；每条必须带原文引语 quote（**逐字抄录支撑该声明的完整原句，≤220 字，且必须包含声明中的全部具体细节——日期/数字/机构名/对比结论**，只截 40 字短句会导致核查票无据可依而误否决）、重要性 central/supporting/tangential。\n' +
+  '3. 提取 2-3 条与本板块日报问题相关、可核实、具体的声明（非空泛结论）；每条必须带原文引语 quote（**逐字抄录支撑该声明的完整原句，≤220 字，且必须包含声明中的全部具体细节——日期/数字/机构名/对比结论**，只截 40 字短句会导致核查票无据可依而误否决）、重要性 central/supporting/tangential；若实际引用页与上方 URL 不同（索引页选中的文章页），每条 claim 另带字段 sourceUrl=该文章真实 URL。\n' +
   '4. 注明页面/事件日期 publishDate（YYYY-MM-DD 或 MM-DD）；无日期则空。\n' +
   '5. 页面较长时只精读与日报相关且日期在窗口内的部分，其余快速略读；抓取失败/付费墙/无关页面 → 返回 claims:[] 且 sourceQuality:"unreliable"。\n\nStructured output only.'
+}
 
 // verifyPrompt 需要 VOTES_PER_CLAIM/REFUTATIONS_REQUIRED，经 ctx 传入。
 export const verifyPrompt = (c, ctx) =>
@@ -76,6 +97,7 @@ export const reportPrompt = ctx =>
   (ctx.killedCount ? "\n## 被否决声明（不写入正文）\n" + ctx.refutedList : "") +
   (ctx.unverifiedCount ? "\n## 未验证声明（核查代理故障，只能进“待核实”小节）\n" + ctx.unverifiedList : "") +
   ctx.missBlock +
+  (ctx.reportedBlock || "") +
   "\n## 覆盖自检\n" + ctx.coverBlock + "\n\n## 编辑要求\n" +
   "0. **禁止调用任何工具**（禁 WebFetch、WebSearch、Read、curl 及一切工具调用）——只做纯推理合成；一旦发起工具调用即视为失败。\n" +
   "**✅ 收口纪律（最终唯一出口）**：本代理的最终动作**只能是调用 StructuredOutput 工具**返回结构化对象 { sections, oneLiner, execSummary, caveats, openQuestions }。思考过程中即使已得出全部结论、或素材为空（无已确认声明、仅少量未核查/超窗项），**最后一步也是调用 StructuredOutput 工具，而不是 end_turn 输出文字总结**。任何「我在思考里已经理清，现在用文字说明」的 end_turn 都算失败——主流程判定为 null，整篇日报降级为退化快讯。素材再少也要调用工具——哪怕返回 oneLiner 一句话 + sections 空数组 + execSummary 一句话，也必须通过 StructuredOutput 工具返回。\n\n" +
@@ -93,6 +115,7 @@ export const reportPrompt = ctx =>
   "  - 同一事件出现于多条已聚类素材 → 只写 ONE 条标题正文，其他绝不重复（不并排、不\"此外\"再造一条）。若不同条沿用不同口径数字，直接写\"M 为 X、N 为 Y，口径不一\"，不再分别作文。\n" +
   "  - 判定两条是同一事件的双重标准（全部满足）：①共享 ≥1 个实体 token（组织/人名）；②日期同域（≥2 天内）；③数字字段重叠（含数量级）。\n" +
   "  - 判定后你的摘要正文即为主合并 + 数字/口径自然呈现（如 4.25GW/$150-200B/$600B/$105B 并陈）。\n\n" +
+  "4.8.【已报道去重（9/13）】素材里的「## 已报道」名单 = 近 3 天已出现在日报正文的条目：与名单同事件的素材（同一 URL，或同事件换 URL/换表述/转手报道）**一律不写正文条目**——读者已读过，宁漏勿重。唯一例外：该事件确有**实质新增进展**，此时只写新增部分，summary 开头标注「前情提要：X 日已报道；本次新增：…」，status 沿用素材标注。判定看主体+事件（表述不同不影响判定）。\n\n" +
   "5. **板块组织**：不要机械按来源分板。**labs（新模型/模型能力）板块如果有内容，必须放在第一个板块**。如果某板块今天无重要新闻，该板块可以不出现在正文（但保留 coverage 自检）。重磅新闻放在最靠前的板块下。\n\n" +
   "3.2. **数字口径**：同事件多条素材数字口径不一（如 4.25GW/$150-200B/$600B/$105B）时，直接并陈不同口径、不各自成条、提醒勿相加。\n\n" +
   "6. **caveats**：注明弱来源/厂商口径/时间敏感。openQuestions 2-4 个。\n\n" +

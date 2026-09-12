@@ -38,7 +38,9 @@ export const EXTRACT_SCHEMA = {
     publishDate: { type: 'string' },
     claims: { type: 'array', maxItems: 3, items: {
       type: 'object', required: ['claim', 'quote', 'importance'],
-      properties: { claim: { type: 'string' }, quote: { type: 'string' }, importance: { enum: ['central', 'supporting', 'tangential'] } },
+      // sourceUrl 可选（9/13 索引页治理）：实际引用页与来源 URL 不同时必填（索引页选中的真实文章页）；
+      // template 注入点按 http(s) 合法性优先取 claim.sourceUrl，否则回落 src.url。
+      properties: { claim: { type: 'string' }, quote: { type: 'string' }, importance: { enum: ['central', 'supporting', 'tangential'] }, sourceUrl: { type: 'string' } },
     }},
   },
 }

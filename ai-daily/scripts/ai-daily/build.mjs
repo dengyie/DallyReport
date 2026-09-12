@@ -23,7 +23,10 @@ const DEFAULT_OUT = path.resolve(HERE, '../../.claude/workflows/ai-daily.js')
 // 但模板里 makeCalibratedElapsed 要包住 RUN_ELAPSED 再喂给 makeBudgetGate，顺序上必须先于使用点）。
 // ladder（9/02）：模型阶梯降级工厂 makeSafeAgentWithLadder，纯函数零依赖，排在 wallclock 后
 // （模板接线点在 probeGateway 之后，inline 顺序只需早于使用点；DEFAULT_LADDER 被 render-md import）。
-const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'wallclock', 'ladder', 'fallback', 'prompts', 'render-md', 'cluster', 'linuxdo']
+// ledger（9/13）：跨天已报道账本纯函数（filterReportedTargets/splitSeeds/storyMatch/prune），import
+// clusterTokenize（cluster）与 normURL/normalizeDate/daysBetween（date-utils）→ 必须排在 cluster 之后。
+// cdp-core（9/13）：CDP 协议层（closeTab/readBodyText*/CDP_DEFAULTS），linuxdo.mjs import 它 → 排在 linuxdo 前。
+const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'wallclock', 'ladder', 'fallback', 'prompts', 'render-md', 'cluster', 'ledger', 'cdp-core', 'linuxdo']
 
 // 剥模块为可 inline 文本：去 import 行（依赖由顺序保证）、export 前缀、模块头注释。
 const stripModule = name => {
@@ -57,6 +60,8 @@ const build = () => {
 // 任一违规即构建失败，防止「模板已改、产物仍走旧裸抓」的静默漂移（2921db72 曾提交该漂移状态）。
 const REQUIRED_MARKERS = [
   [/linuxdoPrefetched/, '产物须含 linuxdoPrefetched 消费入口（Task 2 预抓注入契约）'],
+  [/reportedLedger/, '产物须含 args.reportedLedger 消费入口（9/13 跨天账本契约）'],
+  [/webFetchViaCdp/, '产物须含 webFetchViaCdp 门控（9/13 fetch 走 9222 CDP 契约）'],
 ]
 const FORBIDDEN_INLINE = [
   [/prefetchLinuxDo|runPrefetch/, 'linuxdo-prefetch（宿主 Node CLI）不得 inline 进 workflow'],

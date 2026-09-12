@@ -48,6 +48,14 @@ test('normURL 归一化（去协议/www/尾斜杠/大小写）', () => {
   assert.equal(normURL('not-a-url'), 'not-a-url')
 })
 
+test('normURL 丢弃 query 与 fragment（既有行为，9/13 回归锁——跨天去重依赖其稳定）', () => {
+  // 9/13 review 曾误判 utm 未剥——实际 URL_HOST_PATTERN 的 path 捕获组 [^?#]* 本就丢 query。
+  // 账本 URL 匹配（storyMatch normURL 等值）与 allocateFetchBudget 去重都建在此行为上，锁死防回归。
+  assert.equal(normURL('https://a.com/x?utm_source=t&utm_campaign=y'), normURL('https://a.com/x'), 'utm 差异归一相等')
+  assert.equal(normURL('https://a.com/x#section-2'), 'a.com/x', 'fragment 丢弃')
+  assert.equal(normURL('https://a.com/x?utm_source=t'), 'a.com/x')
+})
+
 test('hostOf 提取主机', () => {
   assert.equal(hostOf('https://x.ai/news'), 'x.ai')
   assert.equal(hostOf(''), 'unknown')

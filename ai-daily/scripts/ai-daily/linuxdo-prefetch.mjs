@@ -14,7 +14,8 @@
 // 注意：本文件不加入 build.mjs MODULES（不进 .claude/workflows/ai-daily.js），它只在宿主 Node
 // 运行、不在 workflow realm 内——workflow realm 无 fetch/WebSocket/fs/process/require。
 
-import { fetchLinuxDoNews34, CDP_DEFAULTS } from './linuxdo.mjs'
+import { fetchLinuxDoNews34 } from './linuxdo.mjs'
+import { CDP_DEFAULTS } from './cdp-core.mjs'
 import { isCliMain } from './cli-main.mjs'
 
 /** 默认 cdp host（与 linuxdo.mjs CDP_DEFAULTS.cdpHost 一致）。 */
