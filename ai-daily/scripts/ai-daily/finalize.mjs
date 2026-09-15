@@ -26,6 +26,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { makeLedgerEntry, pruneLedger } from './ledger.mjs'
 import { normURL } from './date-utils.mjs'
+import { runPoster } from './generate-poster.mjs'
 
 /** 展开任意 `~` 前缀为用户 home（`~/...` → `${os.homedir()}/...`）。只处理开头为 `~/` 的。 */
 export const expand = p => {
@@ -64,6 +65,13 @@ const ensure = {
 export const DEFAULT_LEDGER = path.join(os.homedir(), '.ai-daily', 'published-ledger.json')
 // 生产 outDir 前缀：只有写进该前缀下的 run 才自动记账（烟测 /tmp 隔离）。
 export const PROD_DALLYREPORT_PREFIX = path.join(os.homedir(), 'Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-note/AI/DallyReport')
+
+/** 生产 outDir 判定（可注入 prefix，测试不得在真实 iCloud 目录 mkdtemp）。 */
+export const isProdOutDir = (outDir, prefix = PROD_DALLYREPORT_PREFIX) => {
+  const resolvedOut = path.resolve(expand(outDir))
+  const resolvedPrefix = path.resolve(prefix)
+  return resolvedOut === resolvedPrefix || resolvedOut.startsWith(resolvedPrefix + path.sep)
+}
 
 /**
  * 从 claims payload 提取账本条目（confirmed 全记；major = window==='major-out'）。
@@ -143,8 +151,7 @@ if (resultPath) {
 
   // 9/13 跨天账本：仅生产 outDir（或显式 --ledger）记账；烟测 /tmp 隔离。失败只告警不回滚产物。
   const resolvedOut = path.resolve(expand(spec.outDir))
-  const isProd = resolvedOut.startsWith(path.resolve(PROD_DALLYREPORT_PREFIX) + path.sep)
-    || resolvedOut === path.resolve(PROD_DALLYREPORT_PREFIX)
+  const isProd = isProdOutDir(spec.outDir)
   const ledgerPath = ledgerOverride || DEFAULT_LEDGER
   if (!isProd && !ledgerOverride) {
     console.log(`LEDGER-SKIP non-production outDir（${resolvedOut}）不在 DallyReport 前缀下；烟测不记账，如需强制用 --ledger`)
@@ -155,6 +162,13 @@ if (resultPath) {
       console.log(`LEDGER-RECORDED ${ledgerPath} total=${total} added=${added}`)
     } catch (e) {
       console.error(`LEDGER-WARN 记账失败（产物已落盘不受影响）: ${e && e.message}`)
+    }
+
+    // P4: 统一产物交付与高清长图渲染闭环
+    try {
+      await runPoster(resolvedOut, spec.date)
+    } catch (e) {
+      console.error(`POSTER-WARN 海报生成失败（产物已落盘不受影响）: ${e && e.message}`)
     }
   }
 } else {

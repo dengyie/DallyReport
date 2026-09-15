@@ -58,16 +58,27 @@ export function extractTopicsFromJson(raw) {
   }))
 }
 
+export const HIGH_VALUE_OUTLINK_RE =
+  /https?:\/\/(?:www\.)?(?:github\.com\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|arxiv\.org\/(?:abs|pdf)\/[0-9.]+|huggingface\.co\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|(?:[a-zA-Z0-9-]+\.)?(?:openai|anthropic|nvidia|deepmind\.google|techcrunch|theverge|reuters|36kr|qbitai)\.com\/[^\s)\]"']+)/i
+
 export function extractPostTextFromJson(raw) {
   if (!raw) return null
   let obj; try { obj = JSON.parse(String(raw).trim()) } catch { return null }
   const c = obj?.post_stream?.posts
-  const rawStr = c && c[0]?.cooked ? String(c[0].cooked).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : ''
-  return rawStr || null
+  const cooked = c && c[0]?.cooked ? String(c[0].cooked) : ''
+  if (!cooked) return null
+  const m = cooked.match(HIGH_VALUE_OUTLINK_RE)
+  const rawStr = cooked.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!rawStr) return null
+  if (m && !rawStr.includes(m[0])) {
+    return `${rawStr} [出链: ${m[0]}]`
+  }
+  return rawStr
 }
 
 // 9/01 覆盖韧性：prefetch 已带 snippet，再走 fetch 代理砸 linux.do 是 403/524 弱路径。
-// 有非空 snippet 才铸一条对齐 Fetch 产出的 source（forum claim，走既有 Verify，不标 isMajorOut）。
+// 有非空 snippet 才铸一条对齐 Fetch 产出的 source。
+// 若 snippet 中含有 GitHub/arXiv/官网 等权威外链，则自动提权将 claim 挂载至真实外链（sourceUrl / primary）。
 // 空 snippet → null，调用方仍把该项交给 fetch 代理（诚实失败，不造空 claim）。
 export function mintLinuxdoSource(post, date) {
   if (!post || typeof post !== 'object') return null
@@ -75,13 +86,18 @@ export function mintLinuxdoSource(post, date) {
   const url = typeof post.url === 'string' ? post.url.trim() : ''
   const snippet = typeof post.snippet === 'string' ? post.snippet.trim() : ''
   if (!title || !url || !snippet) return null
-  const quote = snippet.slice(0, 220)
   const d = (typeof post.date === 'string' && post.date.trim()) ? post.date.trim() : date
+  const outlinkMatch = snippet.match(HIGH_VALUE_OUTLINK_RE)
+  const targetUrl = outlinkMatch ? outlinkMatch[0] : url
+  const quality = outlinkMatch ? 'primary' : 'forum'
+  // 提权时 quote 落在权威外链页语义下：剥掉机器追加的「[出链: URL]」后缀（原文已有该 URL 则保留）。
+  const quoteBase = outlinkMatch ? snippet.replace(/\s*\[出链:\s*\S+\]\s*$/, '') : snippet
+  const quote = quoteBase.slice(0, 220)
   return {
-    url, title, found_via: 'linuxdo-cdp', sourceQuality: 'forum', board: 'linuxdo', date: d,
+    url, title, found_via: 'linuxdo-cdp', sourceQuality: quality, board: 'linuxdo', date: d,
     claims: [{
       claim: title, quote, importance: 'supporting',
-      sourceUrl: url, sourceTitle: title, sourceQuality: 'forum', date: d, board: 'linuxdo',
+      sourceUrl: targetUrl, sourceTitle: title, sourceQuality: quality, date: d, board: 'linuxdo',
     }],
   }
 }

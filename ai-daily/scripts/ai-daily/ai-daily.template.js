@@ -81,9 +81,9 @@ const GROK_DIR = '/Users/mango/.claude/skills/grok-search'
 const CDP_FETCH_CLI = '/Users/mango/project/claude-project/obsidian/scripts/ai-daily/cdp-fetch.mjs'
 // 8/23 第二十一项：linuxdo 接入（登录态 CDP 独立发现组）。linuxdoCdpHost 默认 null → 组保留在
 // DISCOVER_GROUPS（板不崩）但 LINUXDO-SKIP no_cdp_host → urls:[] 不降级（命令行/手动补跑默认不启用）；
-// linuxdoMaxSources 配额默认 24（帖子轮换进组返回行）。
+// linuxdoMaxSources 配额默认 8（严控论坛配额，避免挤占官方/一手新闻抓取）。
 const LINUXDO_CDP_HOST = typeof args.linuxdoCdpHost === 'string' && args.linuxdoCdpHost ? args.linuxdoCdpHost : null
-const LINUXDO_MAX_SOURCES = typeof args.linuxdoMaxSources === 'number' && args.linuxdoMaxSources > 0 ? args.linuxdoMaxSources : 24
+const LINUXDO_MAX_SOURCES = typeof args.linuxdoMaxSources === 'number' && args.linuxdoMaxSources > 0 ? args.linuxdoMaxSources : 8
 // 8/27 Task 2：linux.do 预抓隔离——CDP 抓取从 Workflow realm 前移到宿主 Node（linuxdo-prefetch.mjs，
 // run-daily.sh 在调 Workflow 前预抓并把成功 JSON 注入 args.linuxdoPrefetched）。这里严格校验其成功形状：
 // ok===true 且 posts 是含 非空 url/title 的数组，才视为有效可消费；否则视同「无有效预抓数据」。
@@ -804,6 +804,11 @@ const _addMajor = makeAddMajor(majorOutClaims)
 // 同事件「已核查条目 + [窗口外·重大]」双写成稿。storyMatch（URL 归一 / token overlap≥0.8 且共享≥5）兜住。
 const _majorDupCheck = candidate => {
   const like = { url: (candidate && candidate.url) || '', tokens: fingerprintTokens(((candidate && candidate.name) || '') + ' ' + ((candidate && candidate.note) || '')) }
+  // 跨天账本必须先查：discover 的 majorOutOfWindow 是窗口外头条的主来源，
+  // 只比对本轮 confirmedVerify/majorOutClaims 会让昨日已成稿的 [窗口外·重大] 次日再注入。
+  if (REPORTED_LEDGER) {
+    for (const e of REPORTED_LEDGER) if (storyMatch(like, e)) return 'ledger'
+  }
   for (const e of majorOutClaims) if (storyMatch(like, { url: e.sourceUrl, tokens: fingerprintTokens(e.claim) })) return 'major-out'
   for (const e of confirmedVerify) if (storyMatch(like, { url: e.sourceUrl, tokens: fingerprintTokens(e.claim) })) return 'in-window'
   return null

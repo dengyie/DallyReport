@@ -388,6 +388,15 @@ test('模板：major-out 注入带 MAJOR-DUP 指纹互斥 + 已报道种子退�
   assert.ok(dupIdx > 0 && addMajorIdx > 0, '种子注入循环用 _majorDupCheck 守卫')
 })
 
+test('模板：_majorDupCheck 必须查 REPORTED_LEDGER（discover major-out 不得绕过跨天账本）', () => {
+  const start = TPL.indexOf('const _majorDupCheck = candidate => {')
+  const end = TPL.indexOf('let majorDupSkipped')
+  assert.ok(start >= 0 && end > start, '_majorDupCheck 函数体可切片')
+  const body = TPL.slice(start, end)
+  assert.match(body, /REPORTED_LEDGER/, 'discover 超窗项注入前必须比对账本，否则昨日 [窗口外·重大] 会逐日重注入')
+  assert.match(body, /return 'ledger'/, '账本命中有独立原因码（与 in-window / major-out 区分）')
+})
+
 test('模板：已报道名单进 report ctx（软网），近窗过滤按 day', () => {
   assert.match(TPL, /const reportedBlock = _recentLedger\.length/, 'reportedBlock 条件构造')
   assert.match(TPL, /age >= 0 && age <= LEDGER_LOOKBACK_DAYS/, '近 3 天过滤（不 slice 头部——账本按时间序追加）')

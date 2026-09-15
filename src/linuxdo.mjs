@@ -19,7 +19,7 @@
 import path from "node:path";
 import { mkdir, writeFile, stat, rmdir } from "node:fs/promises";
 import { runFetch } from "./grok-cli.mjs";
-import { sanitizeSnippet, isInjectionOnlySource } from "./snippet-hygiene.mjs";
+import { sanitizeSnippet, isInjectionOnlySource, NEGATIVE_COMMUNITY_RE, extractOutlinks } from "./snippet-hygiene.mjs";
 import { AI_TITLE_RE } from "./community.mjs";
 
 // Listing pages that concentrate AI / frontier news. Discourse category ids observed
@@ -83,6 +83,7 @@ export function beijingDayRange(dateStr) {
 /** True if a topic title looks like AI/LLM news worth putting in the daily report. */
 export function isAiRelatedTopic(title) {
   if (!title) return false;
+  if (NEGATIVE_COMMUNITY_RE.test(title)) return false;
   if (EXCLUDE_TITLE_RE.test(title)) return false;
   return AI_TITLE_RE.test(title);
 }
@@ -112,6 +113,7 @@ export function selectAiTopics(topics, { limit = 8 } = {}) {
 // paragraphs; skip chrome and link-only lines. Exported for unit tests.
 export function snippetFromTopicText(text, title, maxChars = 500) {
   if (!text) return "";
+  const outlinks = extractOutlinks(text);
   let body = String(text);
   // Drop common Discourse chrome early so it never becomes the "first paragraph".
   body = body
@@ -153,8 +155,11 @@ export function snippetFromTopicText(text, title, maxChars = 500) {
     paras.find((p) => sanitizeSnippet(p, { maxChars })) ||
     "";
   if (!pick) return "";
-  // Strip any prompt-injection preamble before the snippet leaves this module.
-  return sanitizeSnippet(pick, { maxChars });
+  const cleaned = sanitizeSnippet(pick, { maxChars });
+  if (outlinks.length > 0 && !cleaned.includes(outlinks[0].url)) {
+    return `${cleaned} [出链: ${outlinks[0].url}]`;
+  }
+  return cleaned;
 }
 
 // Maximum chars per JSON API page fetch. The JSON response for 30 topics is ~86KB,
@@ -319,10 +324,13 @@ export async function fetchNews34ViaJsonApi(config, deps = {}) {
     const lastTopic = topics[topics.length - 1];
     const lastMs = new Date(lastTopic.created_at).getTime();
 
-    // Collect topics within the Beijing target day
+    // Collect topics within the Beijing target day (filtering out community noise/trade posts)
     for (const t of topics) {
       const tMs = new Date(t.created_at).getTime();
-      if (tMs >= startLocal && tMs < endLocal) allTopics.push(t);
+      if (tMs >= startLocal && tMs < endLocal) {
+        if (NEGATIVE_COMMUNITY_RE.test(t.title)) continue;
+        allTopics.push(t);
+      }
     }
 
     // Stop when the entire page is older than the target day (created_at desc)
@@ -597,7 +605,7 @@ function attachCacheMetadata(sources, usedCache, cacheFiles) {
 export function mergeSourcesPreferLinuxDo(
   linuxdoSources,
   generalSources,
-  { maxTotal = 18, linuxdoMaxTotal = null, extraCommunitySources = [] } = {},
+  { maxTotal = 18, linuxdoMaxTotal = null, extraCommunitySources = [], extraCommunityMaxTotal = null } = {},
 ) {
   const out = [];
   const seen = new Set();
@@ -626,11 +634,18 @@ export function mergeSourcesPreferLinuxDo(
   if (linuxdoMaxTotal != null) {
     // linux.do has its own budget; community + general share maxTotal.
     let budget = Math.max(0, maxTotal);
+    const commCap = typeof extraCommunityMaxTotal === "number"
+      ? Math.max(0, extraCommunityMaxTotal)
+      : budget;
+    let commCount = 0;
     for (const s of extraCommunitySources || []) {
-      if (budget <= 0) break;
+      if (budget <= 0 || commCount >= commCap) break;
       const before = out.length;
       push(s);
-      if (out.length > before) budget--;
+      if (out.length > before) {
+        budget--;
+        commCount++;
+      }
     }
     for (const s of generalSources || []) {
       if (budget <= 0) break;

@@ -9,7 +9,7 @@
 // the reply-count anchor). We fetch page 1 (newest ~20) and filter AI titles.
 
 import { fetchCommunitySources } from "./community.mjs";
-import { sanitizeSnippet } from "./snippet-hygiene.mjs";
+import { sanitizeSnippet, extractOutlinks } from "./snippet-hygiene.mjs";
 
 export const DEFAULT_LIST_URLS = ["https://www.v2ex.com/go/openai"];
 
@@ -46,6 +46,7 @@ export function parseV2exTopics(text) {
 // We collapse the table rows and take the first CJK-prose row. Exported for tests.
 export function snippetFromV2exTopicText(text, title, maxChars = 400) {
   if (!text) return "";
+  const outlinks = extractOutlinks(text);
   const rows = String(text)
     .split(/\n+/)
     .map((p) => p.replace(/^\s*\|/, "").replace(/\|\s*$/, ""))
@@ -58,7 +59,11 @@ export function snippetFromV2exTopicText(text, title, maxChars = 400) {
     .filter((p) => !/^(登录|注册|回复|关于|❤️)/.test(p));
   const pick = rows[0] || "";
   if (!pick) return "";
-  return sanitizeSnippet(pick, { maxChars });
+  const cleaned = sanitizeSnippet(pick, { maxChars });
+  if (outlinks.length > 0 && !cleaned.includes(outlinks[0].url)) {
+    return `${cleaned} [出链: ${outlinks[0].url}]`;
+  }
+  return cleaned;
 }
 
 /**

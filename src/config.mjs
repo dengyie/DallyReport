@@ -273,10 +273,9 @@ export function loadConfig({ date = null } = {}) {
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
     // Max linux.do source cards fed into synthesis (separate from sourceMaxTotal).
-    // Allows all today's news/34 posts to flow through, while community+general
-    // sources still respect AI_SOURCE_MAX_TOTAL for their combined budget.
+    // Kept bounded (default 4) so forum chatter never crowds out hard news sources (HN/36kr/arXiv).
     // Set to 0 to cap linux.do to the same pool as other sources.
-    linuxdoMaxSources: int("LINUXDO_MAX_SOURCES", 50),
+    linuxdoMaxSources: int("LINUXDO_MAX_SOURCES", 4),
     // Optional login cookie for linux.do (raw Cookie header value, e.g. `_t=...; _u=...`).
     // When set, the news/34 JSON-API pagination fetches each page directly with this
     // cookie so deeper pages (2nd/3rd level) are read reliably without Tavily's

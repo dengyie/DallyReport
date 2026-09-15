@@ -3,7 +3,7 @@
 // 实证 V4-Flash-Vision-Exp 连续 3 天、水彩 RL/孙鹏加盟等连续 2 天整条重复（同 URL）。
 //
 // 双端分工：
-//   记录端 = finalize.mjs（宿主）：每轮成稿后把 confirmed/outOfWindow 条目追加进
+//   记录端 = finalize.mjs（宿主）：每轮成稿后把 confirmed[] 追加进
 //     ~/.ai-daily/published-ledger.json（HOME 而非 iCloud——launchd TCC 读不了 Mobile Documents，
 //     8/31 P4 实证；HOME 路径有 linuxdo-prefetch.json 先例）。
 //   消费端 = workflow realm：args.reportedLedger 注入本模块的过滤函数——已报道 URL 硬过滤（fetch
@@ -46,13 +46,27 @@ const _overlap = (a, b) => {
   return { shared, ratio: shared / Math.min(A.size, B.size) }
 }
 
-// 同一事件判定（硬）：URL 归一命中即同事件；否则指纹高重叠 + 足量共享 token。
+// 同一事件判定（硬）：URL 归一命中即同事件；否则指纹高重叠 + 足量共享 token；
+// 再否则「强实体」——带连字符的长 ASCII 产品名（V4-Flash-Vision-Exp）在账本 token 精确命中。
+// 必须含字母，并排除 ISO 日期（2026-09-13 长度≥8 且带连字符，日报/linux.do 标题几乎每天都有）。
+// 不放宽 gemini/flash 这类无连字符通用词（同名家族误杀）。
 export const storyMatch = (claimLike, entry) => {
   if (!claimLike || !entry) return false
   const u1 = normURL(claimLike.url || '')
   if (u1 && entry.url && normURL(entry.url) === u1) return true
-  const { shared, ratio } = _overlap(claimLike.tokens || [], entry.tokens || [])
-  return shared >= LEDGER_SHARE_MIN && ratio >= LEDGER_OVERLAP_MIN
+  const cTok = claimLike.tokens || []
+  const eTok = entry.tokens || []
+  const { shared, ratio } = _overlap(cTok, eTok)
+  if (shared >= LEDGER_SHARE_MIN && ratio >= LEDGER_OVERLAP_MIN) return true
+  const eSet = new Set(eTok)
+  for (const t of cTok) {
+    if (typeof t !== 'string' || t.length < 8 || !t.includes('-')) continue
+    if (!/^[a-z0-9][a-z0-9.%\-]*$/.test(t)) continue
+    if (!/[a-z]/.test(t)) continue
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) continue
+    if (eSet.has(t)) return true
+  }
+  return false
 }
 
 // entry.day 距 today 是否在 lookback 天内（含当日）。任一日期不可解析 → 视为在窗内（保守去重；
@@ -73,7 +87,8 @@ export const filterReportedTargets = (targets, ledger, opts) => {
   const recent = entries.filter(e => _withinLookback(e && e.day, today, lookback))
   const keep = [], dropped = []
   for (const t of (targets || [])) {
-    const like = { url: t && t.url, tokens: fingerprintTokens((t && t.title) || (t && t.url) || '') }
+    // URL 只走 normURL 等值，不进 token——ASCII 路径段会稀释 overlap（shared/min(|A|,|B|)）。
+    const like = { url: t && t.url, tokens: fingerprintTokens([t && t.title, t && t.snippet, t && t.note].filter(Boolean).join(' ')) }
     const hit = recent.find(e => storyMatch(like, e))
     if (hit) dropped.push({ url: t.url, board: t && t.board, matchedDay: hit.day, matchedUrl: hit.url || null })
     else keep.push(t)

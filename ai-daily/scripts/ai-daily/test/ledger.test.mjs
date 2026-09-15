@@ -9,7 +9,7 @@ import {
   LEDGER_OVERLAP_MIN, LEDGER_SHARE_MIN, LEDGER_LOOKBACK_DAYS, LEDGER_KEEP_DAYS,
   fingerprintTokens, makeLedgerEntry, storyMatch, filterReportedTargets, splitSeeds, pruneLedger,
 } from '../ledger.mjs'
-import { ledgerEntriesFromClaims, recordLedger, DEFAULT_LEDGER, PROD_DALLYREPORT_PREFIX } from '../finalize.mjs'
+import { ledgerEntriesFromClaims, recordLedger, DEFAULT_LEDGER, PROD_DALLYREPORT_PREFIX, isProdOutDir } from '../finalize.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -45,6 +45,28 @@ test('storyMatch：空 token/空 URL 容错不崩', () => {
   assert.ok(!storyMatch({ url: '', tokens: [] }, makeLedgerEntry('2026-09-05', '', 'x', false)))
 })
 
+test('storyMatch：短 name 的强实体 ASCII token 精确命中账本（discover major-out 无 note/换 URL）', () => {
+  const entry = makeLedgerEntry('2026-09-03', 'https://blog.google/v4', '谷歌发布 Gemini V4-Flash-Vision-Exp 多模态理解', true)
+  const shortName = { url: 'https://other.example/v4', tokens: fingerprintTokens('V4-Flash-Vision-Exp') }
+  assert.ok(storyMatch(shortName, entry), '单一产品名 token 已在账本 → 跨天同事件（SHARE_MIN=5 打不满也要命中）')
+  const weak = { url: 'https://other.example/g', tokens: fingerprintTokens('Gemini Flash 发布') }
+  assert.ok(!storyMatch(weak, entry), 'gemini/flash 这类短通用词不得当强实体误杀')
+  const otherProduct = { url: 'https://other.example/x', tokens: fingerprintTokens('Granite-4.2-Tiny') }
+  assert.ok(!storyMatch(otherProduct, entry), '另一个带连字符的产品名不命中')
+})
+
+test('storyMatch：ISO 日期不得当强实体（日报/linux.do 标题常带 2026-09-13）', () => {
+  const entry = makeLedgerEntry('2026-09-13', 'https://blog.google/gemini-38', '谷歌发布 Gemini 3.8 Flash，六周内第三次 Flash 换代 2026-09-13', false)
+  const datedUnrelated = { url: 'https://ibm.example/ttm', tokens: fingerprintTokens('IBM 开源百万参数时序模型 TTM，纯 CPU 每晚十万序列 2026-09-13') }
+  assert.ok(!storyMatch(datedUnrelated, entry), '两边只有 ISO 日期共享 → 不得判同事件')
+  const githubDaily = { url: 'https://linux.do/t/2892428', tokens: fingerprintTokens('github日榜-2026-09-12') }
+  const linuxdoDaily = makeLedgerEntry('2026-09-12', 'https://linux.do/t/2891978', 'linux.do人工智能技术日报+播客-26-09-12', false)
+  assert.ok(!storyMatch(githubDaily, linuxdoDaily), 'github 日榜 vs linux.do 播客不得因日期撞车')
+  const stillProduct = { url: 'https://other.example/v4', tokens: fingerprintTokens('V4-Flash-Vision-Exp') }
+  const productEntry = makeLedgerEntry('2026-09-03', 'https://blog.google/v4', '谷歌发布 Gemini V4-Flash-Vision-Exp 多模态理解', true)
+  assert.ok(storyMatch(stillProduct, productEntry), '真正的产品名强实体仍要命中')
+})
+
 // ─── filterReportedTargets ───
 test('filterReportedTargets：已报道 URL 硬丢弃并给 matchedDay；未报道保留；不改输入数组', () => {
   const ledger = [makeLedgerEntry('2026-09-04', 'https://x.example/a', 'OpenAI 发布 Astra 智能体被曝多次联网引发治理争议', false)]
@@ -66,6 +88,18 @@ test('filterReportedTargets：lookback 之外的旧条目不再拦（3 天窗口
   const ledger = [makeLedgerEntry('2026-08-20', 'https://x.example/old', '某事件 A 的报道内容，足够多特征词以构成指纹', false)]
   const { dropped } = filterReportedTargets([{ url: 'https://x.example/old', title: '某事件 A 的报道内容，足够多特征词以构成指纹' }], ledger, { today: '2026-09-05' })
   assert.equal(dropped.length, 0, '17 天前的已报道条目不再硬拦（URL 相同也放行——留给软网判断是否回顾）')
+})
+
+test('filterReportedTargets：短标题不够 SHARE_MIN 时，title+snippet 拼指纹仍能拦换 URL 同事件', () => {
+  const ledger = [makeLedgerEntry('2026-09-04', 'https://blog.google/gemini-38', '谷歌发布 Gemini 3.8 Flash，六周内第三次 Flash 换代，HLE 多步推理 54.9%', false)]
+  const shortOnly = { url: 'https://other.example/g38', title: 'Gemini 3.8 Flash 发布', board: 'labs' }
+  const withSnippet = { ...shortOnly, snippet: '谷歌 Gemini 3.8 Flash 六周内第三次换代，HLE 多步推理 54.9%' }
+  const r2 = filterReportedTargets([withSnippet], ledger, { today: '2026-09-05' })
+  assert.equal(r2.dropped.length, 1, 'title+snippet 拼指纹命中换 URL（只看短标题会因 SHARE_MIN 漏放）')
+  assert.equal(r2.dropped[0].url, 'https://other.example/g38')
+  const diluted = { ...withSnippet, url: 'https://techcrunch.com/category/artificial-intelligence/foo-bar-baz-qux-extra-path' }
+  const r3 = filterReportedTargets([diluted], ledger, { today: '2026-09-05' })
+  assert.equal(r3.dropped.length, 1, 'URL 不得进指纹稀释 overlap——长无关 URL 仍应命中')
 })
 
 test('filterReportedTargets：无账本/坏账本 fail-open 全保留', () => {
@@ -204,17 +238,11 @@ test('CLI：--ledger 显式覆盖 → /tmp outDir 也记账', () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('CLI：生产 outDir 前缀 → 默认账本记账（launchd/编排器主路径）', () => {
-  // 不真写 iCloud/真账本——用 --out 指向生产前缀下的 tmp 子目录 + --ledger 指向 tmp，
-  // 只验证「生产前缀判定为 prod」路径不再 LEDGER-SKIP（isProd 判定与记账解耦可测）。
-  const dir = fs.mkdtempSync(path.join(PROD_DALLYREPORT_PREFIX, '.finalize-test-'))
-  try {
-    const lp = path.join(dir, 'ledger.json')
-    const resultPath = path.join(dir, 'result.json')
-    fs.writeFileSync(resultPath, JSON.stringify(mkResult(dir)))
-    const out = execFileSync(process.execPath, [path.join(HERE, '../finalize.mjs'), resultPath, '--ledger', lp], { stdio: 'pipe' }).toString()
-    assert.match(out, /LEDGER-RECORDED/, '生产前缀下记账执行')
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true })
-  }
+test('isProdOutDir：只认生产前缀，不在真实 iCloud 目录落盘', () => {
+  const prefix = path.join(os.tmpdir(), 'fake-dallyreport-prefix')
+  assert.equal(isProdOutDir(prefix, prefix), true)
+  assert.equal(isProdOutDir(path.join(prefix, '2026-09-06'), prefix), true)
+  assert.equal(isProdOutDir(path.join(os.tmpdir(), 'elsewhere'), prefix), false)
+  assert.equal(isProdOutDir(PROD_DALLYREPORT_PREFIX), true, '默认前缀命中生产根')
+  assert.equal(isProdOutDir(path.join(os.tmpdir(), 'finalize-smoke-x')), false)
 })

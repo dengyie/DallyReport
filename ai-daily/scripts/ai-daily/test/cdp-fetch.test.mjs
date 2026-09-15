@@ -5,7 +5,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { acquireLock, releaseLock, cdpFetch, parseArgs, LOCK_MAX } from '../cdp-fetch.mjs'
+import { acquireLock, releaseLock, cdpFetch, parseArgs, LOCK_MAX, LOCK_TIMEOUT_MS } from '../cdp-fetch.mjs'
+import { CDP_DEFAULTS } from '../cdp-core.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ARTICLE_TEXT = '谷歌发布 Gemini 3.8 Flash。六周内第三次迭代。\n价格与 3.7 Flash 持平。'
@@ -100,6 +101,51 @@ test('parseArgs：位置参数=URL、--host/--max-chars/--lock-dir、未知参�
   assert.throws(() => parseArgs(['--bogus']), /未知参数/)
   assert.throws(() => parseArgs(['--max-chars', 'abc']), /正整数/)
   assert.equal(LOCK_MAX, 3, '并发上限 3（6 代理批内不同时刷用户 Chrome）')
+})
+
+test('LOCK_TIMEOUT_MS ≥ 一次完整读页（open + poll），第二波能等到锁释放而不是立刻回落 WebFetch', () => {
+  assert.ok(
+    LOCK_TIMEOUT_MS >= CDP_DEFAULTS.pollMaxMs + CDP_DEFAULTS.requestTimeoutMs,
+    `锁等待 ${LOCK_TIMEOUT_MS}ms 必须盖住开标签 ${CDP_DEFAULTS.requestTimeoutMs}ms + 轮询 ${CDP_DEFAULTS.pollMaxMs}ms，否则 Fetch 批 6 里后 3 个 10s 就 lock_timeout`,
+  )
+})
+
+test('acquireLock：占位用 wx 独占创建；EEXIST 视为竞争并重试，不覆盖别人的锁', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cdp-lock-wx-'))
+  const flags = []
+  const real = fs
+  const io = {
+    mkdirSync: (...a) => real.mkdirSync(...a),
+    readdirSync: (...a) => real.readdirSync(...a),
+    statSync: (...a) => real.statSync(...a),
+    unlinkSync: (...a) => real.unlinkSync(...a),
+    writeFileSync: (fp, data, opts) => {
+      flags.push(opts && opts.flag)
+      return real.writeFileSync(fp, data, opts)
+    },
+  }
+  const fp = await acquireLock({ dir, max: 2, io, timeoutMs: 400, pollMs: 2 })
+  assert.ok(flags.includes('wx'), 'writeFileSync 必须带 flag:wx（check-then-write 会超发）')
+  releaseLock(fp)
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('acquireLock：固定槽 wx，并发不得超 max（随机文件名 wx 挡不住超发）', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cdp-lock-slot-'))
+  const max = 3
+  const N = 8
+  try {
+    const results = await Promise.allSettled(
+      Array.from({ length: N }, () => acquireLock({ dir, max, timeoutMs: 80, pollMs: 5 })),
+    )
+    const got = results.filter(r => r.status === 'fulfilled').map(r => r.value)
+    assert.equal(got.length, max, `并发 ${N} 抢 max=${max}，成功数必须 = max，不能靠随机文件名 wx 超发`)
+    assert.equal(new Set(got).size, max, '成功锁路径互异')
+    assert.ok(got.every(fp => /lock-\d+\.lock$/.test(fp)), '锁文件必须是固定槽 lock-N.lock')
+    for (const fp of got) releaseLock(fp)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 // ─── CLI 子进程边界（成功 JSON / 失败非零 / 参数错 / help）───

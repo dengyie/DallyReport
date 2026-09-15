@@ -81,9 +81,9 @@ const GROK_DIR = '/Users/mango/.claude/skills/grok-search'
 const CDP_FETCH_CLI = '/Users/mango/project/claude-project/obsidian/scripts/ai-daily/cdp-fetch.mjs'
 // 8/23 第二十一项：linuxdo 接入（登录态 CDP 独立发现组）。linuxdoCdpHost 默认 null → 组保留在
 // DISCOVER_GROUPS（板不崩）但 LINUXDO-SKIP no_cdp_host → urls:[] 不降级（命令行/手动补跑默认不启用）；
-// linuxdoMaxSources 配额默认 24（帖子轮换进组返回行）。
+// linuxdoMaxSources 配额默认 8（严控论坛配额，避免挤占官方/一手新闻抓取）。
 const LINUXDO_CDP_HOST = typeof args.linuxdoCdpHost === 'string' && args.linuxdoCdpHost ? args.linuxdoCdpHost : null
-const LINUXDO_MAX_SOURCES = typeof args.linuxdoMaxSources === 'number' && args.linuxdoMaxSources > 0 ? args.linuxdoMaxSources : 24
+const LINUXDO_MAX_SOURCES = typeof args.linuxdoMaxSources === 'number' && args.linuxdoMaxSources > 0 ? args.linuxdoMaxSources : 8
 // 8/27 Task 2：linux.do 预抓隔离——CDP 抓取从 Workflow realm 前移到宿主 Node（linuxdo-prefetch.mjs，
 // run-daily.sh 在调 Workflow 前预抓并把成功 JSON 注入 args.linuxdoPrefetched）。这里严格校验其成功形状：
 // ok===true 且 posts 是含 非空 url/title 的数组，才视为有效可消费；否则视同「无有效预抓数据」。
@@ -1452,7 +1452,7 @@ const mergeCluster = (items, dateLabel, majorOutMap) => {
 // 实证 V4-Flash-Vision-Exp 连续 3 天、水彩 RL/孙鹏加盟等连续 2 天整条重复（同 URL）。
 //
 // 双端分工：
-//   记录端 = finalize.mjs（宿主）：每轮成稿后把 confirmed/outOfWindow 条目追加进
+//   记录端 = finalize.mjs（宿主）：每轮成稿后把 confirmed[] 追加进
 //     ~/.ai-daily/published-ledger.json（HOME 而非 iCloud——launchd TCC 读不了 Mobile Documents，
 //     8/31 P4 实证；HOME 路径有 linuxdo-prefetch.json 先例）。
 //   消费端 = workflow realm：args.reportedLedger 注入本模块的过滤函数——已报道 URL 硬过滤（fetch
@@ -1493,13 +1493,27 @@ const _overlap = (a, b) => {
   return { shared, ratio: shared / Math.min(A.size, B.size) }
 }
 
-// 同一事件判定（硬）：URL 归一命中即同事件；否则指纹高重叠 + 足量共享 token。
+// 同一事件判定（硬）：URL 归一命中即同事件；否则指纹高重叠 + 足量共享 token；
+// 再否则「强实体」——带连字符的长 ASCII 产品名（V4-Flash-Vision-Exp）在账本 token 精确命中。
+// 必须含字母，并排除 ISO 日期（2026-09-13 长度≥8 且带连字符，日报/linux.do 标题几乎每天都有）。
+// 不放宽 gemini/flash 这类无连字符通用词（同名家族误杀）。
 const storyMatch = (claimLike, entry) => {
   if (!claimLike || !entry) return false
   const u1 = normURL(claimLike.url || '')
   if (u1 && entry.url && normURL(entry.url) === u1) return true
-  const { shared, ratio } = _overlap(claimLike.tokens || [], entry.tokens || [])
-  return shared >= LEDGER_SHARE_MIN && ratio >= LEDGER_OVERLAP_MIN
+  const cTok = claimLike.tokens || []
+  const eTok = entry.tokens || []
+  const { shared, ratio } = _overlap(cTok, eTok)
+  if (shared >= LEDGER_SHARE_MIN && ratio >= LEDGER_OVERLAP_MIN) return true
+  const eSet = new Set(eTok)
+  for (const t of cTok) {
+    if (typeof t !== 'string' || t.length < 8 || !t.includes('-')) continue
+    if (!/^[a-z0-9][a-z0-9.%\-]*$/.test(t)) continue
+    if (!/[a-z]/.test(t)) continue
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) continue
+    if (eSet.has(t)) return true
+  }
+  return false
 }
 
 // entry.day 距 today 是否在 lookback 天内（含当日）。任一日期不可解析 → 视为在窗内（保守去重；
@@ -1520,7 +1534,8 @@ const filterReportedTargets = (targets, ledger, opts) => {
   const recent = entries.filter(e => _withinLookback(e && e.day, today, lookback))
   const keep = [], dropped = []
   for (const t of (targets || [])) {
-    const like = { url: t && t.url, tokens: fingerprintTokens((t && t.title) || (t && t.url) || '') }
+    // URL 只走 normURL 等值，不进 token——ASCII 路径段会稀释 overlap（shared/min(|A|,|B|)）。
+    const like = { url: t && t.url, tokens: fingerprintTokens([t && t.title, t && t.snippet, t && t.note].filter(Boolean).join(' ')) }
     const hit = recent.find(e => storyMatch(like, e))
     if (hit) dropped.push({ url: t.url, board: t && t.board, matchedDay: hit.day, matchedUrl: hit.url || null })
     else keep.push(t)
@@ -1710,16 +1725,27 @@ function extractTopicsFromJson(raw) {
   }))
 }
 
+const HIGH_VALUE_OUTLINK_RE =
+  /https?:\/\/(?:www\.)?(?:github\.com\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|arxiv\.org\/(?:abs|pdf)\/[0-9.]+|huggingface\.co\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|(?:[a-zA-Z0-9-]+\.)?(?:openai|anthropic|nvidia|deepmind\.google|techcrunch|theverge|reuters|36kr|qbitai)\.com\/[^\s)\]"']+)/i
+
 function extractPostTextFromJson(raw) {
   if (!raw) return null
   let obj; try { obj = JSON.parse(String(raw).trim()) } catch { return null }
   const c = obj?.post_stream?.posts
-  const rawStr = c && c[0]?.cooked ? String(c[0].cooked).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : ''
-  return rawStr || null
+  const cooked = c && c[0]?.cooked ? String(c[0].cooked) : ''
+  if (!cooked) return null
+  const m = cooked.match(HIGH_VALUE_OUTLINK_RE)
+  const rawStr = cooked.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!rawStr) return null
+  if (m && !rawStr.includes(m[0])) {
+    return `${rawStr} [出链: ${m[0]}]`
+  }
+  return rawStr
 }
 
 // 9/01 覆盖韧性：prefetch 已带 snippet，再走 fetch 代理砸 linux.do 是 403/524 弱路径。
-// 有非空 snippet 才铸一条对齐 Fetch 产出的 source（forum claim，走既有 Verify，不标 isMajorOut）。
+// 有非空 snippet 才铸一条对齐 Fetch 产出的 source。
+// 若 snippet 中含有 GitHub/arXiv/官网 等权威外链，则自动提权将 claim 挂载至真实外链（sourceUrl / primary）。
 // 空 snippet → null，调用方仍把该项交给 fetch 代理（诚实失败，不造空 claim）。
 function mintLinuxdoSource(post, date) {
   if (!post || typeof post !== 'object') return null
@@ -1727,13 +1753,18 @@ function mintLinuxdoSource(post, date) {
   const url = typeof post.url === 'string' ? post.url.trim() : ''
   const snippet = typeof post.snippet === 'string' ? post.snippet.trim() : ''
   if (!title || !url || !snippet) return null
-  const quote = snippet.slice(0, 220)
   const d = (typeof post.date === 'string' && post.date.trim()) ? post.date.trim() : date
+  const outlinkMatch = snippet.match(HIGH_VALUE_OUTLINK_RE)
+  const targetUrl = outlinkMatch ? outlinkMatch[0] : url
+  const quality = outlinkMatch ? 'primary' : 'forum'
+  // 提权时 quote 落在权威外链页语义下：剥掉机器追加的「[出链: URL]」后缀（原文已有该 URL 则保留）。
+  const quoteBase = outlinkMatch ? snippet.replace(/\s*\[出链:\s*\S+\]\s*$/, '') : snippet
+  const quote = quoteBase.slice(0, 220)
   return {
-    url, title, found_via: 'linuxdo-cdp', sourceQuality: 'forum', board: 'linuxdo', date: d,
+    url, title, found_via: 'linuxdo-cdp', sourceQuality: quality, board: 'linuxdo', date: d,
     claims: [{
       claim: title, quote, importance: 'supporting',
-      sourceUrl: url, sourceTitle: title, sourceQuality: 'forum', date: d, board: 'linuxdo',
+      sourceUrl: targetUrl, sourceTitle: title, sourceQuality: quality, date: d, board: 'linuxdo',
     }],
   }
 }
@@ -2398,6 +2429,11 @@ const _addMajor = makeAddMajor(majorOutClaims)
 // 同事件「已核查条目 + [窗口外·重大]」双写成稿。storyMatch（URL 归一 / token overlap≥0.8 且共享≥5）兜住。
 const _majorDupCheck = candidate => {
   const like = { url: (candidate && candidate.url) || '', tokens: fingerprintTokens(((candidate && candidate.name) || '') + ' ' + ((candidate && candidate.note) || '')) }
+  // 跨天账本必须先查：discover 的 majorOutOfWindow 是窗口外头条的主来源，
+  // 只比对本轮 confirmedVerify/majorOutClaims 会让昨日已成稿的 [窗口外·重大] 次日再注入。
+  if (REPORTED_LEDGER) {
+    for (const e of REPORTED_LEDGER) if (storyMatch(like, e)) return 'ledger'
+  }
   for (const e of majorOutClaims) if (storyMatch(like, { url: e.sourceUrl, tokens: fingerprintTokens(e.claim) })) return 'major-out'
   for (const e of confirmedVerify) if (storyMatch(like, { url: e.sourceUrl, tokens: fingerprintTokens(e.claim) })) return 'in-window'
   return null

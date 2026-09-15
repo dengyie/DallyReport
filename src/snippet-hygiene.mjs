@@ -246,3 +246,48 @@ export function filterByRecency(sources, dateStr) {
   return { sources: kept, dropped };
 }
 
+// Negative filter for community forums (drops account trading, carpooling, quota complaints, payment tricks)
+// 账号交易形态：动词（出/收/买/卖/求购/出售/转让）后可隔 0-10 字再接「号/账号」——
+// 「收Google账号」「出ChatGPT Plus 账号」「卖号」等真实标题隔字/带英文也不漏。
+export const NEGATIVE_COMMUNITY_RE =
+  /(?:出|收|买|卖|求购|出售|转让).{0,14}(?:号|账号)|(?:号|账号).{0,4}(?:出|收|买|卖)|\b\d+出\b|求车|人找车|车找人|车位|拼车|合租|代充|余额|挂号|抽奖|降智|封号|被封|土区|日区|美区|里拉|阿根廷|美运|低价订阅|怎么买|接码|退款|额度重置|鉴别渠道|收鸡|出鸡|溢价|邀请码|纯手工|黑五|秒杀|中转站|注册送|求个.*车|本质是个快捷方式|勇闯/i;
+
+// High-value technical and authoritative outlink domains worthy of unfurling/preservation.
+export const HIGH_VALUE_OUTLINK_RE =
+  /https?:\/\/(?:www\.)?(?:github\.com\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|arxiv\.org\/(?:abs|pdf)\/[0-9.]+|huggingface\.co\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|(?:[a-zA-Z0-9-]+\.)?(?:openai|anthropic|nvidia|deepmind\.google|techcrunch|theverge|reuters|36kr|qbitai)\.com\/[^\s)\]"']+)/i;
+
+/**
+ * Extract authoritative outlinks from markdown/HTML text.
+ * @param {string} text
+ * @returns {Array<{label: string, url: string}>}
+ */
+// 句尾标点剥离含全角（论坛中文语境 URL 常直接跟「。」）——否则坏链混进 sourceUrl。
+const TRAILING_PUNCT_RE = /[.,;:!?。；！？、）)]+$/;
+
+export function extractOutlinks(text) {
+  if (!text) return [];
+  const matches = [];
+  const seen = new Set();
+  // Match markdown links [label](url)
+  const mdLinkRe = /\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
+  let m;
+  while ((m = mdLinkRe.exec(text)) !== null) {
+    const label = (m[1] || "").trim();
+    const url = m[2].trim().replace(TRAILING_PUNCT_RE, "");
+    if (HIGH_VALUE_OUTLINK_RE.test(url) && !seen.has(url)) {
+      seen.add(url);
+      matches.push({ label, url });
+    }
+  }
+  // Match bare URLs
+  const rawUrlRe = /(https?:\/\/[^\s)\]"'，。；！？]+)/g;
+  while ((m = rawUrlRe.exec(text)) !== null) {
+    const url = m[1].replace(TRAILING_PUNCT_RE, "");
+    if (HIGH_VALUE_OUTLINK_RE.test(url) && !seen.has(url)) {
+      seen.add(url);
+      matches.push({ label: "", url });
+    }
+  }
+  return matches;
+}
+

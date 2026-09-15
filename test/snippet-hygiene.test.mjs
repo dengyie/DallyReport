@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sanitizeSnippet, clarifySnippet } from "../src/snippet-hygiene.mjs";
+import { sanitizeSnippet, clarifySnippet, NEGATIVE_COMMUNITY_RE, extractOutlinks, HIGH_VALUE_OUTLINK_RE } from "../src/snippet-hygiene.mjs";
 
 // 修复 sanitizeSnippet 测试（输入是干净的 prose，不是空字符串）
 test("sanitizeSnippet: strips 'As an AI language model' disclaimers", () => {
@@ -114,4 +114,56 @@ test("clarifySnippet: respects a small maxChars cap when rebuilding", () => {
   assert.ok(out.length <= 40, `expected <=40 chars, got ${out.length}`);
   // Still begins with title-like readable text (truncated).
   assert.match(out, /长标题/);
+});
+// ── 9/15 review 补测：负向社区过滤 + 权威出链提取（P1/P2 重构直接锁行为）──
+
+test("NEGATIVE_COMMUNITY_RE: 交易/拼车/代充/区域价噪声命中，正常 AI 新闻零误杀", () => {
+  const noise = [
+    "出号 ChatGPT Plus 年付 低价",
+    "收 Google 账号 有偿",
+    "求车 Gemini Advanced 拼车",
+    "土耳其 里拉区 订阅攻略",
+    "Claude 额度重置了 喜报",
+    "3出 中转站 余额",
+    "代充 API 接码 注册送",
+  ];
+  for (const t of noise) assert.ok(NEGATIVE_COMMUNITY_RE.test(t), `应命中噪声: ${t}`);
+  const news = [
+    "Anthropic 发布 Claude 4.5，编程能力提升 30%",
+    "OpenAI 开源新模型，推理成本降一半",
+    "vLLM v0.9 支持 FP8 量化推理",
+    "DeepSeek 新版 API 降价，开发者欢迎",
+    "模型评测：拼车功能上线企业版", // 含"拼车"但语境为产品功能——接受保守误杀（论坛信源宁可少收）
+  ];
+  // 前四条必须不命中；第五条含噪声词，命中也属设计内（宁误杀不放过论坛交易帖）
+  for (const t of news.slice(0, 4)) assert.ok(!NEGATIVE_COMMUNITY_RE.test(t), `不应误杀: ${t}`);
+});
+
+test("extractOutlinks: markdown 链接与裸 URL 提取，非权威域名被过滤，去重保序", () => {
+  const text = [
+    "看这个 [vLLM PR](https://github.com/vllm-project/vllm/pull/1234) 和裸链 https://arxiv.org/abs/2608.11274。",
+    "广告 https://example.com/somepage 不算；重复合并 https://github.com/vllm-project/vllm/pull/1234 去重。",
+  ].join("\n");
+  const out = extractOutlinks(text);
+  assert.deepEqual(out.map(o => o.url), [
+    "https://github.com/vllm-project/vllm/pull/1234",
+    "https://arxiv.org/abs/2608.11274",
+  ]);
+  assert.equal(out[0].label, "vLLM PR");
+  assert.equal(out[1].label, "");
+});
+
+test("extractOutlinks: 空输入/无出链 → 空数组；句尾标点不粘在 URL 上", () => {
+  assert.deepEqual(extractOutlinks(""), []);
+  assert.deepEqual(extractOutlinks(null), []);
+  assert.deepEqual(extractOutlinks("纯讨论无链接"), []);
+  const out = extractOutlinks("发布于 https://openai.com/index/gpt-5.");
+  assert.equal(out[0].url, "https://openai.com/index/gpt-5");
+});
+
+test("HIGH_VALUE_OUTLINK_RE: 仓库子路径/版本号/官网文章可完整匹配", () => {
+  assert.match("https://github.com/a/b/pull/9", HIGH_VALUE_OUTLINK_RE);
+  assert.match("https://arxiv.org/pdf/2608.11274v2", HIGH_VALUE_OUTLINK_RE);
+  assert.match("https://www.anthropic.com/news/claude", HIGH_VALUE_OUTLINK_RE);
+  assert.doesNotMatch("https://linux.do/t/2830124", HIGH_VALUE_OUTLINK_RE);
 });

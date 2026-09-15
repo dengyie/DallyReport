@@ -22,7 +22,9 @@ export const DEFAULT_MAX_CHARS = 12000
 export const LOCK_MAX = 3
 export const LOCK_STALE_MS = 60000
 export const LOCK_POLL_MS = 400
-export const LOCK_TIMEOUT_MS = 10000
+// 必须盖住一次完整读页（开标签 requestTimeoutMs + 轮询 pollMaxMs）。Fetch 批 6、锁上限 3：
+// 后 3 个代理要能等到前 3 个 finally 放锁，而不是 10s 就 lock_timeout 回落 WebFetch。
+export const LOCK_TIMEOUT_MS = CDP_DEFAULTS.requestTimeoutMs + CDP_DEFAULTS.pollMaxMs
 
 export const defaultLockDir = () => path.join(os.homedir(), '.ai-daily', 'cdp-locks')
 
@@ -50,16 +52,21 @@ export async function acquireLock(opts = {}) {
         if (now() - st.mtimeMs > staleMs) { try { io.unlinkSync(fp) } catch { /* raced */ } }
       } catch { /* raced */ }
     }
-    const live = (() => {
-      try { return io.readdirSync(dir).filter(f => f.endsWith('.lock')) } catch { return [] }
-    })()
-    if (live.length < max) {
-      const fp = path.join(dir, 'lock-' + process.pid + '-' + Math.random().toString(36).slice(2, 8) + '.lock')
+    // 固定槽 lock-0.lock … lock-(max-1).lock + wx：随机文件名的 wx 挡不住
+    // 「先数 live 再写新名」超发。槽位满则全部 EEXIST，进入等待。
+    let got = null
+    for (let i = 0; i < max; i++) {
+      const fp = path.join(dir, 'lock-' + i + '.lock')
       try {
-        io.writeFileSync(fp, String(now()))
-        return fp
-      } catch (e) { throw new Error('lock write: ' + (e && e.message)) }
+        io.writeFileSync(fp, String(now()), { flag: 'wx' })
+        got = fp
+        break
+      } catch (e) {
+        if (e && e.code === 'EEXIST') continue
+        throw new Error('lock write: ' + (e && e.message))
+      }
     }
+    if (got) return got
     if (now() - t0 > timeoutMs) throw new Error('lock_timeout（并发临时标签已达上限 ' + max + '，等待 ' + Math.round(timeoutMs / 1000) + 's 未释放）')
     await sleep(pollMs)
   }

@@ -165,12 +165,15 @@ export async function aiNewsSection(
   const generalSources = result?.sources?.extra?.length
     ? result.sources.extra
     : result?.sources?.merged || [];
-  // Community first (linux.do → nodeseek → v2ex) ahead of general extras) so
-  // synthesis sees the same-day forum signal; de-dupe by URL.
-  const merged = mergeSourcesPreferLinuxDo(linuxdoSources, generalSources, {
+  // Primary hard sources (daily HN/36kr/arXiv + general search results) get the bulk of the budget.
+  // Community sources (linux.do, nodeseek, v2ex) provide bounded forum signals (strictly capped & denoised).
+  const primarySources = [...(dailySources || []), ...(generalSources || [])];
+  const communitySources = [...(nodeseekSources || []), ...(v2exSources || [])];
+  const merged = mergeSourcesPreferLinuxDo(linuxdoSources, primarySources, {
     maxTotal: config.sourceMaxTotal ?? 18,
-    linuxdoMaxTotal: config.linuxdoMaxSources,
-    extraCommunitySources: [...(nodeseekSources || []), ...(v2exSources || []), ...(dailySources || [])],
+    linuxdoMaxTotal: config.linuxdoMaxSources ?? 4,
+    extraCommunitySources: communitySources,
+    extraCommunityMaxTotal: 3,
   });
   // Semantic de-dup + title normalization: fold same-event posts (e.g. the 8
   // "quota reset" threads on a reset day) into one representative card with a

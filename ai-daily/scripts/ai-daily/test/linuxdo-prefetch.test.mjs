@@ -12,6 +12,8 @@ import { spawnSync } from 'node:child_process'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PREFETCH = 'file://' + path.join(HERE, '../linuxdo-prefetch.mjs')
+// cdp-core 用绝对 file:// URL import——相对 './scripts/...' 依赖 CWD（从仓根/ai-daily 根跑行为不同）。
+const CDP_CORE = 'file://' + path.join(HERE, '../cdp-core.mjs')
 
 // 成功 mock 时每条紧接页/深帖返回的 body。注意 linuxdo 分页会逐页 readBodyText，
 // mock 不改页会全部返回同一 body，导致 topics 累积 = maxPages × 每页条数。
@@ -26,7 +28,7 @@ const MOCK_BODY = JSON.stringify({ topic_list: { topics: [
 function runCli(args, { mockCdp = false } = {}) {
   const argsJson = JSON.stringify(args)
   const mockSetup = mockCdp ? `
-    const { CDP_DEFAULTS: LD } = await import('./scripts/ai-daily/cdp-core.mjs')
+    const { CDP_DEFAULTS: LD } = await import('${CDP_CORE}')
     LD.pollIntervalMs = 1
     LD.requestTimeoutMs = 500
     LD.pollMaxMs = 1000
@@ -164,4 +166,20 @@ test('CLI：--help → exit 0，stdout 为用法说明', () => {
   const res = runCli(['--help'])
   assert.equal(res.code, 0, 'help 应 exit 0')
   assert.match(res.stdout, /用法: node linuxdo-prefetch/, 'help 内容在 stdout')
+})
+
+test('filterLinuxdoPosts：丢空 snippet、丢羊毛/重置标题，保留有正文的新闻', async () => {
+  const { filterLinuxdoPosts } = await import('../linuxdo-prefetch.mjs')
+  const posts = [
+    { id: 1, title: '喜报！！20X已重置，刚刚蹬完！！', url: 'https://linux.do/t/1', date: '2026-09-12', snippet: '刚重置完' },
+    { id: 2, title: '免费领7天百度网盘SVIP', url: 'https://linux.do/t/2', date: '2026-09-12', snippet: '' },
+    { id: 3, title: 'Tibo 圣人又要按Reset了吗?', url: 'https://linux.do/t/3', date: '2026-09-12', snippet: '重置卡' },
+    { id: 4, title: 'pnpm 12.4 更新 | 现已支持 rust crate', url: 'https://linux.do/t/4', date: '2026-09-12', snippet: 'pnpm 现支持 rust 与 python 包' },
+    { id: 5, title: 'DeepSeek API 文档更新：v4.1f 发布', url: 'https://linux.do/t/5', date: '2026-09-12', snippet: 'v4.1f 与 v4p 文档合订' },
+    { id: 6, title: '所有付费用户已经重置 - Tibo', url: 'https://linux.do/t/6', date: '2026-09-12', snippet: '付费用户已重置' },
+  ]
+  const kept = filterLinuxdoPosts(posts, 24)
+  assert.deepEqual(kept.map(p => p.id), [4, 5], '空摘要与重置/羊毛/喜报/蹬完标题不得进预抓配额')
+  assert.equal(filterLinuxdoPosts(posts, 1).length, 1, '过滤后再截断 maxSources')
+  assert.deepEqual(filterLinuxdoPosts(posts.filter(p => p.id <= 3), 24), [], '全是噪声时返回空数组，由上层当 empty_posts')
 })

@@ -76,6 +76,22 @@ test('mintLinuxdoSource：有 snippet 铸 forum claim，形状对齐 Fetch 产�
   assert.ok(!src.isMajorOut && !c.isMajorOut, 'mint 不得标 isMajorOut')
 })
 
+test('mintLinuxdoSource：包含权威外链时提权并解引用至 sourceUrl', () => {
+  const src = mintLinuxdoSource({
+    id: 2830124,
+    title: 'vLLM 新增 FP8 支持',
+    url: 'https://linux.do/t/2830124',
+    date: '2026-08-31',
+    snippet: '社区分享：vLLM 最新 PR 合并 [出链: https://github.com/vllm-project/vllm/pull/1234]',
+    likeCount: 5,
+  }, '2026-09-01')
+  assert.ok(src)
+  assert.equal(src.sourceQuality, 'primary')
+  assert.equal(src.claims[0].sourceUrl, 'https://github.com/vllm-project/vllm/pull/1234')
+  assert.equal(src.claims[0].sourceQuality, 'primary')
+  assert.equal(src.claims[0].quote, '社区分享：vLLM 最新 PR 合并', '提权时 quote 剥掉机器追加的 [出链:] 后缀（来源已换成外链页）')
+})
+
 test('mintLinuxdoSource：空 snippet / 缺字段 → null（不造空 claim）', () => {
   assert.equal(mintLinuxdoSource({ title: 'x', url: 'https://linux.do/t/1', snippet: '' }, '2026-09-01'), null)
   assert.equal(mintLinuxdoSource({ title: 'x', url: 'https://linux.do/t/1', snippet: '   ' }, '2026-09-01'), null)

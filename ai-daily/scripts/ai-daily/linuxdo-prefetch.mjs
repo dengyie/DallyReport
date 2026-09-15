@@ -21,8 +21,33 @@ import { isCliMain } from './cli-main.mjs'
 /** 默认 cdp host（与 linuxdo.mjs CDP_DEFAULTS.cdpHost 一致）。 */
 export const DEFAULT_CDP_HOST = CDP_DEFAULTS.cdpHost
 
-/** 默认 --max-sources 配额（与模板 LINUXDO_MAX_SOURCES 默认一致）。 */
-export const DEFAULT_MAX_SOURCES = 24
+/** 默认 --max-sources 配额（设为 8，避免论坛噪声挤占主板块抓取配额）。 */
+export const DEFAULT_MAX_SOURCES = 8
+
+/** 09-13 预抓噪声：空 snippet 铸不进 mint；重置/羊毛/喜报/蹬完/买号/拼车/代充等标题核查会 0-2。 */
+// 账号交易形态：动词后可隔 0-14 字再接「号/账号」（「收Google账号」「出ChatGPT Plus 账号」隔字/带英文不漏）。
+// 与 DallyReport/src/snippet-hygiene.mjs 的 NEGATIVE_COMMUNITY_RE 账号交易段同源（linuxdo 侧多论坛热词）。
+export const LINUXDO_NOISE_TITLE =
+  /(?:出|收|买|卖|求购|出售|转让).{0,14}(?:号|账号)|(?:号|账号).{0,4}(?:出|收|买|卖)|\b\d+出\b|求车|人找车|车找人|车位|拼车|合租|代充|余额|挂号|抽奖|降智|封号|被封|土区|日区|美区|里拉|阿根廷|美运|低价订阅|怎么买|接码|退款|额度重置|鉴别渠道|收鸡|出鸡|溢价|邀请码|纯手工|黑五|秒杀|中转站|注册送|求个.*车|本质是个快捷方式|勇闯|重置|羊毛|喜报|蹬完|免费领|reset/i
+
+/**
+ * 过滤预抓帖：丢空摘要、图片元数据、噪声交易标题，再按 maxSources 截断。
+ * 全噪声时返回 []，由 prefetchLinuxDo 当 empty_posts 失败（诚实降级，不把羊毛当新闻）。
+ */
+export function filterLinuxdoPosts(posts, maxSources = DEFAULT_MAX_SOURCES) {
+  const cap = typeof maxSources === 'number' && maxSources > 0 ? maxSources : DEFAULT_MAX_SOURCES
+  const kept = []
+  for (const p of posts || []) {
+    const snip = String(p && p.snippet || '').trim()
+    if (!snip) continue
+    // 过滤纯图片附件/元数据（如 "1000010515.jpg ... 97.4 KB"）
+    if (/^[\s\d_.-]+\.(jpg|jpeg|png|webp|gif)/i.test(snip)) continue
+    if (LINUXDO_NOISE_TITLE.test(String(p.title || ''))) continue
+    kept.push(p)
+    if (kept.length >= cap) break
+  }
+  return kept
+}
 
 /**
  * 解析 CLI 参数。未知参数/非法值 → throw（main 里 catch 后以非零退出）。
@@ -67,14 +92,21 @@ export async function prefetchLinuxDo(opts = {}) {
     e.linuxdoResult = ld
     throw e
   }
-  // 可序列化成功形状：posts（配额截断）+ 元信息，供 Workflow linuxdoPrefetched 消费。
+  // 可序列化成功形状：posts（噪声过滤后再配额截断）+ 元信息，供 Workflow linuxdoPrefetched 消费。
+  const mapped = (ld.posts || []).map(p => ({
+    id: p.id, title: p.title, url: p.url, date: p.date || '', snippet: p.snippet || '', likeCount: p.likeCount || 0,
+  }))
+  const posts = filterLinuxdoPosts(mapped, maxSources)
+  if (!posts.length) {
+    const e = new Error('linuxdo-prefetch 未成功: empty_posts')
+    e.linuxdoResult = { ok: false, reason: 'empty_posts', topics: ld.topics || 0 }
+    throw e
+  }
   return {
     ok: true,
     host,
     topics: ld.topics || 0,
-    posts: (ld.posts || []).slice(0, maxSources).map(p => ({
-      id: p.id, title: p.title, url: p.url, date: p.date || '', snippet: p.snippet || '', likeCount: p.likeCount || 0,
-    })),
+    posts,
   }
 }
 

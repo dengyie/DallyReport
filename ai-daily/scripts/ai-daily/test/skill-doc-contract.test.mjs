@@ -93,3 +93,12 @@ test('SKILL.md: 阶梯仅 report+verify，旗标可查，旧「全链路勿覆�
   assert.ok(!SKILL.includes('本期全链路统一 deepseek-v4-flash'), '旧「全链路统一」措辞必须消失')
   assert.ok(!SKILL.includes('勿覆盖模型。'), '旧「勿覆盖模型」禁令必须改写（阶梯要传 model: m）')
 })
+
+test('SKILL.md：步骤 4 示例 JSON 不得写 reportedLedger:[]（空数组 = ledger_unavailable fail-open）', () => {
+  const jsonStart = SKILL.indexOf('```json')
+  const jsonEnd = SKILL.indexOf('```', jsonStart + 6)
+  assert.ok(jsonStart >= 0 && jsonEnd > jsonStart, '步骤 4 有 JSON 示例块')
+  const example = SKILL.slice(jsonStart, jsonEnd)
+  assert.doesNotMatch(example, /"reportedLedger"\s*:\s*\[\s*\]/, '示例不得教人传空数组关掉账本；存在则 Read 后传非空')
+  assert.match(SKILL, /空数组.*ledger_unavailable|ledger_unavailable.*空数组/, '文字须写明空数组与不传等价')
+})

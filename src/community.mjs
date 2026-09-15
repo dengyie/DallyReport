@@ -14,7 +14,7 @@
 
 import path from "node:path";
 import { runFetch } from "./grok-cli.mjs";
-import { sanitizeSnippet, isInjectionOnlySource } from "./snippet-hygiene.mjs";
+import { sanitizeSnippet, isInjectionOnlySource, NEGATIVE_COMMUNITY_RE } from "./snippet-hygiene.mjs";
 
 // Shared AI-keyword gate for the community collectors. Kept broad enough for
 // Chinese + English model names and tooling chatter across L 站 / NodeSeek / V2EX.
@@ -35,6 +35,7 @@ function cleanTitle(raw) {
 /** True if a topic title looks like AI/LLM news worth putting in the daily report. */
 export function isAiRelatedTopic(title, { exclude = null } = {}) {
   if (!title) return false;
+  if (NEGATIVE_COMMUNITY_RE.test(title)) return false;
   if (exclude && exclude.test(title)) return false;
   return AI_TITLE_RE.test(title);
 }

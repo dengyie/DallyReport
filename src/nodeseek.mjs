@@ -10,7 +10,7 @@
 // AI-related titles and drop VPS-trade noise (NodeSeek is host/GPU heavy).
 
 import { fetchCommunitySources } from "./community.mjs";
-import { sanitizeSnippet } from "./snippet-hygiene.mjs";
+import { sanitizeSnippet, extractOutlinks } from "./snippet-hygiene.mjs";
 
 export const DEFAULT_LIST_URLS = [
   "https://www.nodeseek.com/",
@@ -52,6 +52,7 @@ export function parseNodeSeekTopics(text) {
 // strip). Exported for unit tests.
 export function snippetFromNodeSeekTopicText(text, title, maxChars = 500) {
   if (!text) return "";
+  const outlinks = extractOutlinks(text);
   let body = String(text);
   body = body
     .replace(/!\[[^\]]*\]\([^)]*\)/g, "") // avatars / stickers
@@ -79,7 +80,11 @@ export function snippetFromNodeSeekTopicText(text, title, maxChars = 500) {
   );
   const pick = candidates[0] || paras[0] || "";
   if (!pick) return "";
-  return sanitizeSnippet(pick, { maxChars });
+  const cleaned = sanitizeSnippet(pick, { maxChars });
+  if (outlinks.length > 0 && !cleaned.includes(outlinks[0].url)) {
+    return `${cleaned} [出链: ${outlinks[0].url}]`;
+  }
+  return cleaned;
 }
 
 /**
