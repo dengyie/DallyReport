@@ -20,7 +20,7 @@ export const harvestPrompt = (g, ctx) =>
     '   该 feed 抓取失败/空源/全部无关 → 跳过它继续下一个，不要中断整组。'
   ).join('\n') + '\n' +
   '汇总：entries/recent 是**全部 feed 的合集**（每条带各自 feed 标签）。所有 feed 均失败才置 failed:true；部分失败则继续正常返回其余。\n' +
-  '纪律：严格使用命令里给定的 --max-chars，禁止改大或去掉；禁止传递 --full-path（防止泄露完整文件路径）；禁止读取 .cache/grok-search/outputs/ 下的任何完整文件；每个 feed 只抓一次，不反复重抓；不要逐条打开链接。\n\nStructured output only.'
+  '纪律：严格使用命令里给定的 --max-chars，禁止改大或去掉；禁止传递 --full-path（防止泄露完整文件路径）；禁止读取 .cache/grok-search/outputs/ 下的任何完整文件；每个 feed 只抓一次，不反复重抓；不要逐条打开链接。**禁止启动/打开任何独立浏览器**（Playwright/`mcp__playwright__*`/新 Chrome 实例）——浏览器仅可经 9222 `cdp-fetch.mjs`（fetch 阶段职责），本阶段一律用给定脚本。\n\nStructured output only.'
 
 // discoverPrompt 需要 BOARDS/digestForBoard/digestForFeeds（编排层函数），通过 ctx 传入：
 // ctx.BOARDS / ctx.digestForBoard / ctx.digestForFeeds 由 workflow 编排层提供。
@@ -45,7 +45,7 @@ export const discoverPrompt = (g, ctx) => {
     '4) 只保留事件日期落在 [' + ctx.WFROM + ', ' + (ctx.WTO || ctx.DATE) + '] 内的；优先一手官方源；跳过无日期/明显陈旧/SEO/内容农场/常青帮助文档页。URL 写完整。\n' +
     '最多返回 ' + (multi ? 10 : ctx.MAX_URLS_PER_BOARD) + ' 条 url/title/found_via/date' + (multi ? ' + board（必填，本组板块之一）' : '') + '。' + (bds[0].key === 'labs' ? 'labs 板块逐家核厂商——确认窗口内无任何动态的，把公司名放 noNews。' : '') +
     '5) 若某公司/主题本窗口无动态、但近 2 周内有重大发布/官宣/可信事实（如 DeepSeek V4 开源、Grok 4.6 发布、DeepSeek Harness 这类**行业客观公认事实**），将其列入 majorOutOfWindow（name/date/note），供日报正文以「[窗口外·重大]」标签呈现。注意：majorOutOfWindow 只放**客观事实**（非传闻、非推测），且必须是**行业里程碑级**——如果是普通更新或次要动态，放 nearWindow 供窗口外参考节引用即可。若该事实有可溯源的官方/一手 URL：先花 1 次搜索/快速确认找到它并**写入 `url` 字段**——无 URL 的重大项在正文与跨天去重里都只能靠模糊匹配，引用质量大打折扣；确实无法溯源（纯行业共识、无任何官方页/权威报道页）才省略 url。' +
-    '6)【预算·硬性纪律】X 搜索本组 ≤' + g.xBudget + ' 次，一家/一个主题一次尝试、无果即放过、不反复深挖；WebSearch 本组 ≤' + ctx.WEB_BUDGET_PER + ' 次（各组独立计数，组间无法协调、无共享账本），不可用即跳过、勿失败。**发现阶段禁止运行 fetch.js**，也禁止 WebFetch 连续深挖单公司官网新闻页（官网正文抓取是 fetch 阶段职责，发现阶段只需给出 URL 候选；官网首页一次快速确认至多 1 次）。输出只保留用于抓取/核查的高置信候选，超过上限按重要性截断。' +
+    '6)【预算·硬性纪律】X 搜索本组 ≤' + g.xBudget + ' 次，一家/一个主题一次尝试、无果即放过、不反复深挖；WebSearch 本组 ≤' + ctx.WEB_BUDGET_PER + ' 次（各组独立计数，组间无法协调、无共享账本），不可用即跳过、勿失败。**发现阶段禁止运行 fetch.js**，也禁止 WebFetch 连续深挖单公司官网新闻页（官网正文抓取是 fetch 阶段职责，发现阶段只需给出 URL 候选；官网首页一次快速确认至多 1 次）。输出只保留用于抓取/核查的高置信候选，超过上限按重要性截断。**禁止启动/打开任何独立浏览器**（Playwright/`mcp__playwright__*`/新 Chrome 实例）——浏览器仅可经 9222 `cdp-fetch.mjs`（fetch 阶段职责），本阶段一律用给定脚本/WebSearch。' +
     'degraded 语义：仅当本（组/板块）的【主源/官方通道】整体一无所获（摘要 + X 搜索均返回零个可用 URL）时才置 true；个别补充源（GitHub trending、WebSearch、某一 X 搜索等）失败不算 degraded，正常返回即可。尽力用可用渠道，不要整任务失败。' +
     '\n\n⚠️ 最终收口（呼应开头条目）：执行完上述步骤后，立即调用 StructuredOutput 工具返回结构化对象。**严禁 end_turn 返回纯文本**——这是最常见的失败模式（思考里说"我来调用 StructuredOutput"却以文字结束）。调工具即结束，勿在工具调用前/后铺垫文字。Structured output only.'
 }
@@ -75,6 +75,11 @@ export const fetchPrompt = (src, ctx) => {
   '## Task\n' +
   step1 +
   '⚠️ **禁止截图/图片输入**：本模型仅支持文本输入。禁止使用 Playwright 截图、禁止用图片方式读页面——一律文本抓取。传入图片/screenshot 会直接导致 400 模型报错（Model only supports text input）。\n' +
+  // 9/19 实证收紧（qbitai empty_body 后代理逃逸 playwright-mcp 开独立 Chrome）：浏览器纪律门控感知——
+  // 开闸（headless）点名 9222/cdp-fetch 唯一通道；关闸（手动默认）不出现 cdp-fetch 字样（既有契约）。
+  ((ctx && ctx.webFetchViaCdp)
+    ? '⚠️ **浏览器唯一通道纪律（最高优先级）**：**禁止启动/打开任何独立浏览器进程**——禁止 Playwright/Puppeteer（**含 `mcp__playwright__*` 全部工具**）、禁止打开新 Chrome/Chromium 实例、禁止 `open -a` 任何浏览器。浏览器抓取**只允许** 9222 现有登录态 Chrome，且仅可经 `cdp-fetch.mjs` 间接使用（临时标签开/读/关由该 CLI 收敛，你不得自己开标签）。9222 通道失败 → **只能回落 WebFetch 文本抓取**，不得改用任何浏览器工具/浏览器 MCP 兜底；两者都失败 → claims:[] 且 sourceQuality:"unreliable"。\n'
+    : '⚠️ **浏览器唯一通道纪律（最高优先级）**：**禁止启动/打开任何独立浏览器**（Playwright/`mcp__playwright__*`/新 Chrome 实例/`open -a`）——本模式未启用 9222 通道，抓取一律 WebFetch 文本抓取；抓取失败 → claims:[] 且 sourceQuality:"unreliable"，不得改用任何浏览器工具兜底。\n') +
   indexNote +
   '2. 判定来源质量：primary(官方/一手) / secondary(主流媒体报道) / blog / forum / unreliable。\n' +
   '3. 提取 2-3 条与本板块日报问题相关、可核实、具体的声明（非空泛结论）；每条必须带原文引语 quote（**逐字抄录支撑该声明的完整原句，≤220 字，且必须包含声明中的全部具体细节——日期/数字/机构名/对比结论**，只截 40 字短句会导致核查票无据可依而误否决）、重要性 central/supporting/tangential；若实际引用页与上方 URL 不同（索引页选中的文章页），每条 claim 另带字段 sourceUrl=该文章真实 URL。\n' +

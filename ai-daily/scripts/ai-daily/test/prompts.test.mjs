@@ -152,3 +152,18 @@ test('reportPrompt §4：status 改为照抄素材行 Status（编排层烘焙�
   assert.match(PROMPTS, /status：核查状态，\*\*直接照抄素材行标注的 `Status:`\*\*/, 'status 烘焙契约（9/19 F5）')
   assert.match(PROMPTS, /禁止自行推导或改写/, '禁令在场')
 })
+
+// ─── 9/19 烟测前收紧：浏览器唯一通道纪律（9222 逃逸封堵）───
+test('fetchPrompt：禁止启动独立浏览器——mcp__playwright__*/新 Chrome 实例全禁，失败只能回落 WebFetch', () => {
+  const ctx = { WINDOW_LABEL: 'w', webFetchViaCdp: true, CDP_FETCH_CLI: 'cdp-fetch.mjs' }
+  const s = fetchPrompt({ url: 'https://x/1', title: 't', board: 'b', found_via: 'discover' }, ctx)
+  assert.match(s, /禁止启动\/打开任何独立浏览器进程/, '浏览器唯一通道纪律在场（9/19 实证：qbitai empty_body 后代理逃逸 playwright-mcp 开独立 Chrome）')
+  assert.match(s, /`mcp__playwright__\*` 全部工具/, '点名封 MCP 逃逸通道')
+  assert.match(s, /只能回落 WebFetch/, 'CDP 失败唯一兜底 = WebFetch 文本抓取')
+  assert.match(s, /不得改用任何浏览器工具/, '禁浏览器工具兜底')
+})
+
+test('harvest/discoverPrompt：浏览器封口纪律在场（工具清单对全体代理可见）', () => {
+  assert.match(PROMPTS, /每个 feed 只抓一次，不反复重抓；不要逐条打开链接。\*\*禁止启动\/打开任何独立浏览器\*\*/, 'harvest 纪律行封口')
+  assert.ok((PROMPTS.match(/mcp__playwright__\*/g) || []).length >= 3, '三个阶段 prompt 均点名 mcp__playwright__* 逃逸通道')
+})
