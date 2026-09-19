@@ -2853,6 +2853,8 @@ if (ladderExhaustedStages.size) degradedFlags.push('ladder_exhausted:' + [...lad
 // 9/19 F2/F1 可见性：索引页引用回落与外部抽查未完成都必须在产物里可见。
 if (indexCitationTotal > 0) degradedFlags.push('index_page_citation:' + indexCitationTotal)
 if (externalStats.unavailable > 0) degradedFlags.push('external_check_unavailable:' + externalStats.unavailable)
+// 9/19 烟测实证：report 幻觉引用被确定性过滤的计数必须可见。
+if (reportSourceHallucinated > 0) degradedFlags.push('report_source_hallucination:' + reportSourceHallucinated)
 // 9/13 跨天账本：无账本 → 跨天去重本轮关闭，如实上报（fail-open 不阻断成稿）。
 if (!REPORTED_LEDGER) degradedFlags.push('ledger_unavailable')
 // 9/01 方案 D：合成入口与总墙钟脱钩后，reportErr 只剩「代理真失败」一条路径
@@ -2866,6 +2868,27 @@ const confirmedOut = confirmed.map(c => ({ claim: c.claim, quote: c.quote, sourc
 const refutedOut = killed.map(c => ({ claim: c.claim, source: c.sourceUrl, vote: (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, erroredCount: c.erroredCount || 0 }))
 const unverifiedOut = unverified.map(c => ({ claim: c.claim, source: c.sourceUrl }))
 const outOfWindowOut = outOfWindow.map(c => ({ claim: c.claim, source: c.sourceUrl, date: c.publishDate || c.date, vote: (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, erroredCount: c.erroredCount || 0 }))
+// ─── 9/19 烟测实证修复：report 幻觉引用确定性过滤 ───
+// 烟测（wf_ee8d35c3-925）实证：report 模型可能在 items.sources 编造 URL（`mdc-ov/...`、
+// `linuxdo.ai/api2/... not valid`），render 的 buildCitationMap 照单编号 → 参考来源出现幻觉链接。
+// 确定性防线：sources 只保留 confirmed 真实 sourceUrl 集合（normURL 对比，major-out 的
+// `(多源公认)` 也在集合内）命中的；全被丢弃的 item sources 置空（render 诚实标注无单一链接）。
+// 丢弃计数进 degraded 旗标 `report_source_hallucination:N` + meta 同名账目，供溯源与观察。
+let reportSourceHallucinated = 0
+if (report && Array.isArray(report.sections)) {
+  const _knownSourceSet = new Set(confirmed.map(c => normURL(c.sourceUrl)))
+  for (const sec of report.sections) {
+    for (const it of (sec && sec.items) || []) {
+      if (!Array.isArray(it.sources)) continue
+      const known = it.sources.filter(u => _knownSourceSet.has(normURL(u)))
+      if (known.length < it.sources.length) {
+        reportSourceHallucinated += it.sources.length - known.length
+        it.sources = known
+      }
+    }
+  }
+  if (reportSourceHallucinated) log('REPORT-SOURCE-FILTER 幻觉引用丢弃 ' + reportSourceHallucinated + ' 条（不在 confirmed sourceUrl 集合内）')
+}
 const md = report
   ? renderMarkdown({ date: DATE, window: WINDOW_LABEL, report, coverage, windowMisses, degraded: degradedFlags, meta: {
       date: DATE, window: WINDOW_LABEL,
@@ -2911,6 +2934,7 @@ const metaJson = JSON.stringify({
   // 9/19 F1 外部抽查账目：targets=应抽查的 forum/blog 存活 claim 数；corroborated=独立佐证；
   // refuted=被佐证票否决；unavailable=票不可用（status 已烘焙为未核查，degraded 旗标可见）。
   external_check: externalStats,
+  report_source_hallucination: reportSourceHallucinated,
   degraded: degradedFlags, report_error: reportErr,
   // 8/31 P1：墙钟标定与断路器的账。realm 唯一时钟是 tick 累加器，饱和下只低估——
   // wallclock_raw_s（累加器原始读数）与 wallclock_calibrated_s（标定后下界）之差即被吞掉的时间，

@@ -474,3 +474,10 @@ test('模板：dropped_detail 书账含 linuxdo-outlink 通道', () => {
 test('模板：mint 直铸无日期帖不回退 DATE', () => {
   assert.match(TPL, /mintLinuxdoSource\(t, ''\)/, '显式空回退——归档日期口径诚实')
 })
+
+test('模板：report 幻觉引用确定性过滤（9/19 烟测实证 mdc-ov/linuxdo.ai 编造 URL）', () => {
+  assert.match(TPL, /REPORT-SOURCE-FILTER 幻觉引用丢弃/, '过滤 log 在场')
+  assert.match(TPL, /const _knownSourceSet = new Set\(confirmed\.map\(c => normURL\(c\.sourceUrl\)\)\)/, '白名单 = confirmed 真实 sourceUrl 集（normURL 对比，major-out 的 (多源公认) 也在内）')
+  assert.match(TPL, /it\.sources = known/, 'sources 收敛为命中子集（全丢则置空 → render 诚实标注无单一链接）')
+  assert.match(TPL, /report_source_hallucination/, 'degraded 旗标 + meta 账目在场')
+})
