@@ -452,3 +452,25 @@ test('dedup：prefer 通道含 linuxdo-outlink（出链 fetch 目标与预抓/�
 test('模板：fetch 吞错补 log（F10）——映射异常与代理真实失败可区分', () => {
   assert.match(TPL, /FETCH-ERR ' \+ hostOf\(src\.url\)/, 'catch 分支带诊断 log')
 })
+
+// ─── 9/19 review 修复契约：外部票三态消费 / 预算闸 / 兜底 unavailable / dropped_detail 归因 ───
+
+test('模板：外部票三态走 externalCheckState 纯函数（toolsUnavailable 不再落 corroborated）', () => {
+  assert.match(TPL, /const state = externalCheckState\(r\)/, '三态判定经 schemas.mjs 纯函数')
+  assert.match(TPL, /if \(state === 'unavailable'\) \{ c\.externalCheck = 'unavailable'/, 'unavailable 分支（含模型自报工具不可用）')
+  assert.match(TPL, /if \(state === 'refuted'\)/, 'refuted 分支')
+  assert.ok(!/if \(!r\) \{ c\.externalCheck = 'unavailable'/.test(TPL), '旧的「仅代理失败=unavailable」二分已移除（P2-2 根因）')
+})
+
+test('模板：外部票批间预算闸 + 未投票兜底 unavailable', () => {
+  assert.match(TPL, /BUDGET-BREAK External-check 余批跳过/, 'Verify 死线耗尽不再放行外部票批（roomTo 纯读）')
+  assert.match(TPL, /if \(!c\.externalCheck\) \{ c\.externalCheck = 'unavailable'/, '预算耗尽未轮到的票兜底 unavailable——绝不以 undefined 走进已核查烘焙')
+})
+
+test('模板：dropped_detail 书账含 linuxdo-outlink 通道', () => {
+  assert.match(TPL, /const linuxdoPreferUrls = \(boardURLMap\.get\('linuxdo'\) \|\| \[\]\)\.filter\(u => u\.found_via === 'linuxdo-cdp' \|\| u\.found_via === 'linuxdo-outlink'\)/, '出链丢弃归 linuxdo 桶（不再落 other）')
+})
+
+test('模板：mint 直铸无日期帖不回退 DATE', () => {
+  assert.match(TPL, /mintLinuxdoSource\(t, ''\)/, '显式空回退——归档日期口径诚实')
+})

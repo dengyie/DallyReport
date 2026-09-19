@@ -121,8 +121,7 @@ const WINDOW_LABEL = WFROM && WTO ? WFROM + ' ~ ' + WTO : WTO || DATE
 // 条目被截只剩 1-2 条、digest 空洞。给 arXiv API 源单独放宽：窗口内最近 50 篇的标题/摘要即为此域全部正文，
 // 无 `--full-path` 泄露、无多 feed 依赖。其余普通源仍 12000。
 const feedMaxChars = f => /export\.arxiv\.org\/api\/query/i.test(f.url || f) ? 40000 : 12000
-const WEB_BUDGET_TOTAL = 4
-const WEB_BUDGET_PER = 2
+const WEB_BUDGET_PER = 2  // 9/19 F4：WebSearch 预算改为组内独立计数，无全流水共享上限（WEB_BUDGET_TOTAL 死常量已删）
 
 // ═══ 模块内联区（build.mjs 替换；逻辑真源见 scripts/ai-daily/*.mjs）═══
 // 依赖序与 build.mjs MODULES 一致：url-polyfill 最先（注入 globalThis.URL，workflow realm 无 URL 全局，
@@ -376,7 +375,7 @@ const digestForBoard = board => {
   return digestForFeeds(keys)
 }
 // full prompt ctx：discover 额外依赖 boards 花名册、digest 函数与 web 预算（构造于 digest 就绪后）。
-const ctxP = { ...ctxBase, BOARDS, MAX_URLS_PER_BOARD, digestForBoard, digestForFeeds, WEB_BUDGET_TOTAL, WEB_BUDGET_PER }
+const ctxP = { ...ctxBase, BOARDS, MAX_URLS_PER_BOARD, digestForBoard, digestForFeeds, WEB_BUDGET_PER }
 log('Harvest: ' + HARVEST_GROUPS.length + ' groups over ' + uniqueFeeds.length + ' unique feeds → digests ready（14 并发→' + HARVEST_GROUPS.length + ' 分组串行）')
 
 // ─── Phase Discover ───
@@ -647,10 +646,11 @@ if (REPORTED_LEDGER) {
 let { fetchTargets, dupes, budgetDropped } = allocateFetchBudget(boardURLMap, MAX_FETCH)
 // 8/27 prefer 通道：linuxdo-cdp 与 static-fallback 候选优先占位（预抓/兜底=已投入资源，真实进 Fetch），
 // 其余走轮询公平；MAX_FETCH 仍是硬上限（单板墙量配额经 preferCap=floor(MAX_FETCH×0.5) 封顶）。
-const linuxdoFetched = fetchTargets.filter(t => t.found_via === 'linuxdo-cdp').length
-const linuxdoCdpUrls = (boardURLMap.get('linuxdo') || []).filter(u => u.found_via === 'linuxdo-cdp')
+const linuxdoFetched = fetchTargets.filter(t => t.found_via === 'linuxdo-cdp' || t.found_via === 'linuxdo-outlink').length
+// 9/19 review P3：书账过滤集含出链通道——linuxdo 系（cdp + outlink）被预算丢弃都归 linuxdo_cdp 桶，不再落 other。
+const linuxdoPreferUrls = (boardURLMap.get('linuxdo') || []).filter(u => u.found_via === 'linuxdo-cdp' || u.found_via === 'linuxdo-outlink')
 // 8/27 Task 2 书账：逐类统计被预算丢弃的候选（谁被丢、为什么），供 Dedup 日志与 meta.dropped_detail 复用。
-const linuxdoDropped = budgetDropped.filter(d => linuxdoCdpUrls.some(u => u.url === d.url)).length
+const linuxdoDropped = budgetDropped.filter(d => linuxdoPreferUrls.some(u => u.url === d.url)).length
 const staticUrls = [...boardURLMap.values()].flat().filter(u => u.found_via === 'static-fallback')
 const staticDropped = budgetDropped.filter(d => staticUrls.some(u => u.url === d.url)).length
 const otherDropped = budgetDropped.length - linuxdoDropped - staticDropped
@@ -671,7 +671,7 @@ const extracted = []
   const mintedUrls = new Set()
   for (const t of fetchTargets) {
     if (t.found_via !== 'linuxdo-cdp') continue
-    const minted = mintLinuxdoSource(t, DATE)
+    const minted = mintLinuxdoSource(t, '')  // 9/19 review P3：无日期帖不再回退 DATE（归档口径诚实，同 F3）
     if (!minted) continue
     extracted.push(minted)
     mintedUrls.add(t.url)
@@ -849,23 +849,28 @@ for (const batch of chunkArr(rankedClaims, VERIFY_BATCH)) {
 // ─── 9/19 F1 外部抽查票：forum/blog 存活 claim 的独立佐证 ───
 // 2+1 内部票禁外部搜索（省 token），只做文本自洽判断——「引语整齐但事件不实」的论坛转述/软文
 // 恰好能通关并以「已核查 N-N」肯定态进正文（9/17 实证：网信办条目唯一来源是论坛转帖）。
-// 对 forum/blog 来源的存活 claim 加 1 张允许 WebSearch 的佐证票：
+// 对 forum/blog 来源的存活 claim 加 1 张允许 WebSearch 的佐证票（三态判定 externalCheckState，
+// schemas.mjs——9/19 review P2-2：模型自报 toolsUnavailable 必须走 unavailable，不得落 corroborated）：
 //   否决 → 翻转为 refuted（回到 killed）；佐证 → externalCheck=corroborated；
-//   票不可用 → externalCheck=unavailable（不翻转存活，但 Status 烘焙为「未核查」，不冒充已核查）。
+//   不可用（代理失败 / toolsUnavailable / 预算耗尽未轮到）→ externalCheck=unavailable
+//   （不翻转存活，但 Status 烘焙为「未核查」，不冒充已核查）。
 const externalStats = { targets: 0, corroborated: 0, refuted: 0, unavailable: 0 }
 {
   const extTargets = voted.filter(c => c && c.survives && !c.isMajorOut && (c.sourceQuality === 'forum' || c.sourceQuality === 'blog'))
   externalStats.targets = extTargets.length
   if (extTargets.length) log('EXTERNAL-CHECK forum/blog 存活 claim 外部抽查 ' + extTargets.length + ' 条（独立佐证票 ×1，允许 WebSearch）')
   for (const batch of chunkArr(extTargets, VERIFY_BATCH)) {
+    // 9/19 review P3：批间预算闸（纯读不记账）——Verify 死线耗尽不再放行新外部票批，余票走下方兜底 unavailable。
+    if (budgetGate.roomTo('Verify') === 0) { log('BUDGET-BREAK External-check 余批跳过（Verify 死线已耗尽，roomTo=0 纯读停止）'); break }
     const res = await parallel(batch.map(c => () =>
       safeAgentWithLadder(externalVerifyPrompt(c, ctxP), { label: 'ext:' + (c.claim || '').slice(0, 30), phase: 'Verify', schema: VERDICT_SCHEMA, effort: 'low', timeoutMs: AGENT_TIMEOUT_MS }, MODEL_LADDER, LADDER_BUDGET_MS, verifyLadderT0)
     ))
     res.forEach((r, i) => {
       const c = batch[i]
-      if (!r) { c.externalCheck = 'unavailable'; externalStats.unavailable++; return }
+      const state = externalCheckState(r)
+      if (state === 'unavailable') { c.externalCheck = 'unavailable'; externalStats.unavailable++; return }
       c.verdicts.push(r)
-      if (r.refuted) {
+      if (state === 'refuted') {
         c.refutedCount = (c.refutedCount || 0) + 1
         c.survives = false; c.isRefuted = true; c.externalCheck = 'refuted'
         externalStats.refuted++
@@ -876,6 +881,11 @@ const externalStats = { targets: 0, corroborated: 0, refuted: 0, unavailable: 0 
         log('EXTERNAL-CHECK ✓ 佐证 ' + (c.claim || '').slice(0, 46) + ' — ' + String(r.evidence || '').slice(0, 80))
       }
     })
+  }
+  // 9/19 review P3 兜底：预算耗尽/批间 break 未轮到的票一律 unavailable——绝不让 forum claim
+  // 因「没轮到抽查」而以 undefined externalCheck 走进「已核查」烘焙分支。
+  for (const c of extTargets) {
+    if (!c.externalCheck) { c.externalCheck = 'unavailable'; externalStats.unavailable++ }
   }
 }
 

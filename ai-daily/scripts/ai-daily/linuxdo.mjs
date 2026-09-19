@@ -102,6 +102,7 @@ export function extractHighValueOutlink(snippet) {
 
 // 直铸 forum 源：snippet 是登录态 CDP 实际读到的帖子文本 → claim/quote 同源、可核查。
 // 出链帖不走本函数（编排层已转 fetch 目标）；空 snippet → null，调用方丢弃（不再喂给必 403 的 fetch）。
+// date 参数是显式回退值；调用方传 '' 表示「无日期就留空」（9/19 review：不再伪造调用日）。
 export function mintLinuxdoSource(post, date) {
   if (!post || typeof post !== 'object') return null
   const title = typeof post.title === 'string' ? post.title.trim() : ''

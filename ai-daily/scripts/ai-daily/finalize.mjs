@@ -158,13 +158,18 @@ if (resultPath) {
   const spec = extractPayloads(obj)
   if (outOverride) spec.outDir = outOverride
 
-  // 9/19 F3：记账先行 + 结果注入 meta（ledger_recorded 字段）——旧版记账失败只进 stderr，
-  // meta 无旗标，编排器无从感知「下一轮必然重复成稿」的风险。失败不阻塞产物落盘。
-  // 注：先记账后落盘——若落盘失败，账本多记了本轮条目，但下一轮去重只拦「已报道」候选，
-  // 不会误杀新事件；反向（先落盘后记账失败）才是真风险（重复成稿）。
+  // 9/19 review P2-1 根因回归：**先落盘后记账**。曾短暂改为记账先行——产物写盘失败时账本已含
+  // 当日 confirmed 条目，次日硬过滤会把这些新闻压制到 60 天 prune（比旧行为「次日重复」严重）。
+  // 顺序恢复后：落盘任一失败 → 记账零污染（exit 非零，编排器如实报 ARTIFACT-FAIL）；
+  // 落盘成功 → 记账，失败只告警（旧行为：次日重复、可自愈）。
+  // ledger_recorded 旗标的可见性保留：记账后对**已落盘的 meta 文件**做 tmp+rename 原子 read-modify-write。
   const resolvedOut = path.resolve(expand(spec.outDir))
   const isProd = isProdOutDir(spec.outDir)
   const ledgerPath = ledgerOverride || DEFAULT_LEDGER
+
+  const written = finalizePayloads(spec)
+  for (const fp of written) console.log(`WROTE ${fp} (${fs.statSync(fp).size} bytes)`)
+
   let ledgerStatus = 'skipped'
   if (!isProd && !ledgerOverride) {
     console.log(`LEDGER-SKIP non-production outDir（${resolvedOut}）不在 DallyReport 前缀下；烟测不记账，如需强制用 --ledger`)
@@ -176,20 +181,20 @@ if (resultPath) {
       console.log(`LEDGER-RECORDED ${ledgerPath} total=${total} added=${added}`)
     } catch (e) {
       ledgerStatus = 'failed'
-      console.error(`LEDGER-WARN 记账失败（产物仍将落盘）: ${e && e.message}`)
+      console.error(`LEDGER-WARN 记账失败（产物已落盘不受影响）: ${e && e.message}`)
     }
   }
   try {
-    const metaObj = JSON.parse(spec.payloads.meta)
+    const metaPath = path.join(expand(spec.outDir), `${spec.date}.meta.json`)
+    const metaObj = JSON.parse(fs.readFileSync(metaPath, 'utf8'))
     metaObj.ledger_recorded = ledgerStatus
     metaObj.ledger_path = (!isProd && !ledgerOverride) ? null : ledgerPath
-    spec.payloads.meta = JSON.stringify(metaObj, null, 1)
+    const tmp = metaPath + '.tmp'
+    fs.writeFileSync(tmp, JSON.stringify(metaObj, null, 1))
+    fs.renameSync(tmp, metaPath)
   } catch (e) {
-    console.error(`LEDGER-WARN meta 注入 ledger_recorded 失败（不影响落盘）: ${e && e.message}`)
+    console.error(`LEDGER-WARN meta 回写 ledger_recorded 失败（不影响产物与账本）: ${e && e.message}`)
   }
-
-  const written = finalizePayloads(spec)
-  for (const fp of written) console.log(`WROTE ${fp} (${fs.statSync(fp).size} bytes)`)
 
   // P4: 统一产物交付与高清长图渲染闭环
   if (isProd || ledgerOverride) {

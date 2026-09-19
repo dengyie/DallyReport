@@ -50,7 +50,22 @@ export const VERDICT_SCHEMA = {
     refuted: { type: 'boolean' },
     evidence: { type: 'string' },
     confidence: { enum: ['high', 'medium', 'low'] },
+    // 9/19 P2-2：仅外部抽查票消费——搜索工具不可用/全部失败时置 true（内部票不填，可选字段零影响）。
+    // 没有该字段时「工具不可用」只能靠模型自报文本，编排层无法区分「佐证成功」与「佐证未完成」。
+    toolsUnavailable: { type: 'boolean' },
   },
+}
+
+// 外部抽查票三态判定（9/19 P2-2 纯函数，编排层 template external check 块消费）：
+//   'refuted'      → 独立证据否决（编排层翻转 claim 回 killed）
+//   'unavailable'  → 代理失败（null）或模型自报 toolsUnavailable（Status 烘焙「未核查」，绝不冒充已核查）
+//   'corroborated' → 独立佐证成立
+// 纯函数抽出供 node:test 行为级验证；非对象/异常形状一律按 unavailable（fail-safe，不冒充佐证）。
+export const externalCheckState = v => {
+  if (!v || typeof v !== 'object') return 'unavailable'
+  if (v.refuted === true) return 'refuted'
+  if (v.toolsUnavailable === true) return 'unavailable'
+  return 'corroborated'
 }
 export const REPORT_SCHEMA = {
   type: 'object', required: ['oneLiner', 'execSummary', 'sections', 'caveats', 'openQuestions'],

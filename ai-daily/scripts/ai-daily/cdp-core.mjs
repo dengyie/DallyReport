@@ -12,7 +12,7 @@
 export const CDP_DEFAULTS = {
   cdpHost: '127.0.0.1:9222',
   maxPages: 4,          // news/34.json 分页安全上限（多为 1-3 页）
-  perPageDeep: 3,       // 每页首页 JSON 字段已带 1 段文本摘要，topic 深抓仅少量(3)
+  // perPageDeep 已删（9/19 review：深抓后置重构后零消费方——深抓条数由调用方显式传 deepFetch）
   requestTimeoutMs: 15000,
   pollIntervalMs: 500,
   pollMaxMs: 15000,

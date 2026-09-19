@@ -94,9 +94,25 @@ export async function cdpFetch(opts = {}) {
   const lockIo = opts.lockIo || fs
   const lock = await acquireLock(lockDir ? { dir: lockDir, ...(opts.lockOpts || {}) } : (opts.lockOpts || {}))
   // 持锁心跳（9/19 C3）：定期 touch 锁文件 mtime，陈旧回收只清真死进程。unref 不阻塞进程退出。
+  // 9/19 review Suggestion 加固：读比对写——槽位若被陈旧回收 + 他人接管（本进程事件循环阻塞 >60s
+  // 的残窗），锁文件内容已非本进程创建时的值 → 本 tick 放弃写，绝不覆写他人锁；读取失败（文件消失）
+  // 同样跳过（宁缺勿覆）。读比对与写之间存在微秒级竞窗，suggestion 级加固不做文件锁升级。
+  let hbToken = null
+  try { hbToken = lockIo.readFileSync(lock, 'utf8') } catch { /* raced：本 tick 起放弃心跳 */ }
   const hbMs = opts.heartbeatMs === 0 ? 0 : (typeof opts.heartbeatMs === 'number' ? opts.heartbeatMs : LOCK_HEARTBEAT_MS)
-  const hb = hbMs > 0 ? setInterval(() => { try { lockIo.writeFileSync(lock, String(Date.now())) } catch { /* raced */ } }, hbMs) : null
-  if (hb && typeof hb.unref === 'function') hb.unref()
+  let hb = null
+  if (hbMs > 0 && hbToken !== null) {
+    hb = setInterval(() => {
+      try {
+        const cur = lockIo.readFileSync(lock, 'utf8')
+        if (cur !== hbToken) return  // 槽位已被他人接管——不覆写
+        const next = String(Date.now())
+        lockIo.writeFileSync(lock, next)
+        hbToken = next  // token 链推进：下个 tick 比对的是自己最近一次写
+      } catch { /* raced：跳过本 tick */ }
+    }, hbMs)
+    if (typeof hb.unref === 'function') hb.unref()
+  }
   const retryDelayMs = typeof opts.retryDelayMs === 'number' && opts.retryDelayMs >= 0 ? opts.retryDelayMs : 1000
   try {
     let text = await readBodyTextRaw(host, url)

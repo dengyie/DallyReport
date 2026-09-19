@@ -3,7 +3,7 @@
 // 与 workflow 内逐字节一致（schemas.mjs 是真源，build 剥 export inline 进产物）。改 schema 结构须同步本文件。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { DISCOVER_SCHEMA, HARVEST_SCHEMA, EXTRACT_SCHEMA, VERDICT_SCHEMA, REPORT_SCHEMA } from '../schemas.mjs'
+import { DISCOVER_SCHEMA, HARVEST_SCHEMA, EXTRACT_SCHEMA, VERDICT_SCHEMA, REPORT_SCHEMA, externalCheckState } from '../schemas.mjs'
 
 const ALL = {
   DISCOVER_SCHEMA,
@@ -86,4 +86,23 @@ test('REPORT_SCHEMA：required 五键 + 嵌套 items 结构完整', () => {
   // sources 元素为 string 数组
   assert.equal(itemProps.sources.type, 'array', 'sources 应为数组')
   assert.equal(itemProps.sources.items.type, 'string', 'sources 元素应为 string')
+})
+// ─── 9/19 P2-2：外部抽查票三态判定（行为级）───
+
+test('externalCheckState：refuted / corroborated / unavailable 三态判定', () => {
+  assert.equal(externalCheckState({ refuted: true, evidence: 'e', confidence: 'high' }), 'refuted', '独立证据否决')
+  assert.equal(externalCheckState({ refuted: false, evidence: 'e', confidence: 'high' }), 'corroborated', '佐证成立')
+  assert.equal(externalCheckState({ refuted: false, toolsUnavailable: true, evidence: '工具不可用', confidence: 'low' }), 'unavailable',
+    '模型自报 toolsUnavailable → unavailable（绝不落 corroborated——9/19 review P2-2 根因）')
+  assert.equal(externalCheckState({ refuted: false, toolsUnavailable: true, evidence: 'e' }), 'unavailable', '无 confidence 也可判（字段可选消费）')
+  // fail-safe：代理失败（null）/异常形状一律 unavailable，不冒充佐证
+  assert.equal(externalCheckState(null), 'unavailable')
+  assert.equal(externalCheckState(undefined), 'unavailable')
+  assert.equal(externalCheckState('garbage'), 'unavailable')
+  assert.equal(externalCheckState({}), 'corroborated', '合法空票（refuted=false 隐含）→ corroborated')
+})
+
+test('VERDICT_SCHEMA：toolsUnavailable 可选字段在场（内部票零影响）', () => {
+  assert.equal(VERDICT_SCHEMA.properties.toolsUnavailable.type, 'boolean')
+  assert.ok(!VERDICT_SCHEMA.required.includes('toolsUnavailable'), '可选字段——内部票不填仍过 schema')
 })

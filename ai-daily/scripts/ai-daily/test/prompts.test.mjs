@@ -143,7 +143,7 @@ test('externalVerifyPrompt：必须外部搜索找独立证据 + 工具不可用
   const s = externalVerifyPrompt({ claim: 'C', sourceUrl: 'https://x/1', sourceQuality: 'forum', quote: 'q', publishDate: '2026-09-18' }, ctx)
   assert.match(s, /必须用外部搜索找独立证据/, '与内部票（禁外部搜索）对立的任务定义')
   assert.match(s, /至少一个独立来源/, '佐证判定标准')
-  assert.match(s, /工具不可用，未完成独立佐证/, '工具不可用 → 约定返回 refuted=false + evidence 注明（编排层烘焙未核查）')
+  assert.match(s, /refuted=false 且 toolsUnavailable=true/, '工具不可用 → schema 字段 toolsUnavailable（9/19 review P2-2：纯文本约定编排层无法消费，已改字段通道）')
   assert.match(s, /最多 2 次搜索 \+ 1 次 WebFetch/, '外部票预算纪律')
   assert.match(s, /禁止截图/, '截图禁令保留')
 })

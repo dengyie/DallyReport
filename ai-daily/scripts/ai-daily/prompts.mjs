@@ -1,6 +1,6 @@
 // ai-daily prompt 模板 — 与 workflow 内逐字节一致；闭包依赖收敛为 ctx 显式注入。
 // ctx 字段（按消费方分组）：
-//   常量:    WINDOW_LABEL, WFROM, WTO, DATE, GROK_DIR, MAX_URLS_PER_BOARD, WEB_BUDGET_TOTAL, WEB_BUDGET_PER, feedMaxChars
+//   常量:    WINDOW_LABEL, WFROM, WTO, DATE, GROK_DIR, MAX_URLS_PER_BOARD, WEB_BUDGET_PER, feedMaxChars
 //   discover: BOARDS, digestForBoard, digestForFeeds
 //   verify:   VOTES_PER_CLAIM, REFUTATIONS_REQUIRED
 //   report:   reportBody, coverBlock, missBlock, confirmedVerifyCount, killedCount, majorOutCount,
@@ -84,17 +84,19 @@ export const fetchPrompt = (src, ctx) => {
 
 // externalVerifyPrompt（9/19 F1 新增）：forum/blog 来源的存活 claim 加 1 张独立佐证票。
 // 与内部票（verifyPrompt）的根本区别：**必须**用 WebSearch/WebFetch 找独立证据——内部票禁外部搜索、
-// 只做文本自洽判断，「引语整齐但不实」的转述/软文恰是它的盲区。票可用的三种结果编排层消费：
-//   refuted=true → claim 翻转为已否决；refuted=false → externalCheck=corroborated（可称已核查）；
-//   工具不可用 → 约定返回 refuted=false + evidence 注明，编排层据 externalCheck=unavailable 把
-//   该 claim 的 status 烘焙为「未核查」（不冒充已核查，report/render 侧如实呈现）。
+// 只做文本自洽判断，「引语整齐但不实」的转述/软文恰是它的盲区。票可用的四种结果编排层消费
+// （externalCheckState 三态判定，schemas.mjs）：
+//   refuted=true → claim 翻转为已否决；refuted=false + toolsUnavailable 未置 → externalCheck=corroborated；
+//   工具不可用 → refuted=false 且 **toolsUnavailable=true**（schema 字段，非 evidence 文本约定——
+//   9/19 review P2-2 修复：纯文本约定编排层无法消费，曾导致「工具不可用」落进 corroborated 分支），
+//   编排层把该 claim 的 status 烘焙为「未核查」（不冒充已核查）。
 export const externalVerifyPrompt = (c, ctx) =>
   '## 独立佐证票（external checker）\n\n' +
   '下列声明已通过 2+1 张内部一致性票（引语/日期/语气自洽），但内部票**禁止外部搜索**，无法发现「引语整齐但事件不实」的转述/软文。你的任务相反：**必须用外部搜索找独立证据**。\n\n' +
   '窗口：' + ctx.WINDOW_LABEL + '。\n\n## 声明\n' + '"' + c.claim + '"\n\n来源：' + c.sourceUrl + ' (' + c.sourceQuality + ')，页面日期：' + (c.publishDate || '未知') + '\n引语："' + c.quote + '"\n\n## 执行\n' +
   '1. WebSearch 搜索声明中的实体+事件关键词（可加「' + (ctx.WTO || ctx.DATE) + '」限定时效）；最多 2 次搜索 + 1 次 WebFetch（打开最相关的搜索结果页确认）。\n' +
   '2. 判定：找到**至少一个独立来源**（非本来源、非转贴/镜像本来源的聚合页）支撑声明的核心事实 → refuted=false；搜索后无任何独立来源支撑、或找到相反证据、或该「事件」只在论坛/自媒体流转而无任何权威侧消息 → refuted=true。\n' +
-  '3. 搜索工具不可用/全部失败 → 返回 refuted=false 且 evidence 写明「工具不可用，未完成独立佐证」（编排层会将该 claim 以未核查口径呈现，不会冒充已核查）。\n\n' +
+  '3. 搜索工具不可用/全部失败 → 返回 **refuted=false 且 toolsUnavailable=true**，evidence 写明失败原因（编排层会将该 claim 以未核查口径呈现，不会冒充已核查）。\n\n' +
   '纪律：禁止截图/图片输入。Structured output only. Evidence 简短具体（≤80 字，注明佐证/否证来源域名）。'
 
 // verifyPrompt 需要 VOTES_PER_CLAIM/REFUTATIONS_REQUIRED，经 ctx 传入。

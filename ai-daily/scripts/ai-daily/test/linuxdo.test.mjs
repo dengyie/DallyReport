@@ -134,10 +134,10 @@ test('fetchLinuxDoNews34：无 cdpHost → ok:false + reason no_cdp_host，不�
   assert.equal(out.topics, 0)
 })
 
-test('CDP_DEFAULTS：默认值符合 spec（host/maxPages/perPageDeep/poll 参数）', () => {
+test('CDP_DEFAULTS：默认值符合 spec（host/maxPages/poll 参数；perPageDeep 已随深抓后置重构删除）', () => {
   assert.equal(CDP_DEFAULTS.cdpHost, '127.0.0.1:9222')
   assert.equal(CDP_DEFAULTS.maxPages, 4)
-  assert.equal(CDP_DEFAULTS.perPageDeep, 3)
+  assert.ok(!('perPageDeep' in CDP_DEFAULTS), 'perPageDeep 死配置已删（9/19 review Delete List）')
   assert.equal(CDP_DEFAULTS.requestTimeoutMs, 15000)
   assert.equal(CDP_DEFAULTS.pollIntervalMs, 500)
   assert.equal(CDP_DEFAULTS.pollMaxMs, 15000)

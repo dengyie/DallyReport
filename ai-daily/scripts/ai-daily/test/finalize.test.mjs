@@ -171,3 +171,48 @@ test('recordLedger：账本损坏 → 备份 .corrupt + 重建 + stderr 告警�
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ─── 9/19 review P2-1 契约：先落盘后记账——落盘失败账本零污染 ───
+test('CLI：落盘失败（md rename 必败）→ 账本零污染（先落盘后记账，exit 非零）', () => {
+  const proj = path.join(HERE, '..')
+  const date = '2026-08-21'
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'finalize-fail-'))
+  const ledgerPath = path.join(outDir, 'ledger.json')
+  // 障碍：md 路径预置为**目录** → finalizePayloads 写 md 的 renameSync 必败（claims/sources/meta 已写）。
+  fs.mkdirSync(path.join(outDir, `${date}-ai日报.md`))
+  const resultJson = path.join(outDir, 'result.json')
+  const spec = { ...sample(), outDir }
+  spec.payloads = {
+    ...sample().payloads,
+    claims: JSON.stringify({ date, confirmed: [{ claim: 'X', source: 'https://x/1' }] }),
+  }
+  fs.writeFileSync(resultJson, JSON.stringify(spec))
+  const res = spawnSync(process.execPath, [path.join(proj, 'finalize.mjs'), resultJson, '--out', outDir, '--ledger', ledgerPath], { encoding: 'utf8' })
+  try {
+    assert.notEqual(res.status, 0, '落盘失败必须非零退出')
+    assert.ok(!fs.existsSync(ledgerPath), `账本必须零污染（先落盘后记账）；stderr=${res.stderr}`)
+    assert.ok(fs.existsSync(path.join(outDir, `${date}.verified-claims.json`)), 'md 之前的产物已写（顺序不变）')
+    assert.ok(res.stderr.includes('EISDIR') || res.stderr.includes('ENOTEMPTY') || res.stderr.includes('EPERM') || res.stderr.includes('ENOENT') || res.stderr, '失败有诊断输出')
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('CLI：落盘成功 → ledger_recorded 回写进已落盘 meta（tmp+rename 原子，无 .tmp 残留）', () => {
+  const proj = path.join(HERE, '..')
+  const date = '2026-08-21'
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'finalize-meta-'))
+  const ledgerPath = path.join(outDir, 'ledger.json')
+  const resultJson = path.join(outDir, 'result.json')
+  fs.writeFileSync(resultJson, JSON.stringify(sample()))
+  const res = spawnSync(process.execPath, [path.join(proj, 'finalize.mjs'), resultJson, '--out', outDir, '--ledger', ledgerPath], { encoding: 'utf8' })
+  try {
+    assert.equal(res.status, 0, `CLI 退出码 0；stderr=${res.stderr}`)
+    const meta = JSON.parse(fs.readFileSync(path.join(outDir, `${date}.meta.json`), 'utf8'))
+    assert.equal(meta.ledger_recorded, 'recorded', '记账结果回写进 meta（可见性保留）')
+    assert.equal(meta.ledger_path, ledgerPath)
+    assert.ok(!fs.readdirSync(outDir).some(f => f.endsWith('.tmp')), 'meta 原子回写无 .tmp 残留')
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true })
+  }
+})
