@@ -6,8 +6,8 @@ export const BOARDS = [
     companies: [
       { name: 'OpenAI',        x: 'OpenAI' },
       { name: 'Google DeepMind', x: 'GoogleDeepMind', feed: 'https://research.google/blog/rss/' },
-      { name: 'Anthropic',     x: 'AnthropicAI',      feed: 'https://www.anthropic.com/news' },
-      { name: 'xAI',           x: 'xai',              feed: 'https://x.ai/news' },
+      { name: 'Anthropic',     x: 'AnthropicAI',      feed: 'https://www.anthropic.com/news', htmlIndex: true },
+      { name: 'xAI',           x: 'xai',              feed: 'https://x.ai/news', htmlIndex: true },
       { name: 'NVIDIA',        x: 'NVIDIA_AI',        feed: 'https://blogs.nvidia.com/feed/' },
       { name: 'Meta AI',       x: 'AIatMeta',         feed: 'https://ai.meta.com/blog/' },
       { name: 'Amazon AWS',    x: 'AWSNewsBlog' },
@@ -42,11 +42,12 @@ export const BOARDS = [
 
 export const OFFICIAL_FEEDS = [
   { url: 'https://openai.com/news/rss.xml', label: 'OpenAI News' },
-  { url: 'https://www.anthropic.com/news', label: 'Anthropic News' },
-  { url: 'https://x.ai/news', label: 'xAI News' },
+  { url: 'https://www.anthropic.com/news', label: 'Anthropic News', htmlIndex: true },
+  { url: 'https://x.ai/news', label: 'xAI News', htmlIndex: true },
   { url: 'https://research.google/blog/rss/', label: 'Google Research Blog' },
   { url: 'https://blogs.nvidia.com/feed/', label: 'NVIDIA Blog' },
-  { url: 'https://ai.meta.com/blog/', label: 'Meta AI Blog' },
+  // 9/19 B1：Meta 换真 RSS（旧 /blog/ 是 HTML 索引页——压缩 digest 路径下最高质量源最先退化）
+  { url: 'https://ai.meta.com/blog/rss/', label: 'Meta AI Blog' },
 ]
 
 // 种子“重大超窗事实”（行业里程碑级公认事件，即使不在窗口也应出现在正文，标注 [窗口外·重大]）：

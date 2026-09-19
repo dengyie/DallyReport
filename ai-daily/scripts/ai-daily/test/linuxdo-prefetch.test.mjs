@@ -118,7 +118,10 @@ test('prefetchLinuxDo：抓取失败（transport 抛错）→ throw，不带成�
 // ── 源码断言：复用 fetchLinuxDoNews34，不复制 CDP transport ──
 test('源码：prefetch 调用 fetchLinuxDoNews34，不含 new WebSocket / /json/new / /json/close', () => {
   const code = fs.readFileSync(path.join(HERE, '../linuxdo-prefetch.mjs'), 'utf8')
-  assert.ok(code.includes('fetchLinuxDoNews34({ cdpHost: host })'), '复用 linux.do.mjs 的 fetchLinuxDoNews34')
+  // 9/19 L1/L3：调用签名扩展（deepFetch + isNoise 回调注入）——仍复用 linuxdo.mjs 的 transport，
+  // 噪声正则真源仍在本文件（isNoise 回调），不复制 CDP 协议实现。
+  assert.match(code, /fetchLinuxDoNews34\(\{\s*\n?\s*cdpHost: host,/, '复用 linux.do.mjs 的 fetchLinuxDoNews34（新签名：cdpHost + deepFetch + isNoise）')
+  assert.ok(code.includes('isNoise: t => LINUXDO_NOISE_TITLE.test'), '噪声正则经回调注入（真源不复制）')
   assert.ok(!code.includes('new WebSocket('), '不得另建 WebSocket transport')
   assert.ok(!code.includes("'/json/new?'"), '不得复制 CDP /json/new transport')
   assert.ok(!code.includes("'/json/close/'"), '不得复制 tab 关闭逻辑（由 linux.do.mjs finally 收敛）')

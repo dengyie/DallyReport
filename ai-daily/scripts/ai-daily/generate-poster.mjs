@@ -77,7 +77,10 @@ export async function runPoster(outDir, date, deps = {}) {
     : await loadDeps(root, fsImpl)
   if (!loaded) return { ok: false, reason: 'deps_unavailable' }
 
-  loaded.loadEnv(path.join(root || DALLYREPORT_FALLBACK_ROOT, '.env'), process.env, fsImpl)
+  // 9/19 修复：旧代码引用未定义标识符 DALLYREPORT_FALLBACK_ROOT——deps.generateAiPoster 注入 +
+  // root falsy 路径直接 ReferenceError（被 finalize try/catch 吞成海报静默失败）。root 为空时跳过
+  // env 加载（deps 注入方自管凭证；loadEnvFile 对缺失文件本就是 no-op）。
+  if (root) loaded.loadEnv(path.join(root, '.env'), process.env, fsImpl)
 
   const claimsPath = path.join(outDir, `${date}.verified-claims.json`)
   const sourcesPath = path.join(outDir, `${date}.sources.json`)
@@ -138,7 +141,10 @@ export async function runPoster(outDir, date, deps = {}) {
           } else {
             md = `![[AI.png]]\n\n${md}`
           }
-          fsImpl.writeFileSync(mdPath, md, 'utf8')
+          // 9/19：与 finalize 产物同规格——tmp+rename 原子改写（二次改写不再暴露半截 md 窗口）。
+          const tmp = mdPath + '.tmp'
+          fsImpl.writeFileSync(tmp, md, 'utf8')
+          fsImpl.renameSync(tmp, mdPath)
           console.log(`POSTER-EMBED updated ${mdPath} with ![[AI.png]]`)
         }
       }

@@ -404,7 +404,51 @@ test('模板：已报道名单进 report ctx（软网），近窗过滤按 day',
 })
 
 test('模板：fetch claim sourceUrl 优先取合法 http(s) 文章页（索引页治理）', () => {
-  assert.match(TPL, /sourceUrl: _httpUrl\(c\.sourceUrl\) \|\| src\.url/, 'claim 自带合法 sourceUrl 优先，src.url 兜底')
+  // 9/19 F2：回落不再静默——su 为空计数 indexCitation 并打 INDEX-CITATION log，degraded 旗标可见。
+  assert.match(TPL, /sourceUrl: su \|\| src\.url/, 'claim 自带合法 sourceUrl 优先，src.url 兜底')
+  assert.match(TPL, /if \(!su\) indexCitation\+\+/, 'sourceUrl 缺失回落计数（F2 可见性）')
+  assert.match(TPL, /index_page_citation/, 'degraded 旗标 index_page_citation 在场')
   assert.match(TPL, /const CDP_FETCH_CLI = '\/Users\/mango\/project\/claude-project\/obsidian\/scripts\/ai-daily\/cdp-fetch\.mjs'/, 'cdp-fetch CLI 绝对路径常量在场')
   assert.match(TPL, /webFetchViaCdp: WEB_FETCH_VIA_CDP/, 'ctx 携带门控标志')
+})
+
+// ─── 9/19 根因修复编排契约：linuxdo 治理 / 外部抽查票 / Status 烘焙 / 窗口预过滤 ───
+
+test('模板：linuxdo 出链帖转真实 fetch 目标 + 空 snippet 丢弃（F7 提权造假根因封堵）', () => {
+  assert.match(TPL, /LINUXDO-GOVERN 出链目标转真实 fetch/, '出链治理 log 在场')
+  assert.match(TPL, /found_via: 'linuxdo-outlink'/, '出链目标标记 linuxdo-outlink（进 prefer 通道）')
+  assert.match(TPL, /extractHighValueOutlink\(c\.snippet \|\| ''\)/, '出链探测用 linuxdo.mjs 导出函数（正则单点真源）')
+  assert.match(TPL, /linuxdoEmptySnippetDropped\+\+/, '空 snippet 帖丢弃计数（不再白烧 fetch 配额）')
+  assert.match(TPL, /linuxdo_outlink_fetch: linuxdoOutlinkCount/, 'meta 账目 linuxdo_outlink_fetch')
+  assert.match(TPL, /linuxdo_empty_snippet_dropped: linuxdoEmptySnippetDropped/, 'meta 账目 linuxdo_empty_snippet_dropped')
+})
+
+test('模板：linuxdo 消费端窗口预过滤 + 质量排序（L1/L2）', () => {
+  assert.match(TPL, /_ldInWin/, '窗口过滤谓词在场')
+  assert.match(TPL, /LINUXDO-WINDOW 窗外候选过滤/, '窗外过滤 log 在场')
+  assert.match(TPL, /\.sort\(\(a, b\) => \(b\.likeCount \|\| 0\) - \(a\.likeCount \|\| 0\)/, 'likeCount desc 质量排序（9/19 L1）')
+  assert.match(TPL, /date: p\.date \|\| '', board: 'linuxdo'/, '无日期帖不再伪造 date=DATE')
+})
+
+test('模板：外部抽查票接线（F1）——forum/blog 存活 claim ×1 独立佐证票', () => {
+  assert.match(TPL, /EXTERNAL-CHECK forum\/blog 存活 claim 外部抽查/, '抽查入口 log')
+  assert.match(TPL, /externalVerifyPrompt\(c, ctxP\)/, '外部票 prompt 接线')
+  assert.match(TPL, /c\.survives = false; c\.isRefuted = true; c\.externalCheck = 'refuted'/, '外部否决翻转 claim（回 killed）')
+  assert.match(TPL, /external_check: externalStats/, 'meta 账目 external_check')
+  assert.match(TPL, /external_check_unavailable/, 'degraded 旗标 external_check_unavailable（票不可用可见）')
+})
+
+test('模板：Status 烘焙（F5）——reportBody 素材行带编排层预烘的 Status', () => {
+  assert.match(TPL, /const _bakedStatus = c => \{/, '烘焙函数在场')
+  assert.match(TPL, /if \(c\.externalCheck === 'unavailable'\) return '未核查'/, '外部票不可用 → 未核查（不冒充已核查）')
+  assert.match(TPL, /· Status: ' \+ _bakedStatus\(c\)/, '素材行携带 Status 字段')
+})
+
+test('dedup：prefer 通道含 linuxdo-outlink（出链 fetch 目标与预抓/静态同享保底配额）', () => {
+  const code = fs.readFileSync(path.join(HERE, '../dedup.mjs'), 'utf8')
+  assert.match(code, /\['linuxdo-cdp', 'linuxdo-outlink', 'static-fallback'\]/, 'preferFoundVia 默认表含出链通道')
+})
+
+test('模板：fetch 吞错补 log（F10）——映射异常与代理真实失败可区分', () => {
+  assert.match(TPL, /FETCH-ERR ' \+ hostOf\(src\.url\)/, 'catch 分支带诊断 log')
 })

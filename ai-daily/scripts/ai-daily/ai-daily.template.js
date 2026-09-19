@@ -300,13 +300,13 @@ log('Q: 生成 ' + WINDOW_LABEL + ' 窗口的 AI 日报（' + boards.length + ' 
 const feedSources = []
 for (const b of boards) {
   for (const f of (b.feeds || [])) feedSources.push({ url: f, label: f, board: b.key })
-  for (const c of (b.companies || [])) if (c.feed) feedSources.push({ url: c.feed, label: c.name, board: b.key })
+  for (const c of (b.companies || [])) if (c.feed) feedSources.push({ url: c.feed, label: c.name, board: b.key, htmlIndex: c.htmlIndex })
 }
-for (const f of OFFICIAL_FEEDS) feedSources.push({ url: f.url, label: f.label, board: 'labs' })
-const feedMap = new Map() // normURL → {url,label,boards:Set}
+for (const f of OFFICIAL_FEEDS) feedSources.push({ url: f.url, label: f.label, board: 'labs', htmlIndex: f.htmlIndex })
+const feedMap = new Map() // normURL → {url,label,boards:Set,htmlIndex}
 for (const f of feedSources) {
   const k = normURL(f.url)
-  if (!feedMap.has(k)) feedMap.set(k, { url: f.url, label: f.label, boards: new Set() })
+  if (!feedMap.has(k)) feedMap.set(k, { url: f.url, label: f.label, boards: new Set(), htmlIndex: f.htmlIndex })
   feedMap.get(k).boards.add(f.board)
 }
 const uniqueFeeds = [...feedMap.values()]
@@ -417,8 +417,21 @@ for (const g of DISCOVER_GROUPS) {
     continue
   }
   log('LINUXDO-OK prefetched ' + LDP.topics + ' topics → ' + g.key + ' board（配额 ' + LINUXDO_MAX_SOURCES + '）')
-  const srcs = LDP.posts.slice(0, LINUXDO_MAX_SOURCES).map(p => ({
-    url: p.url, title: p.title, found_via: 'linuxdo-cdp', date: p.date || DATE, board: 'linuxdo',
+  // 9/19 L1/L2：窗口预过滤 + 质量排序。旧版 slice(0,8) 直接按 prefetch 顺序截断——窗外旧帖
+  // （Discourse 活跃序 bump 上来的老帖）占满配额、高赞好帖被挤掉。prefetch 已按 likeCount desc +
+  // date desc 排序，这里再做窗口过滤（无日期帖 fail-open 保留，但不再伪造 date=DATE）后截配额。
+  const _ldInWin = p => {
+    const d = normalizeDate(p.date || '')
+    if (d == null) return true
+    if (WIN_FROM == null) return d <= WIN_TO
+    return daysBetween(WIN_FROM, d) >= 0 && daysBetween(d, WIN_TO) >= 0
+  }
+  const _ldRanked = LDP.posts.filter(_ldInWin)
+    .sort((a, b) => (b.likeCount || 0) - (a.likeCount || 0) || String(b.date || '').localeCompare(String(a.date || '')))
+  const linuxdoOutOfWin = LDP.posts.length - _ldRanked.length
+  if (linuxdoOutOfWin) log('LINUXDO-WINDOW 窗外候选过滤 ' + linuxdoOutOfWin + ' 条（不占 ' + LINUXDO_MAX_SOURCES + ' 配额）')
+  const srcs = _ldRanked.slice(0, LINUXDO_MAX_SOURCES).map(p => ({
+    url: p.url, title: p.title, found_via: 'linuxdo-cdp', date: p.date || '', board: 'linuxdo',
     snippet: p.snippet || '',
   }))
   discoverResults.push({ group: g, boards: g.boards, urls: srcs, noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: false, linuxdoTopics: LDP.topics, linuxdoPosts: LDP.posts.length })
@@ -475,6 +488,36 @@ for (const d of discoverRows) for (const u of d.urls) {
   const b = d.boards.length === 1 ? d.boards[0] : (u.board || d.boards[0])
   if (!boardURLMap.has(b)) boardURLMap.set(b, [])
   boardURLMap.get(b).push({ ...u, board: b })
+}
+
+// ─── 9/19 linuxdo 候选治理（F7 提权造假根因修复 + X1 空 snippet 不烧配额）───
+// ① 出链帖：snippet 含 GitHub/arXiv/官网等权威外链 → 把**外链 URL**转为真实 fetch 目标
+//    （found_via=linuxdo-outlink，公开页 9222/WebFetch 均可抓）——claim 只能落在被真实读过的
+//    权威页上；旧版 mint 直接标 primary + sourceUrl 指向从未抓取的外链页，是引用造假。
+// ② 空 snippet 帖：linux.do 匿名抓必 403（linuxdo.mjs 注释实证），进配额就是白烧一席 fetch——
+//    直接丢弃并计数（linuxdo_empty_snippet_dropped 进 meta）。
+let linuxdoOutlinkCount = 0
+let linuxdoEmptySnippetDropped = 0
+{
+  const linuxdoCands = boardURLMap.get('linuxdo') || []
+  if (linuxdoCands.length) {
+    const governed = []
+    for (const c of linuxdoCands) {
+      const outlink = extractHighValueOutlink(c.snippet || '')
+      if (outlink) {
+        governed.push({ url: outlink, title: c.title, found_via: 'linuxdo-outlink', date: c.date || '', board: 'linuxdo', note: 'linux.do 帖(' + c.url + ')引用的权威外链页' })
+        linuxdoOutlinkCount++
+      } else if ((c.snippet || '').trim()) {
+        governed.push(c)
+      } else {
+        linuxdoEmptySnippetDropped++
+      }
+    }
+    boardURLMap.set('linuxdo', governed)
+    if (linuxdoOutlinkCount || linuxdoEmptySnippetDropped) {
+      log('LINUXDO-GOVERN 出链目标转真实 fetch ' + linuxdoOutlinkCount + ' 条（提权必先抓）· 空 snippet 丢弃 ' + linuxdoEmptySnippetDropped + ' 条')
+    }
+  }
 }
 
 // ─── Discover 失败兜底（8/22 第十八项）：用 harvest 已抓到的 entries 补 URL 候选 ───
@@ -568,7 +611,9 @@ const staticFallbackBoards = new Set()
     if (!cands.length) continue
     staticFallbackBoards.add(key)
     const arr = boardURLMap.has(key) ? boardURLMap.get(key) : (boardURLMap.set(key, []), boardURLMap.get(key))
-    for (const s of cands) arr.unshift({ ...s, found_via: 'static-fallback', date: DATE, board: key })
+    // 9/19 F3：静态兜底不再伪造 date=DATE——索引页本身无日期，伪造「今天」会让 claimWindow 恒判 in、
+    // 归档日期失真。置空 → 日期判定走 fetch 代理提取的 publishDate（unknown 仍 fail-open 交 verify 把关）。
+    for (const s of cands) arr.unshift({ ...s, found_via: 'static-fallback', date: '', board: key })
   }
 }
 if (staticFallbackBoards.size) {
@@ -618,7 +663,9 @@ log('Dedup: ' + dupes.length + ' dupes, ' + budgetDropped.length + ' budget-drop
 const staticCount = fetchTargets.filter(t => t.found_via === 'static-fallback').length
 if (staticCount > 0) log('STATIC-FALLBACK quota: ' + staticCount + ' 条静态兜底 URL 已获 fetch 配额（fetchTargets 内实计）')
 // 9/01 P1：配额内带 snippet 的 linuxdo 直铸 forum claim，不再进 fetch 代理（linux.do 无 cookie → 403）。
-// 空 snippet 仍走既有 fetch。配额外的 budgetDropped 不铸——MAX_FETCH 硬上限不变。
+// 出链帖已在上方 LINUXDO-GOVERN 转为 linuxdo-outlink 真实 fetch 目标；空 snippet 已被丢弃。
+// 配额外的 budgetDropped 不铸——MAX_FETCH 硬上限不变。
+let indexCitationTotal = 0  // 9/19 F2：索引页引用回落计数（degraded 旗标 index_page_citation:N）
 const extracted = []
 {
   const mintedUrls = new Set()
@@ -672,10 +719,24 @@ for (const batch of fetchBatches) {
         src.publishDate = ext.publishDate
         // 9/13 索引页治理：claim 自带合法 http(s) sourceUrl（从索引页选中的真实文章页）时优先——
         // 引用/verify/角标链落到真实文章页；索引页 URL 仍兜底（src.url），不丢 found_via 溯源。
+        // 9/19 F2：回落不再静默——计数 + 打点，degraded 旗标 index_page_citation 可见。
         const _httpUrl = u => (typeof u === 'string' && /^https?:\/\//i.test(u)) ? u : null
-        src.claims = (ext.claims || []).map(c => ({ ...c, sourceUrl: _httpUrl(c.sourceUrl) || src.url, sourceTitle: src.title, sourceQuality: ext.sourceQuality, date: src.date, board: src.board }))
+        let indexCitation = 0
+        src.claims = (ext.claims || []).map(c => {
+          const su = _httpUrl(c.sourceUrl)
+          if (!su) indexCitation++
+          return { ...c, sourceUrl: su || src.url, sourceTitle: src.title, sourceQuality: ext.sourceQuality, date: src.date, board: src.board }
+        })
+        if (indexCitation) {
+          indexCitationTotal += indexCitation
+          log('INDEX-CITATION ' + hostOf(src.url) + ' 有 ' + indexCitation + ' 条 claim 缺合法 sourceUrl → 回落来源 URL（引用可能落在栏目/索引页）')
+        }
         return src
-      }).catch(e => ({ ...src, sourceQuality: 'unreliable', claims: [] }))
+      }).catch(e => {
+        // 9/19 F10：吞错补 log——.then 映射段抛错与代理真实失败在账面上不可区分的问题。
+        log('FETCH-ERR ' + hostOf(src.url) + ' 映射异常按 unreliable 处理: ' + String(e && e.message || e).slice(0, 100))
+        return { ...src, sourceQuality: 'unreliable', claims: [] }
+      })
   ))
   extracted.push(...batchRes)
   if (salvageFirst) salvaged = true  // 抓完救护首批后置位：下一个循环迭代整批 break 跳出
@@ -783,6 +844,39 @@ for (const batch of chunkArr(rankedClaims, VERIFY_BATCH)) {
   const vtimeout = AGENT_TIMEOUT_MS
   const batchRes = await parallel(batch.map(c => () => voteClaim(c, vtimeout)))
   voted.push(...batchRes.filter(Boolean))
+}
+
+// ─── 9/19 F1 外部抽查票：forum/blog 存活 claim 的独立佐证 ───
+// 2+1 内部票禁外部搜索（省 token），只做文本自洽判断——「引语整齐但事件不实」的论坛转述/软文
+// 恰好能通关并以「已核查 N-N」肯定态进正文（9/17 实证：网信办条目唯一来源是论坛转帖）。
+// 对 forum/blog 来源的存活 claim 加 1 张允许 WebSearch 的佐证票：
+//   否决 → 翻转为 refuted（回到 killed）；佐证 → externalCheck=corroborated；
+//   票不可用 → externalCheck=unavailable（不翻转存活，但 Status 烘焙为「未核查」，不冒充已核查）。
+const externalStats = { targets: 0, corroborated: 0, refuted: 0, unavailable: 0 }
+{
+  const extTargets = voted.filter(c => c && c.survives && !c.isMajorOut && (c.sourceQuality === 'forum' || c.sourceQuality === 'blog'))
+  externalStats.targets = extTargets.length
+  if (extTargets.length) log('EXTERNAL-CHECK forum/blog 存活 claim 外部抽查 ' + extTargets.length + ' 条（独立佐证票 ×1，允许 WebSearch）')
+  for (const batch of chunkArr(extTargets, VERIFY_BATCH)) {
+    const res = await parallel(batch.map(c => () =>
+      safeAgentWithLadder(externalVerifyPrompt(c, ctxP), { label: 'ext:' + (c.claim || '').slice(0, 30), phase: 'Verify', schema: VERDICT_SCHEMA, effort: 'low', timeoutMs: AGENT_TIMEOUT_MS }, MODEL_LADDER, LADDER_BUDGET_MS, verifyLadderT0)
+    ))
+    res.forEach((r, i) => {
+      const c = batch[i]
+      if (!r) { c.externalCheck = 'unavailable'; externalStats.unavailable++; return }
+      c.verdicts.push(r)
+      if (r.refuted) {
+        c.refutedCount = (c.refutedCount || 0) + 1
+        c.survives = false; c.isRefuted = true; c.externalCheck = 'refuted'
+        externalStats.refuted++
+        log('EXTERNAL-CHECK ✗ 否决 ' + (c.claim || '').slice(0, 46) + ' — ' + String(r.evidence || '').slice(0, 80))
+      } else {
+        c.externalCheck = 'corroborated'
+        externalStats.corroborated++
+        log('EXTERNAL-CHECK ✓ 佐证 ' + (c.claim || '').slice(0, 46) + ' — ' + String(r.evidence || '').slice(0, 80))
+      }
+    })
+  }
 }
 
 const confirmedVerify = voted.filter(c => c.survives && claimWindow(c) !== 'out')
@@ -947,9 +1041,18 @@ phase('Synthesize')
 // Discover 129min）标定后会正确把旧 synthAllowed 打成 false——合成永远没份。治本：进入本阶段即
 // 无条件尝试 report，只受 SYNTHESIS_LIMIT_MS（默认 600s）× reportTries 约束；探针无条件 advisory。
 await probeGateway('report')  // advisory：探针失败仅留日志，不否决合成
+// 9/19 F5：status 由编排层烘焙进素材行——旧版靠 report 模型手工转录投票比，写错字面量即徽标丢失。
+// 烘焙规则：major-out → [窗口外·重大]；外部抽查未完成（unavailable）的 forum/blog → 未核查；
+// 其余存活 → 已核查 N-M（真实票数）；否决 → 已否决（正常不进 reportBody）。
+const _bakedStatus = c => {
+  if (c.isMajorOut) return '[窗口外·重大]'
+  if (!c.survives) return '已否决'
+  if (c.externalCheck === 'unavailable') return '未核查'
+  return '已核查 ' + (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount
+}
 const reportBody = (confirmed.length ? confirmed.map((c, i) =>
   // 8/17 第十二项：quote 截断 140 字降 report 输入体积——合成只需要点，引语全文由核查阶段保证；大幅压单请求 payload（挂起敏感度 + token）。
-  '### ' + (c.isMajorOut ? '[窗口外·重大] ' : '') + '[' + i + '] ' + c.claim + '\nVote: ' + (c.isMajorOut ? '—（未投票，多源公认行业里程碑）' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount) + ' · Source: ' + c.sourceUrl + ' (' + c.sourceQuality + ') · Date: ' + (c.publishDate || c.date || '?') + '\nQuote: "' + c.quote.slice(0, 140) + (c.quote.length > 140 ? '…' : '') + '"\n')
+  '### ' + (c.isMajorOut ? '[窗口外·重大] ' : '') + '[' + i + '] ' + c.claim + '\nVote: ' + (c.isMajorOut ? '—（未投票，多源公认行业里程碑）' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount) + ' · Status: ' + _bakedStatus(c) + ' · Source: ' + c.sourceUrl + ' (' + c.sourceQuality + ') · Date: ' + (c.publishDate || c.date || '?') + '\nQuote: "' + c.quote.slice(0, 140) + (c.quote.length > 140 ? '…' : '') + '"\n')
   .join('\n')
   : '(无已确认声明)')
 // 8/23 第二十一项：聚类主视图并列注入 reportBody 开头的「## 已聚类」区（report prompt 4.7 专门读取）——
@@ -1001,6 +1104,9 @@ const linuxdoFailedRows = discoverRows.filter(d => d.linuxdoFailed)
 if (linuxdoFailedRows.length) degradedFlags.push('linuxdo_degraded' + (linuxdoFailedRows.some(d => d.linuxdoReason) ? ':' + linuxdoFailedRows.map(d => d.linuxdoReason).join('+').slice(0, 80) : ''))
 if (ladderUsed.length > 0) degradedFlags.push('ladder_used:' + ladderUsed.join('+'))
 if (ladderExhaustedStages.size) degradedFlags.push('ladder_exhausted:' + [...ladderExhaustedStages].join('+'))
+// 9/19 F2/F1 可见性：索引页引用回落与外部抽查未完成都必须在产物里可见。
+if (indexCitationTotal > 0) degradedFlags.push('index_page_citation:' + indexCitationTotal)
+if (externalStats.unavailable > 0) degradedFlags.push('external_check_unavailable:' + externalStats.unavailable)
 // 9/13 跨天账本：无账本 → 跨天去重本轮关闭，如实上报（fail-open 不阻断成稿）。
 if (!REPORTED_LEDGER) degradedFlags.push('ledger_unavailable')
 // 9/01 方案 D：合成入口与总墙钟脱钩后，reportErr 只剩「代理真失败」一条路径
@@ -1009,7 +1115,8 @@ const reportErr = report ? null : 'report agent failed; reverting to raw archive
 if (reportErr) degradedFlags.push('report_failed')
 const generatedBy = 'ai-daily (' + reportModelUsed + ')'
 // 归档 payload 数组（claimsJson 与降级 md 共用同一份同构数据，避免两处映射漂移）。
-const confirmedOut = confirmed.map(c => ({ claim: c.claim, quote: c.quote, source: c.sourceUrl, sourceQuality: c.sourceQuality, date: c.publishDate || c.date, window: c.isMajorOut ? 'major-out' : claimWindow(c), vote: c.isMajorOut ? '—' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, verifiedByVote: !c.isMajorOut, erroredCount: c.erroredCount || 0, confidence: (c.verdicts.filter(v => !v.refuted)[0] || {}).confidence || (c.isMajorOut ? 'high' : 'low') }))
+// 9/19 F12：major-out 未投票，confidence 置 null——旧版硬给 'high'，JSON 归档与正文「未核查措辞」口径漂移。
+const confirmedOut = confirmed.map(c => ({ claim: c.claim, quote: c.quote, source: c.sourceUrl, sourceQuality: c.sourceQuality, date: c.publishDate || c.date, window: c.isMajorOut ? 'major-out' : claimWindow(c), vote: c.isMajorOut ? '—' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, verifiedByVote: !c.isMajorOut, erroredCount: c.erroredCount || 0, externalCheck: c.externalCheck || null, confidence: (c.verdicts.filter(v => !v.refuted)[0] || {}).confidence || (c.isMajorOut ? null : 'low') }))
 const refutedOut = killed.map(c => ({ claim: c.claim, source: c.sourceUrl, vote: (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, erroredCount: c.erroredCount || 0 }))
 const unverifiedOut = unverified.map(c => ({ claim: c.claim, source: c.sourceUrl }))
 const outOfWindowOut = outOfWindow.map(c => ({ claim: c.claim, source: c.sourceUrl, date: c.publishDate || c.date, vote: (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, erroredCount: c.erroredCount || 0 }))
@@ -1052,6 +1159,12 @@ const metaJson = JSON.stringify({
   // 进 boardURLMap 的 URL 候选数（成功时补入）；linuxdo_degraded 是独立降级旗标（见 degradedFlags）。
   linuxdo_posts: discoverRows.filter(d => d.linuxdoTopics).reduce((n, d) => n + (d.linuxdoPosts || 0), 0),
   linuxdo_open_posts: discoverRows.filter(d => d.linuxdoTopics).reduce((n, d) => n + d.urls.length, 0),
+  // 9/19 linuxdo 治理账目：出链帖转真实 fetch 目标数 / 空 snippet 丢弃数（不再烧 fetch 配额）。
+  linuxdo_outlink_fetch: linuxdoOutlinkCount,
+  linuxdo_empty_snippet_dropped: linuxdoEmptySnippetDropped,
+  // 9/19 F1 外部抽查账目：targets=应抽查的 forum/blog 存活 claim 数；corroborated=独立佐证；
+  // refuted=被佐证票否决；unavailable=票不可用（status 已烘焙为未核查，degraded 旗标可见）。
+  external_check: externalStats,
   degraded: degradedFlags, report_error: reportErr,
   // 8/31 P1：墙钟标定与断路器的账。realm 唯一时钟是 tick 累加器，饱和下只低估——
   // wallclock_raw_s（累加器原始读数）与 wallclock_calibrated_s（标定后下界）之差即被吞掉的时间，

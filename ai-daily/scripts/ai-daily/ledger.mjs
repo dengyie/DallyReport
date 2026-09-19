@@ -23,11 +23,19 @@ export const LEDGER_SHARE_MIN = 5
 export const LEDGER_LOOKBACK_DAYS = 3
 // 账本保留天数（prune）。种子退役判定依赖账本在保留窗内命中即可——种子自身 age gate 21d < 60d。
 export const LEDGER_KEEP_DAYS = 60
-// 单条指纹 token 上限（长 claim 防爆炸；截断侧仍保实体词——tokenizer 输出序 ASCII 在前）。
+// 单条指纹 token 上限（长 claim 防爆炸）。9/19 修复：旧版整体 Set 后 slice(64)——tokenizer 输出序
+// ASCII 在前，长英文 snippet 的中文 bigram 全被截掉，「中文账本条目 vs 长英文混排候选」overlap=0，
+// 同事件换 URL 的中文重复漏过硬过滤。改为 ASCII/CJK 两桶各留一半（分桶截断，类别间不再互相挤压）。
 export const LEDGER_MAX_TOKENS = 64
 
-// 指纹 token：复用 cluster 的 tokenizer（ASCII ≥4 + CJK bigram、双停用表），Set 去重后截断。
-export const fingerprintTokens = s => [...new Set(clusterTokenize(s))].slice(0, LEDGER_MAX_TOKENS)
+// 指纹 token：复用 cluster 的 tokenizer（ASCII ≥4 + CJK bigram、双停用表），Set 去重后分桶截断。
+export const fingerprintTokens = s => {
+  const toks = [...new Set(clusterTokenize(s))]
+  const half = Math.ceil(LEDGER_MAX_TOKENS / 2)
+  const ascii = toks.filter(t => !/[\u4e00-\u9fff]/.test(t)).slice(0, half)
+  const cjk = toks.filter(t => /[\u4e00-\u9fff]/.test(t)).slice(0, half)
+  return [...ascii, ...cjk]
+}
 
 // 账本条目构造（finalize 记账与测试共用同一 shape）。
 export const makeLedgerEntry = (day, url, claimText, major) => ({

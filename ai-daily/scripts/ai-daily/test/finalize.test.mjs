@@ -9,7 +9,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { extractPayloads, finalizePayloads, expand } from '../finalize.mjs'
+import { extractPayloads, finalizePayloads, expand, recordLedger } from '../finalize.mjs'
+import { makeLedgerEntry } from '../ledger.mjs'
+
+const makeEntry = () => makeLedgerEntry('2026-09-19', 'https://example.com/a', '示例事件 A', false)
 import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -53,11 +56,13 @@ test('extractPayloads：缺任一 payload 字符串字段抛错', () => {
   assert.throws(() => extractPayloads(bad), /payloads\.claims must be a string/)
 })
 
-test('extractPayloads：缺 date 抛错（与 outDir/payloads 同等严格）', () => {
+test('extractPayloads：缺 date / 非 YYYY-MM-DD 格式抛错（与 outDir/payloads 同等严格）', () => {
   const { date, ...rest } = sample()
-  assert.throws(() => extractPayloads({ ...rest, date: null }), /missing result\.date/)
-  assert.throws(() => extractPayloads({ ...rest, date: '' }), /missing result\.date/)
-  assert.throws(() => extractPayloads({ ...rest, date: undefined }), /missing result\.date/)
+  assert.throws(() => extractPayloads({ ...rest, date: null }), /missing\/invalid result\.date/)
+  assert.throws(() => extractPayloads({ ...rest, date: '' }), /missing\/invalid result\.date/)
+  assert.throws(() => extractPayloads({ ...rest, date: undefined }), /missing\/invalid result\.date/)
+  // 9/19 F5 补强：格式非法（含 / 或路径分隔符）的 date 会在拼产物文件名时炸，前置校验给明确报错
+  assert.throws(() => extractPayloads({ ...rest, date: '2026/09/19' }), /missing\/invalid result\.date/)
 })
 
 test('finalizePayloads：4 文件逐字节落盘且内容==源 payload', () => {
@@ -129,4 +134,40 @@ test('CLI：--out "~/..." 展开为 home，不创建字面 ~ 目录（端到端�
   assert.equal(files.length, 4, 'home 下写 4 产物')
   fs.rmSync(homeDir, { recursive: true, force: true })
   if (before) fs.writeFileSync(path.join(home, target, '.keep'), '')
+})
+// ─── 9/19 P2-F 契约：产物原子写 + 账本损坏备份 ───
+
+test('finalizePayloads：tmp+rename 原子写——落盘后目录无 .tmp 残留（9/19 F1）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'finalize-atomic-'))
+  try {
+    finalizePayloads({ ...sample(), outDir: dir })
+    const files = fs.readdirSync(dir)
+    assert.equal(files.length, 4, '恰好 4 产物')
+    assert.ok(files.every(f => !f.endsWith('.tmp')), '无 .tmp 残留（rename 完成即清理）：' + JSON.stringify(files))
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('recordLedger：账本损坏 → 备份 .corrupt + 重建 + stderr 告警（9/19 F2：不再静默丢 60 天历史）', () => {
+  const dir = fs.mkdtempSync(path.join('test/.tmp-'))
+  const ledgerPath = path.join(dir, 'ledger.json')
+  try {
+    fs.writeFileSync(ledgerPath, '{not-valid-json')
+    const errSpy = []
+    const origErr = console.error
+    console.error = (...a) => errSpy.push(a.join(' '))
+    let res
+    try {
+      res = recordLedger(ledgerPath, [makeEntry()], '2026-09-19')
+    } finally {
+      console.error = origErr
+    }
+    assert.equal(res.total, 1, '损坏后重建并成功记账')
+    assert.ok(fs.existsSync(ledgerPath + '.corrupt'), '原损坏文件已备份为 .corrupt')
+    assert.ok(errSpy.some(s => /LEDGER-WARN 账本损坏/.test(s)), 'stderr 告警在场')
+    assert.equal(JSON.parse(fs.readFileSync(ledgerPath, 'utf8')).length, 1, '重建后账本可用')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })

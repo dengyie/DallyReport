@@ -9,7 +9,7 @@
 
 export const harvestPrompt = (g, ctx) =>
   '## 共享源 Harvest（批量 ' + g.key + '）\n\n窗口：' + ctx.WINDOW_LABEL + '。依次抓取下面每个 feed 并提炼紧凑摘要：\n\n' +
-  g.feeds.map(f => '- **' + (f.label || f.url) + '**\n  URL: ' + f.url).join('\n') + '\n\n' +
+  g.feeds.map(f => '- **' + (f.label || f.url) + '**\n  URL: ' + f.url + (f.htmlIndex ? '\n  （HTML 索引页，无 RSS：只提取**文章标题/日期/URL 列表**，勿逐篇读长正文）' : '')).join('\n') + '\n\n' +
   '## 执行（对每个 feed 必须独立执行抓取，逐条做出来再进入下一个）\n' +
   g.feeds.map((f, i) =>
     'Step ' + (i + 1) + '：cd ' + ctx.GROK_DIR + " && ./scripts/fetch.js --max-chars " + ctx.feedMaxChars(f) + " --provider " + (/export\.arxiv\.org\/api\/query/i.test(f.url) ? 'direct' : 'auto') + " '" + f.url + "'\n" +
@@ -41,11 +41,11 @@ export const discoverPrompt = (g, ctx) => {
     (multi ? ' 按新闻主题给每条 URL 标归属板块 board（融资→funding / 监管法院标准→policy / 安全滥用水印→safety / 人事任命流动→people / 消费产品硬件→products / 战略资本基建→strategy）。' : (bds[0].key === 'labs' ? ' labs 板块必须逐家核厂商：先核对摘要里每家是否有动态；摘要未覆盖、或需 X 官宣确证的公司走第 2 步批量 X 搜索确认。' : ' 板块重点与摘要未覆盖的主题走第 2 步 X 搜索确认。')) + '\n' +
     '【空摘要快速降级】若上方共享源摘要全部为空/全部"抓取失败"（0 条 entries），说明 harvest 阶段未抓到任何 feed——此时 X 搜索 ≤2 次（本组 2 次，labs 3 次）仍无可用 URL 卡片，**立即返回 urls:[] + degraded:true**，不再尝试 WebSearch/WebFetch/多次 X 搜索。空摘要时死磕搜索只会烧 token 和墙钟，快速降级让主流程如实标记 missing_*。\n' +
     '2)【X 搜索·补充】对摘要未覆盖、或需官方发布确证的公司/主题：cd ' + ctx.GROK_DIR + " && ./scripts/search.js --days 3 --extra 4 --source-chars 300 --max-chars 5000 --responses-x-search --responses-allowed-x-handles '<handle,逗号,串联>' '<公司/主题> 发布/官宣 '" + '；只看返回的 URL 卡片（**优先 sources.grok，其次 sources.extra/sources.merged** 里的 url/title/date，只看 str 非空卡片），不看 answer.text。**批量优先**：每次查询携带 4-6 个 allowed-x-handles（逗号串联）一次覆盖多家/多主题，' + (multi ? '跨板块共用。' : 'labs 板块用 5 次以内批量查询覆盖所有摘要未覆盖的公司。') + ' 本组 X 搜索 ≤' + g.xBudget + ' 次。\n' +
-    '3)【WebSearch 补充】仍缺的：WebSearch `<公司/关键词> 新闻 ' + ctx.WTO + '`（全流水合计 ≤' + ctx.WEB_BUDGET_TOTAL + ' 次、本组 ≤' + ctx.WEB_BUDGET_PER + ' 次；不可用就跳过，勿失败）。\n' +
+    '3)【WebSearch 补充】仍缺的：WebSearch `<公司/关键词> 新闻 ' + ctx.WTO + '`（本组 ≤' + ctx.WEB_BUDGET_PER + ' 次，各组独立计数、不设全流水共享上限——组间无法协调；不可用就跳过，勿失败）。\n' +
     '4) 只保留事件日期落在 [' + ctx.WFROM + ', ' + (ctx.WTO || ctx.DATE) + '] 内的；优先一手官方源；跳过无日期/明显陈旧/SEO/内容农场/常青帮助文档页。URL 写完整。\n' +
     '最多返回 ' + (multi ? 10 : ctx.MAX_URLS_PER_BOARD) + ' 条 url/title/found_via/date' + (multi ? ' + board（必填，本组板块之一）' : '') + '。' + (bds[0].key === 'labs' ? 'labs 板块逐家核厂商——确认窗口内无任何动态的，把公司名放 noNews。' : '') +
-    '5) 若某公司/主题本窗口无动态、但近 2 周内有重大发布/官宣/可信事实（如 DeepSeek V4 开源、Grok 4.6 发布、DeepSeek Harness 这类**行业客观公认事实**），将其列入 majorOutOfWindow（name/date/note），供日报正文以「[窗口外·重大]」标签呈现。注意：majorOutOfWindow 只放**客观事实**（非传闻、非推测），且必须是**行业里程碑级**——如果是普通更新或次要动态，放 nearWindow 供窗口外参考节引用即可。若该事实有可溯源的官方/一手 URL，尽量在 `url` 字段带上（可选，无则不带）。' +
-    '6)【预算·硬性纪律】X 搜索本组 ≤' + g.xBudget + ' 次，一家/一个主题一次尝试、无果即放过、不反复深挖；WebSearch 全流水合计 ≤' + ctx.WEB_BUDGET_TOTAL + ' 次、本组 ≤' + ctx.WEB_BUDGET_PER + ' 次，不可用即跳过、勿失败。**发现阶段禁止运行 fetch.js**，也禁止 WebFetch 连续深挖单公司官网新闻页（官网正文抓取是 fetch 阶段职责，发现阶段只需给出 URL 候选；官网首页一次快速确认至多 1 次）。输出只保留用于抓取/核查的高置信候选，超过上限按重要性截断。' +
+    '5) 若某公司/主题本窗口无动态、但近 2 周内有重大发布/官宣/可信事实（如 DeepSeek V4 开源、Grok 4.6 发布、DeepSeek Harness 这类**行业客观公认事实**），将其列入 majorOutOfWindow（name/date/note），供日报正文以「[窗口外·重大]」标签呈现。注意：majorOutOfWindow 只放**客观事实**（非传闻、非推测），且必须是**行业里程碑级**——如果是普通更新或次要动态，放 nearWindow 供窗口外参考节引用即可。若该事实有可溯源的官方/一手 URL：先花 1 次搜索/快速确认找到它并**写入 `url` 字段**——无 URL 的重大项在正文与跨天去重里都只能靠模糊匹配，引用质量大打折扣；确实无法溯源（纯行业共识、无任何官方页/权威报道页）才省略 url。' +
+    '6)【预算·硬性纪律】X 搜索本组 ≤' + g.xBudget + ' 次，一家/一个主题一次尝试、无果即放过、不反复深挖；WebSearch 本组 ≤' + ctx.WEB_BUDGET_PER + ' 次（各组独立计数，组间无法协调、无共享账本），不可用即跳过、勿失败。**发现阶段禁止运行 fetch.js**，也禁止 WebFetch 连续深挖单公司官网新闻页（官网正文抓取是 fetch 阶段职责，发现阶段只需给出 URL 候选；官网首页一次快速确认至多 1 次）。输出只保留用于抓取/核查的高置信候选，超过上限按重要性截断。' +
     'degraded 语义：仅当本（组/板块）的【主源/官方通道】整体一无所获（摘要 + X 搜索均返回零个可用 URL）时才置 true；个别补充源（GitHub trending、WebSearch、某一 X 搜索等）失败不算 degraded，正常返回即可。尽力用可用渠道，不要整任务失败。' +
     '\n\n⚠️ 最终收口（呼应开头条目）：执行完上述步骤后，立即调用 StructuredOutput 工具返回结构化对象。**严禁 end_turn 返回纯文本**——这是最常见的失败模式（思考里说"我来调用 StructuredOutput"却以文字结束）。调工具即结束，勿在工具调用前/后铺垫文字。Structured output only.'
 }
@@ -82,6 +82,21 @@ export const fetchPrompt = (src, ctx) => {
   '5. 页面较长时只精读与日报相关且日期在窗口内的部分，其余快速略读；抓取失败/付费墙/无关页面 → 返回 claims:[] 且 sourceQuality:"unreliable"。\n\nStructured output only.'
 }
 
+// externalVerifyPrompt（9/19 F1 新增）：forum/blog 来源的存活 claim 加 1 张独立佐证票。
+// 与内部票（verifyPrompt）的根本区别：**必须**用 WebSearch/WebFetch 找独立证据——内部票禁外部搜索、
+// 只做文本自洽判断，「引语整齐但不实」的转述/软文恰是它的盲区。票可用的三种结果编排层消费：
+//   refuted=true → claim 翻转为已否决；refuted=false → externalCheck=corroborated（可称已核查）；
+//   工具不可用 → 约定返回 refuted=false + evidence 注明，编排层据 externalCheck=unavailable 把
+//   该 claim 的 status 烘焙为「未核查」（不冒充已核查，report/render 侧如实呈现）。
+export const externalVerifyPrompt = (c, ctx) =>
+  '## 独立佐证票（external checker）\n\n' +
+  '下列声明已通过 2+1 张内部一致性票（引语/日期/语气自洽），但内部票**禁止外部搜索**，无法发现「引语整齐但事件不实」的转述/软文。你的任务相反：**必须用外部搜索找独立证据**。\n\n' +
+  '窗口：' + ctx.WINDOW_LABEL + '。\n\n## 声明\n' + '"' + c.claim + '"\n\n来源：' + c.sourceUrl + ' (' + c.sourceQuality + ')，页面日期：' + (c.publishDate || '未知') + '\n引语："' + c.quote + '"\n\n## 执行\n' +
+  '1. WebSearch 搜索声明中的实体+事件关键词（可加「' + (ctx.WTO || ctx.DATE) + '」限定时效）；最多 2 次搜索 + 1 次 WebFetch（打开最相关的搜索结果页确认）。\n' +
+  '2. 判定：找到**至少一个独立来源**（非本来源、非转贴/镜像本来源的聚合页）支撑声明的核心事实 → refuted=false；搜索后无任何独立来源支撑、或找到相反证据、或该「事件」只在论坛/自媒体流转而无任何权威侧消息 → refuted=true。\n' +
+  '3. 搜索工具不可用/全部失败 → 返回 refuted=false 且 evidence 写明「工具不可用，未完成独立佐证」（编排层会将该 claim 以未核查口径呈现，不会冒充已核查）。\n\n' +
+  '纪律：禁止截图/图片输入。Structured output only. Evidence 简短具体（≤80 字，注明佐证/否证来源域名）。'
+
 // verifyPrompt 需要 VOTES_PER_CLAIM/REFUTATIONS_REQUIRED，经 ctx 传入。
 export const verifyPrompt = (c, ctx) =>
   '## 对抗性核查票 ' + '(voter)\n\n' +
@@ -107,7 +122,7 @@ export const reportPrompt = ctx =>
   "4. **sections / items**：\n" +
   "   - title：**新闻式标题**（≤25字，主语+动词+结果/数字，例：GLM-5.3 开源，Coding 能力接近 Fable 5）。**不要前置 [窗口外·重大]/[2-0✓] 等标签**，不要长从句，不要括号解释。**按 status 分轨**：已核查项（`已核查 2-0`/`已核查 2-1`）title 可用肯定动词（发布、上线、开源、收购、突破）直接陈述事实；未核查项（`[窗口外·重大]`/`未核查`）title **必须**用不确定度措辞（「据报」「传」「称」「预告」「据媒体」之一开头或嵌入），**禁止**用「发布」「上线」「完成」「正式」「确认」等肯定完成态词——标题与正文 summary 的不确定度纪律（4.5）必须一致，不能标题断言事实而正文又改口。例：`据报 xAI 发布 Grok 4.6，聚焦长时 Agent`（未核查）；`LFM2.5 草稿模型推理提速 3.18 倍`（已核查 2-1）。\n" +
   "   - summary：**一段新闻正文**（2-3 句），写清楚发生了什么、为什么重要，不是重复 title。\n" +
-  "   - status：核查状态，**必须**是以下枚举之一（机器消费、精确匹配，不加括号/空格变体）：`已核查 2-0` / `已核查 2-1` / `[窗口外·重大]` / `未核查` / `已否决`。窗口外重大项**必须**写 `[窗口外·重大]`（含方括号）；（render 会按该值在标题后加徽标，写错字面量会漏标未核查徽标）\n" +
+  "   - status：核查状态，**直接照抄素材行标注的 `Status:`**（机器消费、精确匹配，不加括号/空格变体、禁止自行推导或改写）——编排层已按投票结果与外部抽查结果烘焙好：`已核查 2-0` / `已核查 2-1` / `[窗口外·重大]` / `未核查` / `已否决`。窗口外重大项**必须**写 `[窗口外·重大]`（含方括号）；（render 会按该值在标题后加徽标，写错字面量会漏标未核查徽标）\n" +
   "   - 多个 sources 时只保留最权威的 1-2 个 URL。\n\n" +
   "4.5. **不确定度如实标注**（与 AI.md 风格一致）：summary 中若素材存在不确定性（单源/社区传闻/灰度状态/未官方确认），用「有用户称」「据讨论」「现有资料未说明」「暂不能确认」等措辞如实标注，不假装确定性；社区传闻与官方动态须用不同措辞区分。**对 status 为 `[窗口外·重大]` 或 `未核查` 的 item（未经窗口内对抗投票验证），summary 必须用不确定度措辞（「据报」「有媒体称」「宣称」「待官方确认」「暂不能确认」之一）描述其事项，禁止用「已解决」「完成」「正式发布」「确认」等肯定完成态措辞**。已核查项（status 为 `已核查 2-0`/`已核查 2-1`）有 vote 支撑，可正常陈述。社区传闻与官方动态须用不同措辞区分。\n\n" +
   "4.6. **窗口外参考节由编排器统一渲染**：素材里「## 窗口外参考」的**次要超窗项（nearWindow）不要自己合成进 sections**——不要写独立的「窗口外参考」section，也不要把这些条目拼进任何板块 item；编排器会在文末统一渲染「## 📎 窗口外参考」节。你只负责**窗口内** + **[窗口外·重大]（major-out）** 的合成。分工与 discover 阶段一致：major-out（行业里程碑级客观事实）进正文并带 `[窗口外·重大]` 状态；nearWindow（普通更新/次要动态）只供参考节引用。\n\n" +

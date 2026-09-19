@@ -46,7 +46,9 @@ test('static-fallback: 注入条目带 found_via:"static-fallback" + board + dat
   // 8/27 契约更新：arr.push → arr.unshift——静态项先进 boardURLMap 数组前部，allocation 每板每轮取 1 个
   // 的首额先命中静态兜底 URL（否则被排在普通候选后、预算紧张时挤到 budgetDropped 拿不到配额）。
   assert.match(TPL, /arr\.unshift\(\{ \.\.\.s, found_via/, '注入 arr.unshift 携带 spread + 覆写字段（静态前置）')
-  assert.match(TPL, /\.\.\.s, found_via:\s*'static-fallback', date:\s*DATE, board:\s*key/, 'found_via/date/board 三字段保真固定在注入行')
+  // 9/19 F3：date 不再伪造 DATE（索引页无日期，伪造「今天」会让 claimWindow 恒判 in、归档失真）——
+  // 置空走 fetch 代理提取的 publishDate（unknown fail-open 交 verify 把关，语义诚实）。
+  assert.match(TPL, /\.\.\.s, found_via:\s*'static-fallback', date:\s*'', board:\s*key/, 'found_via/date/board 三字段固定在注入行（date 置空不伪造今天）')
 })
 
 test('static-fallback: 静态注入必须先于 allocateFetchBudget（unshift 的候选能进配额）', () => {

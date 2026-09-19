@@ -21,8 +21,13 @@ import { isCliMain } from './cli-main.mjs'
 /** 默认 cdp host（与 linuxdo.mjs CDP_DEFAULTS.cdpHost 一致）。 */
 export const DEFAULT_CDP_HOST = CDP_DEFAULTS.cdpHost
 
-/** 默认 --max-sources 配额（设为 8，避免论坛噪声挤占主板块抓取配额）。 */
+/** 默认 --max-sources 交付上限：prefetch 交付给 Workflow 的候选 buffer（Workflow 侧消费配额另设
+ * linuxdoMaxSources=8，且会再做窗口过滤——交付量 > 消费量是有意冗余，供窗口过滤后仍有得选）。 */
 export const DEFAULT_MAX_SOURCES = 8
+
+/** 深抓条数上限（9/19 L3 深抓后置）：只对噪声过滤+质量排序（likeCount desc, date desc）后的前 N 帖
+ * 做单帖 .json 深抓（富化正文 + 探测权威出链）。列表读 ≤maxPages 次 + 深抓 ≤N 次，全部花在入选帖上。 */
+export const DEFAULT_DEEP_FETCH = 12
 
 /** 09-13 预抓噪声：空 snippet 铸不进 mint；重置/羊毛/喜报/蹬完/买号/拼车/代充等标题核查会 0-2。 */
 // 账号交易形态：动词后可隔 0-14 字再接「号/账号」（「收Google账号」「出ChatGPT Plus 账号」隔字/带英文不漏）。
@@ -66,6 +71,11 @@ export function parseArgs(argv) {
       const n = Number(argv[i + 1])
       if (!Number.isInteger(n) || n <= 0) throw new Error('--max-sources 必须为正整数')
       out.maxSources = n; i += 1
+    } else if (a === '--deep-fetch') {
+      if (i + 1 >= argv.length) throw new Error('--deep-fetch 缺参数值')
+      const n = Number(argv[i + 1])
+      if (!Number.isInteger(n) || n < 0) throw new Error('--deep-fetch 必须为非负整数')
+      out.deepFetch = n; i += 1
     } else if (a === '--help' || a === '-h') {
       out.help = true
     } else {
@@ -84,15 +94,22 @@ export function parseArgs(argv) {
 export async function prefetchLinuxDo(opts = {}) {
   const host = opts.host || DEFAULT_CDP_HOST
   const maxSources = typeof opts.maxSources === 'number' && opts.maxSources > 0 ? opts.maxSources : DEFAULT_MAX_SOURCES
+  const deepFetch = typeof opts.deepFetch === 'number' && opts.deepFetch >= 0 ? opts.deepFetch : DEFAULT_DEEP_FETCH
   // 复用 fetchLinuxDoNews34（CDP 抓取 + 全部协议逻辑），不复制 transport。
-  const ld = await fetchLinuxDoNews34({ cdpHost: host })
+  // 9/19 L1/L3：噪声过滤与质量排序移入 fetchLinuxDoNews34（列表读→过滤→排序→深抓后置），
+  // 深抓只花在「过滤后按赞数/新度排名前 deepFetch」的入选帖上；正则真源仍在本文件（isNoise 回调注入）。
+  const ld = await fetchLinuxDoNews34({
+    cdpHost: host,
+    deepFetch,
+    isNoise: t => LINUXDO_NOISE_TITLE.test(String(t && t.title || '')),
+  })
   if (!ld.ok || !ld.posts || !ld.posts.length) {
     // 不把失败当成功 JSON 输出：抛错（携带原因），CLI 层打印 stderr。
     const e = new Error('linuxdo-prefetch 未成功: ' + (ld.reason || 'empty_posts'))
     e.linuxdoResult = ld
     throw e
   }
-  // 可序列化成功形状：posts（噪声过滤后再配额截断）+ 元信息，供 Workflow linuxdoPrefetched 消费。
+  // 可序列化成功形状：posts（已过滤排序；再按 maxSources 截断 + 图片元数据兜底过滤）+ 元信息。
   const mapped = (ld.posts || []).map(p => ({
     id: p.id, title: p.title, url: p.url, date: p.date || '', snippet: p.snippet || '', likeCount: p.likeCount || 0,
   }))
@@ -126,11 +143,11 @@ export async function main(argv) {
     process.exit(1)
   }
   if (parsed.help) {
-    process.stdout.write('linuxdo-prefetch: 从 9222 登录态 Chrome 预抓 linux.do 前沿快讯。\n用法: node linuxdo-prefetch.mjs [--host 127.0.0.1:9222] [--max-sources 24]\n')
+    process.stdout.write('linuxdo-prefetch: 从 9222 登录态 Chrome 预抓 linux.do 前沿快讯。\n用法: node linuxdo-prefetch.mjs [--host 127.0.0.1:9222] [--max-sources 24] [--deep-fetch 12]\n--max-sources 是交付上限（交付 buffer，run-daily 传 24）；Workflow 消费配额 linuxdoMaxSources=8 另设。\n--deep-fetch 是质量排序后深抓的帖子数上限（默认 12）。\n')
     return
   }
   try {
-    const { output } = await runPrefetch({ host: parsed.host, maxSources: parsed.maxSources })
+    const { output } = await runPrefetch({ host: parsed.host, maxSources: parsed.maxSources, deepFetch: parsed.deepFetch })
     process.stdout.write(output)
   } catch (e) {
     const diag = (e && e.linuxdoResult && e.linuxdoResult.reason) ? e.linuxdoResult.reason : (e && e.message || e)

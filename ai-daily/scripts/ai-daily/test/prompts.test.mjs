@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { reportPrompt, fetchPrompt } from '../prompts.mjs'
+import { reportPrompt, fetchPrompt, externalVerifyPrompt } from '../prompts.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PROMPTS = fs.readFileSync(path.join(HERE, '../prompts.mjs'), 'utf8')
@@ -26,9 +26,10 @@ test('reportPrompt：既有约束全保留（回归不削弱）', () => {
 
 // ─── 2026-08-22 三契约缺口修复（spec 2026-08-22-ai-daily-sources-and-uncertainty-design.md）───
 
-test('discoverPrompt：majorOutOfWindow 鼓励带 url（B.3）', () => {
-  assert.match(PROMPTS, /majorOutOfWindow[\s\S]{0,1200}url/, '§5 majorOutOfWindow 描述涉及 url 字段')
-  assert.match(PROMPTS, /可溯源的官方\/一手 URL[\s\S]*`url` 字段带上（可选，无则不带）/, '「若该事实有可溯源的官方/一手 URL… url 字段」鼓励文本')
+test('discoverPrompt：majorOutOfWindow 鼓励带 url（B.3，9/19 收紧为「先搜后带」）', () => {
+  assert.match(PROMPTS, /majorOutOfWindow[\s\S]{0,1400}url/, '§5 majorOutOfWindow 描述涉及 url 字段')
+  assert.match(PROMPTS, /先花 1 次搜索\/快速确认找到它并\*\*写入 `url` 字段\*\*/, '「先花 1 次搜索…写入 url 字段」——url 从可选鼓励收紧为尽力必带')
+  assert.match(PROMPTS, /确实无法溯源（纯行业共识、无任何官方页\/权威报道页）才省略 url/, '无法溯源才省略（旧版占位符 URL 根因治理）')
 })
 
 test('reportPrompt §4.5：未核查项措辞硬约束在场（C.1 增量）', () => {
@@ -133,4 +134,21 @@ test('reportPrompt title 分轨示例：未确认「某报」与已确认 LFM2.5
   const s = reportPrompt(reportCtx)
   assert.match(s, /据报/, '未核查示例措辞：以「据报」开头')
   assert.match(s, /LFM2\.5/, '已核查示例 LFM2.5 在场')
+})
+
+// ─── 9/19 F1 外部抽查票契约 ───
+test('externalVerifyPrompt：必须外部搜索找独立证据 + 工具不可用约定 + 预算纪律', () => {
+  assert.match(PROMPTS, /export const externalVerifyPrompt/, '外部抽查票 prompt 在场（9/19 F1）')
+  const ctx = { WINDOW_LABEL: 'w', WTO: '2026-09-19', DATE: '2026-09-19' }
+  const s = externalVerifyPrompt({ claim: 'C', sourceUrl: 'https://x/1', sourceQuality: 'forum', quote: 'q', publishDate: '2026-09-18' }, ctx)
+  assert.match(s, /必须用外部搜索找独立证据/, '与内部票（禁外部搜索）对立的任务定义')
+  assert.match(s, /至少一个独立来源/, '佐证判定标准')
+  assert.match(s, /工具不可用，未完成独立佐证/, '工具不可用 → 约定返回 refuted=false + evidence 注明（编排层烘焙未核查）')
+  assert.match(s, /最多 2 次搜索 \+ 1 次 WebFetch/, '外部票预算纪律')
+  assert.match(s, /禁止截图/, '截图禁令保留')
+})
+
+test('reportPrompt §4：status 改为照抄素材行 Status（编排层烘焙，禁止自行推导）', () => {
+  assert.match(PROMPTS, /status：核查状态，\*\*直接照抄素材行标注的 `Status:`\*\*/, 'status 烘焙契约（9/19 F5）')
+  assert.match(PROMPTS, /禁止自行推导或改写/, '禁令在场')
 })

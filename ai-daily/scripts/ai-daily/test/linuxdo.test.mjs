@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { extractTopicsFromJson, extractPostTextFromJson, fetchLinuxDoNews34, mintLinuxdoSource } from '../linuxdo.mjs'
+import { extractTopicsFromJson, extractPostTextFromJson, fetchLinuxDoNews34, mintLinuxdoSource, extractHighValueOutlink, HIGH_VALUE_OUTLINK_RE } from '../linuxdo.mjs'
 import { CDP_DEFAULTS } from '../cdp-core.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -76,20 +76,27 @@ test('mintLinuxdoSource：有 snippet 铸 forum claim，形状对齐 Fetch 产�
   assert.ok(!src.isMajorOut && !c.isMajorOut, 'mint 不得标 isMajorOut')
 })
 
-test('mintLinuxdoSource：包含权威外链时提权并解引用至 sourceUrl', () => {
-  const src = mintLinuxdoSource({
+// 9/19 F7 根因修复：mint 不再提权——出链帖由编排层转为真实 fetch 目标（found_via=linuxdo-outlink），
+// claim 只能落在被真实读过的页面。mint 本身恒 forum、sourceUrl=帖子本页（snippet 是实际读到的文本）。
+test('mintLinuxdoSource：出链帖不再假提权——恒 forum + sourceUrl=帖子本页；extractHighValueOutlink 负责探链', () => {
+  const post = {
     id: 2830124,
     title: 'vLLM 新增 FP8 支持',
     url: 'https://linux.do/t/2830124',
     date: '2026-08-31',
     snippet: '社区分享：vLLM 最新 PR 合并 [出链: https://github.com/vllm-project/vllm/pull/1234]',
     likeCount: 5,
-  }, '2026-09-01')
+  }
+  const src = mintLinuxdoSource(post, '2026-09-01')
   assert.ok(src)
-  assert.equal(src.sourceQuality, 'primary')
-  assert.equal(src.claims[0].sourceUrl, 'https://github.com/vllm-project/vllm/pull/1234')
-  assert.equal(src.claims[0].sourceQuality, 'primary')
-  assert.equal(src.claims[0].quote, '社区分享：vLLM 最新 PR 合并', '提权时 quote 剥掉机器追加的 [出链:] 后缀（来源已换成外链页）')
+  assert.equal(src.sourceQuality, 'forum', '出链帖不再冒充 primary（旧版引用造假缺口已封）')
+  assert.equal(src.claims[0].sourceUrl, 'https://linux.do/t/2830124', 'sourceUrl = 帖子本页（quote 真实可溯源）')
+  assert.equal(src.claims[0].sourceQuality, 'forum')
+  // 编排层用 extractHighValueOutlink 探测出链并转真实 fetch 目标（配合 HIGH_VALUE_OUTLINK_RE）
+  assert.equal(extractHighValueOutlink(post.snippet), 'https://github.com/vllm-project/vllm/pull/1234')
+  assert.equal(extractHighValueOutlink('无出链的普通帖子'), null)
+  assert.equal(extractHighValueOutlink(''), null)
+  assert.equal(extractHighValueOutlink(null), null)
 })
 
 test('mintLinuxdoSource：空 snippet / 缺字段 → null（不造空 claim）', () => {
@@ -312,4 +319,21 @@ test('模板：无有效预抓数据稳定 no_fetch_realm 降级；未配置 lin
   assert.ok(TPL.includes('degraded: false, linuxdoSkipped: true'), '未配置 host → degraded:false 不降级')
   // cdp 组仍不进 inner parallel 普通代理集（普通代理仍 batch.filter(g => !g.cdp)）
   assert.ok(TPL.includes('batch.filter(g => !g.cdp)'), 'cdp 组仍被 filter 出普通代理集，避免双 push + 裸 feed')
+})
+// 9/19 L6：出链域名表补齐——blog.google/research.google/ai.meta.com/hf.co 不再漏网
+test('HIGH_VALUE_OUTLINK_RE：9/19 补齐域名（google 系/ai.meta.com/hf.co/mistral/stability）', () => {
+  for (const u of [
+    'https://research.google/blog/alphaevolve-xxx',
+    'https://blog.google/technology/ai/gemini-3/',
+    'https://deepmind.google/discover/blog/xxx',
+    'https://ai.meta.com/blog/muse-spark-1-3/',
+    'https://hf.co/deepseek-ai/v4',
+    'https://mistral.ai/news/mistral-medium-3',
+    'https://www.stability.ai/news/sd-5',
+    'https://www.anthropic.com/news/claude-5',
+    'https://github.com/vllm-project/vllm',
+    'https://arxiv.org/abs/2609.12345',
+  ]) assert.ok(HIGH_VALUE_OUTLINK_RE.test(u), '应命中: ' + u)
+  assert.ok(!HIGH_VALUE_OUTLINK_RE.test('https://linux.do/t/123'), 'linux.do 自身不命中')
+  assert.ok(!HIGH_VALUE_OUTLINK_RE.test('https://example.com/page'), '无关域不命中')
 })

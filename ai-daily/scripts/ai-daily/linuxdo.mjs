@@ -18,29 +18,40 @@ async function deepFetchTopic(host, id) {
 
 /**
  * 抓取 linux.do 前沿快讯（news/34）分页，返回 posts。CDP 走 9222 登录态 Chrome。
- * @param {{cdpHost?:string}} opts cdpHost 为 127.0.0.1:9222 形式；缺省 → ok:false 不降级
+ * 9/19 重构（L1/L3 根因修复——深抓先于过滤、16 次串行 CDP 只产 8 条）：
+ *   ① 先只读列表页（1 次/页）收齐全部 topic（like_count/date/excerpt 都在列表字段里）；
+ *   ② 噪声过滤（isNoise 回调，正则真源在 linuxdo-prefetch）→ 按 likeCount desc + date desc 排序；
+ *   ③ 只对排序后前 deepFetch 条做深抓（单帖 .json 读正文 + 探测权威出链）——深抓花在入选帖上，
+ *     不再是"每页前 3 条"的活跃序盲抓；深抓与列表读合计 ≤ maxPages + deepFetch 次。
+ * @param {{cdpHost?:string, isNoise?:(t:object)=>boolean, deepFetch?:number}} opts
+ *   cdpHost 为 127.0.0.1:9222 形式；缺省 → ok:false 不降级。isNoise 缺省不过滤；deepFetch 缺省 0。
  * @returns {{ok:boolean, degraded:boolean, reason:string, pages:number, topics:number, posts:Array}}
- *   posts 每项 { id, title, url, date, snippet, likeCount }
+ *   posts = 过滤排序后的数组（深抓条目已富化 snippet），每项 { id, title, url, date, snippet, likeCount }
  * no_cdp_host → ok:false 不降级（调用方选择不启用，板不崩）；其余失败 → ok:false + degraded:true。
  */
-export async function fetchLinuxDoNews34({ cdpHost } = {}) {
+export async function fetchLinuxDoNews34({ cdpHost, isNoise, deepFetch = 0 } = {}) {
   const out = { ok: true, degraded: false, reason: '', pages: 0, topics: 0, posts: [] }
   if (!cdpHost) { out.ok = false; out.reason = 'no_cdp_host'; return out }
   try {
+    const all = []
     for (let page = 1; page <= CDP_DEFAULTS.maxPages; page++) {
       const raw = await readBodyText(cdpHost, 'https://linux.do/c/news/34.json?page=' + page)
       const topics = extractTopicsFromJson(raw)
       if (!topics || !topics.length) break   // 空页即到底，不再翻
       out.pages++; out.topics += topics.length
-      // 首页字段已带 topic excerpt（<200 字）→ 不算深抓；只对最前 perPageDeep 条补深抓正文片段。
-      for (const t of topics.slice(0, CDP_DEFAULTS.perPageDeep)) {
-        const deep = await deepFetchTopic(cdpHost, t.id)
-        const postText = extractPostTextFromJson(deep)
-        if (postText) t.snippet = postText.slice(0, 2400)
-      }
-      out.posts.push(...topics)
+      all.push(...topics)
     }
-    if (out.topics === 0) { out.ok = false; out.degraded = true; out.reason = 'empty_pages' }
+    if (out.topics === 0) { out.ok = false; out.degraded = true; out.reason = 'empty_pages'; return out }
+    // 噪声过滤（回调注入，保持本模块与正则真源解耦）→ 质量排序（赞数优先、新帖次优先）。
+    const kept = typeof isNoise === 'function' ? all.filter(t => !isNoise(t)) : all
+    kept.sort((a, b) => (b.likeCount || 0) - (a.likeCount || 0) || String(b.date || '').localeCompare(String(a.date || '')))
+    // 深抓后置：只富化排序后前 deepFetch 条（正文片段 + 权威出链探测）。
+    for (const t of kept.slice(0, Math.max(0, deepFetch))) {
+      const deep = await deepFetchTopic(cdpHost, t.id)
+      const postText = extractPostTextFromJson(deep)
+      if (postText) t.snippet = postText.slice(0, 2400)
+    }
+    out.posts = kept
   } catch (e) {
     out.ok = false; out.degraded = true; out.reason = String(e && e.message || e).slice(0, 120)
   }
@@ -58,8 +69,10 @@ export function extractTopicsFromJson(raw) {
   }))
 }
 
+// 权威外链域名表（9/19 L6 补齐：blog/research.google、ai.meta.com、hf.co、mistral/stability 等——
+// 含这些出链的帖子在编排层转为真实 fetch 目标，域名表漏网 = 高价值帖降级为普通 forum 直铸）。
 export const HIGH_VALUE_OUTLINK_RE =
-  /https?:\/\/(?:www\.)?(?:github\.com\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|arxiv\.org\/(?:abs|pdf)\/[0-9.]+|huggingface\.co\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|(?:[a-zA-Z0-9-]+\.)?(?:openai|anthropic|nvidia|deepmind\.google|techcrunch|theverge|reuters|36kr|qbitai)\.com\/[^\s)\]"']+)/i
+  /https?:\/\/(?:www\.)?(?:github\.com\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|arxiv\.org\/(?:abs|pdf)\/[0-9.]+|huggingface\.co\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|hf\.co\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|ai\.meta\.com\/[^\s)\]"']+|research\.google\/[^\s)\]"']+|blog\.google\/[^\s)\]"']+|deepmind\.google\/[^\s)\]"']+|(?:[a-zA-Z0-9-]+\.)?google\.com\/[^\s)\]"']+|(?:[a-zA-Z0-9-]+\.)?(?:openai|anthropic|nvidia|techcrunch|theverge|reuters|36kr|qbitai)\.com\/[^\s)\]"']+|(?:[a-zA-Z0-9-]+\.)?(?:mistral|stability)\.ai\/[^\s)\]"']+)/i
 
 export function extractPostTextFromJson(raw) {
   if (!raw) return null
@@ -76,10 +89,19 @@ export function extractPostTextFromJson(raw) {
   return rawStr
 }
 
-// 9/01 覆盖韧性：prefetch 已带 snippet，再走 fetch 代理砸 linux.do 是 403/524 弱路径。
-// 有非空 snippet 才铸一条对齐 Fetch 产出的 source。
-// 若 snippet 中含有 GitHub/arXiv/官网 等权威外链，则自动提权将 claim 挂载至真实外链（sourceUrl / primary）。
-// 空 snippet → null，调用方仍把该项交给 fetch 代理（诚实失败，不造空 claim）。
+// 9/19 F7 根因修复：mint 不再「提权」。旧版 snippet 含 GitHub/arXiv/官网外链就把 claim 标 primary、
+// sourceUrl 指向外链页——但外链页正文从未被任何人抓取，verify 的「惊人声明需一手源」被假 primary
+// 骗过、引用角标落在没人读过的页面（引用造假）。新语义：
+//   - extractHighValueOutlink(post.snippet) 命中 → 编排层把**外链 URL**转为真实 fetch 目标（公开页，
+//     9222/WebFetch 均可抓），claim 只能落在被真实读过的权威页上；
+//   - 未命中 → mint forum 质量直铸（snippet 是真实读到的帖子文本，来源=帖子本页，语义诚实）。
+export function extractHighValueOutlink(snippet) {
+  const m = String(snippet || '').match(HIGH_VALUE_OUTLINK_RE)
+  return m ? m[0] : null
+}
+
+// 直铸 forum 源：snippet 是登录态 CDP 实际读到的帖子文本 → claim/quote 同源、可核查。
+// 出链帖不走本函数（编排层已转 fetch 目标）；空 snippet → null，调用方丢弃（不再喂给必 403 的 fetch）。
 export function mintLinuxdoSource(post, date) {
   if (!post || typeof post !== 'object') return null
   const title = typeof post.title === 'string' ? post.title.trim() : ''
@@ -87,17 +109,12 @@ export function mintLinuxdoSource(post, date) {
   const snippet = typeof post.snippet === 'string' ? post.snippet.trim() : ''
   if (!title || !url || !snippet) return null
   const d = (typeof post.date === 'string' && post.date.trim()) ? post.date.trim() : date
-  const outlinkMatch = snippet.match(HIGH_VALUE_OUTLINK_RE)
-  const targetUrl = outlinkMatch ? outlinkMatch[0] : url
-  const quality = outlinkMatch ? 'primary' : 'forum'
-  // 提权时 quote 落在权威外链页语义下：剥掉机器追加的「[出链: URL]」后缀（原文已有该 URL 则保留）。
-  const quoteBase = outlinkMatch ? snippet.replace(/\s*\[出链:\s*\S+\]\s*$/, '') : snippet
-  const quote = quoteBase.slice(0, 220)
+  const quote = snippet.slice(0, 220)
   return {
-    url, title, found_via: 'linuxdo-cdp', sourceQuality: quality, board: 'linuxdo', date: d,
+    url, title, found_via: 'linuxdo-cdp', sourceQuality: 'forum', board: 'linuxdo', date: d,
     claims: [{
       claim: title, quote, importance: 'supporting',
-      sourceUrl: targetUrl, sourceTitle: title, sourceQuality: quality, date: d, board: 'linuxdo',
+      sourceUrl: url, sourceTitle: title, sourceQuality: 'forum', date: d, board: 'linuxdo',
     }],
   }
 }

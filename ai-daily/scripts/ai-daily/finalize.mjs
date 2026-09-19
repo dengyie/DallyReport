@@ -53,7 +53,9 @@ export const extractPayloads = obj => {
     if (typeof p[k] !== 'string') throw new Error(`finalize: payloads.${k} must be a string`)
   }
   const date = (r && r.date) || null
-  if (!date || typeof date !== 'string') throw new Error('finalize: missing result.date (YYYY-MM-DD string required)')
+  if (!date || typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new Error('finalize: missing/invalid result.date (YYYY-MM-DD string required), got: ' + JSON.stringify(date))
+  }
   return { payloads: p, outDir, date }
 }
 
@@ -95,7 +97,12 @@ export const recordLedger = (ledgerPath, entries, date) => {
     try {
       const raw = JSON.parse(fs.readFileSync(ledgerPath, 'utf8'))
       if (Array.isArray(raw)) existing = raw
-    } catch { /* 账本损坏 → 重建（日志端可见 added 偏大） */ }
+    } catch (e) {
+      // 9/19 F2：账本损坏不再静默重建——先备份原文件供恢复 + stderr 告警。
+      // 旧行为只靠「added 偏大」间接可察，60 天历史无声丢失 = 次日跨天去重整体失效且无从感知。
+      try { fs.copyFileSync(ledgerPath, ledgerPath + '.corrupt') } catch { /* 备份失败不阻塞重建 */ }
+      console.error(`LEDGER-WARN 账本损坏已备份至 ${ledgerPath}.corrupt 并重建: ${e && e.message}`)
+    }
   }
   existing = pruneLedger(existing, date)
   const seen = new Map(existing.map(e => [`${e.url ? normURL(e.url) : ''}|${[...(e.tokens || [])].sort().join(',')}`, true]))
@@ -124,9 +131,13 @@ export const finalizePayloads = ({ payloads, outDir, date }) => {
   outDir = expand(outDir)
   ensure.dir(outDir)
   const written = []
+  // 9/19 F1：四产物与账本一致走 tmp+rename 原子写——旧版直接 writeFileSync，写一半进程被杀/磁盘满
+  // 会留下半截 md/claims 且旧文件已被覆盖，产物损坏不可回滚。同目录 rename 原子。
   const write = (name, content) => {
     const fp = path.join(outDir, name)
-    fs.writeFileSync(fp, content)
+    const tmp = fp + '.tmp'
+    fs.writeFileSync(tmp, content)
+    fs.renameSync(tmp, fp)
     written.push(fp)
   }
   write(`${date}.verified-claims.json`, payloads.claims)
@@ -146,25 +157,42 @@ if (resultPath) {
   const obj = JSON.parse(raw)
   const spec = extractPayloads(obj)
   if (outOverride) spec.outDir = outOverride
-  const written = finalizePayloads(spec)
-  for (const fp of written) console.log(`WROTE ${fp} (${fs.statSync(fp).size} bytes)`)
 
-  // 9/13 跨天账本：仅生产 outDir（或显式 --ledger）记账；烟测 /tmp 隔离。失败只告警不回滚产物。
+  // 9/19 F3：记账先行 + 结果注入 meta（ledger_recorded 字段）——旧版记账失败只进 stderr，
+  // meta 无旗标，编排器无从感知「下一轮必然重复成稿」的风险。失败不阻塞产物落盘。
+  // 注：先记账后落盘——若落盘失败，账本多记了本轮条目，但下一轮去重只拦「已报道」候选，
+  // 不会误杀新事件；反向（先落盘后记账失败）才是真风险（重复成稿）。
   const resolvedOut = path.resolve(expand(spec.outDir))
   const isProd = isProdOutDir(spec.outDir)
   const ledgerPath = ledgerOverride || DEFAULT_LEDGER
+  let ledgerStatus = 'skipped'
   if (!isProd && !ledgerOverride) {
     console.log(`LEDGER-SKIP non-production outDir（${resolvedOut}）不在 DallyReport 前缀下；烟测不记账，如需强制用 --ledger`)
   } else {
     try {
       const entries = ledgerEntriesFromClaims(spec.payloads.claims, spec.date)
       const { total, added } = recordLedger(ledgerPath, entries, spec.date)
+      ledgerStatus = 'recorded'
       console.log(`LEDGER-RECORDED ${ledgerPath} total=${total} added=${added}`)
     } catch (e) {
-      console.error(`LEDGER-WARN 记账失败（产物已落盘不受影响）: ${e && e.message}`)
+      ledgerStatus = 'failed'
+      console.error(`LEDGER-WARN 记账失败（产物仍将落盘）: ${e && e.message}`)
     }
+  }
+  try {
+    const metaObj = JSON.parse(spec.payloads.meta)
+    metaObj.ledger_recorded = ledgerStatus
+    metaObj.ledger_path = (!isProd && !ledgerOverride) ? null : ledgerPath
+    spec.payloads.meta = JSON.stringify(metaObj, null, 1)
+  } catch (e) {
+    console.error(`LEDGER-WARN meta 注入 ledger_recorded 失败（不影响落盘）: ${e && e.message}`)
+  }
 
-    // P4: 统一产物交付与高清长图渲染闭环
+  const written = finalizePayloads(spec)
+  for (const fp of written) console.log(`WROTE ${fp} (${fs.statSync(fp).size} bytes)`)
+
+  // P4: 统一产物交付与高清长图渲染闭环
+  if (isProd || ledgerOverride) {
     try {
       await runPoster(resolvedOut, spec.date)
     } catch (e) {

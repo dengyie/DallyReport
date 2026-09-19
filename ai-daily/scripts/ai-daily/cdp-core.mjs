@@ -23,10 +23,18 @@ const hasW = () => (typeof globalThis !== 'undefined' && 'WebSocket' in globalTh
 
 // CDP HTTP：开标签 → 读 body 文本 → 关标签。
 // 真 WebSocket：Runtime.evaluate 轮询 body.innerText（复用用户另一生成器的 polling 形态）。
-// 无 WebSocket（workflow realm）：CDP HTTP-only polling——每片轮询都等价于"关旧标签+开新标签+读 body"的幂等快照。
+// 无 WebSocket（workflow realm）：CDP HTTP-only polling——历史保险路径，现代 Chrome 的 target 元数据无
+// innerText 字段、实际读不到正文（realm 已禁裸抓，勿依赖；详见 readBodyTextRaw 内注记）。
 // 关闭 CDP 临时标签（浏览器 tab，非仅 debugger Socket）——WS 路径必须补这步，否则每个被抓 URL 都泄漏一个标签到用户 9222 Chrome。
+// 9/19 C6：关失败不再全静默——stderr 一行诊断（不影响抓取结果与退出码），泄漏可查。
 async function closeTab(host, targetId) {
-  try { await fetch(`http://${host}/json/close/${targetId}`, { method: 'PUT', signal: AbortSignal.timeout(3000) }) } catch {}
+  try {
+    await fetch(`http://${host}/json/close/${targetId}`, { method: 'PUT', signal: AbortSignal.timeout(3000) })
+  } catch (e) {
+    if (typeof process !== 'undefined' && process.stderr && typeof process.stderr.write === 'function') {
+      try { process.stderr.write('cdp-core: close-tab 失败 ' + targetId + ': ' + String(e && e.message || e).slice(0, 80) + '\n') } catch { /* 诊断本身失败则真吞 */ }
+    }
+  }
 }
 
 // 原始正文读取：返回页面 body.innerText（任意内容；空/失败 → null）。9/13 从 readBodyText 拆出——
@@ -45,9 +53,14 @@ export async function readBodyTextRaw(host, url) {
     const wsUrl = target.webSocketDebuggerUrl
     let text = null
     if (hasW()) {
-      // 真 WebSocket：轮询内文。
+      // 真 WebSocket：轮询内文。9/19 C1：open 等待加超时——旧版 onopen 无 timeout，Chrome 假死
+      // （TCP 未断但永不回调）会让 readBodyTextRaw 永久挂起、锁被陈旧回收后并发超发。
       const ws = new WebSocket(wsUrl)
-      await new Promise((ok, no) => { ws.onopen = ok; ws.onerror = () => { ws.close(); no(new Error('ws open')) } })
+      await new Promise((ok, no) => {
+        const to = setTimeout(() => { try { ws.close() } catch { /* already closing */ } no(new Error('ws open timeout')) }, CDP_DEFAULTS.requestTimeoutMs)
+        ws.onopen = () => { clearTimeout(to); ok() }
+        ws.onerror = () => { clearTimeout(to); try { ws.close() } catch { /* already closing */ } no(new Error('ws open')) }
+      })
       let n = 0; const pend = new Map()
       ws.onmessage = e => { const v = JSON.parse(e.data); if (v.id && pend.has(v.id)) { pend.get(v.id)(v); pend.delete(v.id) } }
       const send = (method, params = {}) => new Promise((res, rej) => {
@@ -66,8 +79,10 @@ export async function readBodyTextRaw(host, url) {
       }
       ws.close()
     } else {
-      // 无 WebSocket 全局（workflow realm）：CDP HTTP-only polling — 每片轮询都等价于
-      // "关旧标签+开新标签+读 body"的幂等快照。
+      // 无 WebSocket 全局（workflow realm）：CDP HTTP-only polling。
+      // ⚠️ 历史保险路径（9/19 C5 注记）：现代 Chrome 的 /json/<targetId> target 元数据**没有** innerText
+      // 字段——本路径实际读不到正文（j.innerText 恒 undefined）。realm 已被 build 护栏禁止裸抓 CDP
+      // （build.mjs FORBIDDEN_INLINE），此分支仅余理论价值，勿依赖；如需恢复 realm 抓取必须重设计。
       await new Promise(r => setTimeout(r, CDP_DEFAULTS.pollIntervalMs))
       for (let i = 0; i < Math.ceil(CDP_DEFAULTS.pollMaxMs / CDP_DEFAULTS.pollIntervalMs); i++) {
         try {

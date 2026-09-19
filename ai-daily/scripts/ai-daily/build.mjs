@@ -84,26 +84,41 @@ const main = () => {
   const checkOnly = argv.includes('--check-only')
   const code = build()
   assertRealmGuards(code)
-  // 产物是混合语法：含 export（ESM 词法）+ 顶层 return（仅 CJS 合法）。严格 --check 两端都判 syntax error，
-  // 唯一能过的是"无 package.json 的 .js"——Node 走宽松 CJS、export 降级为 warning、return 合法 → exit 0。
-  // 但镜像仓库根 package.json 是 "type":"module"，产物旁写 .js 会继承 ESM → 顶层 return 判 illegal → build 崩。
-  // 解法：tmp 写 os.tmpdir()（系统临时目录，无 package.json 干扰）+ .js 后缀，两端都 CJS 宽松判定；check 过再写回 outPath。
-  // 2026-08-22 第二十项同步时镜像 build 崩即此因（旧版 tmp=outPath+'.buildtmp.js' 继承了镜像 type:module）。
-  const tmp = path.join(os.tmpdir(), 'ai-daily-buildtmp-' + process.pid + '.js')
-  fs.writeFileSync(tmp, code)
-  try {
-    execFileSync(process.execPath, ['--check', tmp], { stdio: 'pipe' })
-  } catch (e) {
-    fs.unlinkSync(tmp)
-    throw new Error('产物 node --check 失败：\n' + (e.stderr || e.message))
-  }
+  syntaxGate(code)
   if (checkOnly) {
-    fs.unlinkSync(tmp)
     console.log('build check-only OK：模板+模块可生成语法合法产物（' + code.split('\n').length + ' 行），未写盘')
     return
   }
   fs.writeFileSync(outPath, code)
-  fs.unlinkSync(tmp)
   console.log('built → ' + outPath + '（' + code.split('\n').length + ' 行）')
+}
+
+// ─── 语法门（9/19 根因修复，与 Node 版本解耦）───
+// 产物语法 = 模板唯一顶层 export（meta）+ 顶层 await + 顶层 return 的混合体。这种混合在 ESM/CJS
+// 任一解析模式下都非法（export 仅 ESM、return 仅函数体、await 仅 ESM 或 async 函数体），node --check
+// 能过纯靠旧版 Node 的宽松解析——26.0.0 → 26.9.0 升级（9/19 brew）后即全线崩（Illegal return statement）。
+// 根因修复：check 前做确定性变换，把产物显式归一到「async 函数体」语法再校验——
+//   ① 断言顶层 export 有且仅有一个、且就是模板 meta 标记（新形态 export 一律构建失败，防止变换静默漏剥）；
+//   ② 剥该 export + 整体包进 async function（return/await 皆合法）；
+//   ③ node --check 变换后文本：纯函数体、无 export → 与模块检测/镜像 package.json type 完全无关。
+// 护栏强度不降：作用域重名、token 级语法错在函数体内照样抛；变换前提本身是断言。
+// 运行时（Workflow harness 以函数体语义加载产物）与 build.test.mjs 的 new Function 探针同构，故此变换
+// 校验的就是真实执行语法。
+const TEMPLATE_EXPORT_DECL = 'export const meta = {'
+const syntaxGate = code => {
+  const exportLines = code.match(/^export[^\n]*/gm) || []
+  if (exportLines.length !== 1 || exportLines[0] !== TEMPLATE_EXPORT_DECL) {
+    throw new Error('产物顶层 export 契约被破坏（须且仅须一行 "' + TEMPLATE_EXPORT_DECL + '"），实际：\n  ' + exportLines.join('\n  '))
+  }
+  const transformed = 'async function __syntaxGate__(args) {\n' + code.replace(TEMPLATE_EXPORT_DECL, 'const meta = {') + '\n}\n'
+  const tmp = path.join(os.tmpdir(), 'ai-daily-syntaxcheck-' + process.pid + '.js')
+  fs.writeFileSync(tmp, transformed)
+  try {
+    execFileSync(process.execPath, ['--check', tmp], { stdio: 'pipe' })
+  } catch (e) {
+    throw new Error('产物语法校验失败（async 函数体归一后）：\n' + (e.stderr || e.message))
+  } finally {
+    try { fs.unlinkSync(tmp) } catch (_) { /* noop */ }
+  }
 }
 main()

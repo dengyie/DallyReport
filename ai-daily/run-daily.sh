@@ -109,6 +109,8 @@ fi
   PREFETCH_JSON="$LOGDIR/linuxdo-prefetch.json"
   # 9/01 P2：预抓 JSON 只落盘。标题/摘要含引号时 $(cat) 插进双引号 claude -p 会破 shell。
   # 编排器 Read 该文件后把对象作为 args.linuxdoPrefetched 传入——JSON 本体永不进 prompt。
+  # 9/19 L4：--max-sources 24 = 交付 buffer（质量排序后的候选上限，供 Workflow 窗口过滤后仍有得选）；
+  # Workflow 消费配额 linuxdoMaxSources=8 另设，两数语义不同、非矛盾。深抓上限默认 12（质量排序后置）。
   if node "/Users/mango/project/claude-project/obsidian/scripts/ai-daily/linuxdo-prefetch.mjs" --host "127.0.0.1:9222" --max-sources 24 > "$PREFETCH_JSON" 2>> "$LOG"; then
     if [ -s "$PREFETCH_JSON" ]; then
       echo "LINUXDO-PREFETCH-OK json_bytes=$(wc -c < "$PREFETCH_JSON" | tr -d ' ') → 落盘 $PREFETCH_JSON，由编排器 Read 注入 args"

@@ -219,3 +219,60 @@ test('CLI：非 http URL → 非零退出 + 参数级诊断；--help → exit 0 
   assert.equal(help.code, 0)
   assert.match(help.stdout, /用法: node cdp-fetch/)
 })
+
+// ─── 9/19 C3/C4 契约：持锁心跳续期 + 空正文重开重试 ───
+
+test('cdpFetch：空正文先重开重试一次再判失败（慢渲染页不直接放弃登录态通道）', async () => {
+  const openCount = { n: 0 }
+  installMockFetch({ bodyText: '   ', openCount })
+  const { CDP_DEFAULTS } = await import('../cdp-core.mjs')
+  const oldPoll = CDP_DEFAULTS.pollIntervalMs, oldMax = CDP_DEFAULTS.pollMaxMs
+  CDP_DEFAULTS.pollIntervalMs = 1; CDP_DEFAULTS.pollMaxMs = 20
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cdp-fetch-retry-'))
+  try {
+    await assert.rejects(() => cdpFetch({ url: 'https://x.example/retry', lockDir: dir, retryDelayMs: 0 }), /empty_body/)
+    assert.equal(openCount.n, 2, '空正文应重开标签重试一次（开标签 2 次）后仍空才判失败')
+  } finally {
+    CDP_DEFAULTS.pollIntervalMs = oldPoll; CDP_DEFAULTS.pollMaxMs = oldMax
+    fs.rmSync(dir, { recursive: true, force: true })
+    delete globalThis.fetch; delete globalThis.WebSocket; delete globalThis.WebSocketOpenFail
+  }
+})
+
+test('cdpFetch：持锁心跳持续 touch 锁 mtime——陈旧回收只清真死进程（9/19 C3）', async () => {
+  installMockFetch({ bodyText: '   ' })
+  const { CDP_DEFAULTS } = await import('../cdp-core.mjs')
+  const oldPoll = CDP_DEFAULTS.pollIntervalMs, oldMax = CDP_DEFAULTS.pollMaxMs
+  CDP_DEFAULTS.pollIntervalMs = 1; CDP_DEFAULTS.pollMaxMs = 30
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cdp-fetch-hb-'))
+  try {
+    const done = cdpFetch({
+      url: 'https://x.example/hb', lockDir: dir, heartbeatMs: 20, retryDelayMs: 0,
+      lockOpts: { dir, staleMs: 100000, max: 1, pollMs: 5, timeoutMs: 2000 },
+    }).then(() => null, e => e)
+    // 等 cdpFetch 拿到锁（观察 lock-0.lock 出现）
+    let fp = null
+    for (let i = 0; i < 200 && !fp; i++) {
+      await new Promise(r => setTimeout(r, 5))
+      const f = fs.readdirSync(dir).find(x => x.endsWith('.lock'))
+      if (f) fp = path.join(dir, f)
+    }
+    assert.ok(fp, '测试应观察到锁文件出现')
+    const m1 = fs.statSync(fp).mtimeMs
+    await new Promise(r => setTimeout(r, 80))
+    assert.ok(fs.existsSync(fp), '持锁期间锁不得被陈旧回收（心跳续期中）')
+    const m2 = fs.statSync(fp).mtimeMs
+    assert.ok(m2 > m1 - 5, '心跳应持续 touch mtime（mtime 不落后）')
+    const err = await done
+    assert.ok(err === null || /empty_body/.test(String(err && err.message)), 'cdpFetch 以预期路径收尾')
+  } finally {
+    CDP_DEFAULTS.pollIntervalMs = oldPoll; CDP_DEFAULTS.pollMaxMs = oldMax
+    fs.rmSync(dir, { recursive: true, force: true })
+    delete globalThis.fetch; delete globalThis.WebSocket; delete globalThis.WebSocketOpenFail
+  }
+})
+
+test('LOCK_TIMEOUT_MS 盖住关标签 3s + 调度余量（9/19 C2：旧值 30s < 最坏读页 33s，并发必误回落）', () => {
+  assert.ok(LOCK_TIMEOUT_MS >= CDP_DEFAULTS.requestTimeoutMs + CDP_DEFAULTS.pollMaxMs + 5000,
+    `锁等待 ${LOCK_TIMEOUT_MS}ms 应 ≥ open+poll+5s`)
+})

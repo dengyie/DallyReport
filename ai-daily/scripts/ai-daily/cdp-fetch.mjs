@@ -22,9 +22,14 @@ export const DEFAULT_MAX_CHARS = 12000
 export const LOCK_MAX = 3
 export const LOCK_STALE_MS = 60000
 export const LOCK_POLL_MS = 400
-// 必须盖住一次完整读页（开标签 requestTimeoutMs + 轮询 pollMaxMs）。Fetch 批 6、锁上限 3：
-// 后 3 个代理要能等到前 3 个 finally 放锁，而不是 10s 就 lock_timeout 回落 WebFetch。
-export const LOCK_TIMEOUT_MS = CDP_DEFAULTS.requestTimeoutMs + CDP_DEFAULTS.pollMaxMs
+// 持锁心跳间隔：每 10s touch 锁文件 mtime。陈旧回收（LOCK_STALE_MS=60s）据此只清「真死进程」——
+// 持锁进程活着时 mtime 持续续期，绝不误回收活锁（9/19 C3：旧版 mtime 只在创建时写一次，
+// 持锁 >60s 的慢页/挂起会被他人回收 → 同槽双进程超发）。
+export const LOCK_HEARTBEAT_MS = 10000
+// 必须盖住一次完整读页（开标签 requestTimeoutMs + 轮询 pollMaxMs + 关标签 3s + 调度余量）。
+// 9/19 C2：旧值 = requestTimeoutMs + pollMaxMs（30s）< 单次最坏 33s——FETCH_BATCH=6、锁上限 3 时，
+// 后 3 个代理在 30s 必然 lock_timeout 回落 WebFetch，高峰期 9222 通道命中率静默下降。
+export const LOCK_TIMEOUT_MS = CDP_DEFAULTS.requestTimeoutMs + CDP_DEFAULTS.pollMaxMs + 5000
 
 export const defaultLockDir = () => path.join(os.homedir(), '.ai-daily', 'cdp-locks')
 
@@ -86,14 +91,27 @@ export async function cdpFetch(opts = {}) {
   const host = opts.host || CDP_DEFAULTS.cdpHost
   const maxChars = typeof opts.maxChars === 'number' && opts.maxChars > 0 ? opts.maxChars : DEFAULT_MAX_CHARS
   const lockDir = opts.lockDir
+  const lockIo = opts.lockIo || fs
   const lock = await acquireLock(lockDir ? { dir: lockDir, ...(opts.lockOpts || {}) } : (opts.lockOpts || {}))
+  // 持锁心跳（9/19 C3）：定期 touch 锁文件 mtime，陈旧回收只清真死进程。unref 不阻塞进程退出。
+  const hbMs = opts.heartbeatMs === 0 ? 0 : (typeof opts.heartbeatMs === 'number' ? opts.heartbeatMs : LOCK_HEARTBEAT_MS)
+  const hb = hbMs > 0 ? setInterval(() => { try { lockIo.writeFileSync(lock, String(Date.now())) } catch { /* raced */ } }, hbMs) : null
+  if (hb && typeof hb.unref === 'function') hb.unref()
+  const retryDelayMs = typeof opts.retryDelayMs === 'number' && opts.retryDelayMs >= 0 ? opts.retryDelayMs : 1000
   try {
-    const text = await readBodyTextRaw(host, url)
+    let text = await readBodyTextRaw(host, url)
+    if (!text || !String(text).trim()) {
+      // 9/19 C4：慢渲染页一次重开重试（仍持同一把锁）——15s poll 上限对重 JS 页可能不够，
+      // 一次性的渲染慢不该直接放弃登录态通道回落匿名 WebFetch。
+      if (retryDelayMs > 0) await new Promise(r => setTimeout(r, retryDelayMs))
+      text = await readBodyTextRaw(host, url)
+    }
     if (!text || !String(text).trim()) throw new Error('empty_body（标签正文为空——页面未渲染/被拦/非文档页）')
     const clipped = String(text).slice(0, maxChars)
     return { ok: true, url, host, chars: clipped.length, text: clipped }
   } finally {
-    releaseLock(lock, opts.lockIo || fs)
+    if (hb) clearInterval(hb)
+    releaseLock(lock, lockIo)
   }
 }
 

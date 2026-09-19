@@ -74,7 +74,7 @@ export const allocateFetchBudget = (boardURLMap, MAX_FETCH, opts) => {
   const budgetDropped = []
   const seen = new Map()
   const fetchTargets = []
-  const prefer = new Set((opts && opts.preferFoundVia) || ['linuxdo-cdp', 'static-fallback'])
+  const prefer = new Set((opts && opts.preferFoundVia) || ['linuxdo-cdp', 'linuxdo-outlink', 'static-fallback'])
   const preferShare = (opts && typeof opts.preferShare === 'number') ? opts.preferShare : 0.5
   // prefer 通道封顶：floor(MAX_FETCH × preferShare)，单板墙量配额不能吃光整个预算。
   // preferShare=0 → 封顶 0 → 通道整体关闭（回退纯轮询）；默认 0.5。

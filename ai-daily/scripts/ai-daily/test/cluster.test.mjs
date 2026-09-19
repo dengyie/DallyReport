@@ -54,8 +54,11 @@ test('tokenize：ASCII ≥4/停用词过滤（既有契约）+ CJK bigram（9/13
   // CJK bigram 停用：虚字单字（的/了/在…）与新闻套话（发布/推出/消息…）不进 token
   assert.deepEqual(clusterTokenize('的了吗'), [], '纯虚字串全停用')
   assert.deepEqual(clusterTokenize('发布新的消息'), ['布新'], '套话/虚字 bigram 停用，仅残余真实搭配')
-  // 同一实体中文串产出稳定 bigram（按相邻对插入序，确定性）
-  assert.deepEqual(clusterTokenize('星尘智能'), ['星尘', '尘智', '智能'], '两字名拆相邻对（插入序）')
+  // 9/19 ④：高频四字术语的内部 bigram 全表停用——单个四字词不再凑满任何阈值（误合最大噪声源）
+  assert.deepEqual(clusterTokenize('人工智能'), [], '四字术语（人工智能）内部 bigram 全停用')
+  assert.deepEqual(clusterTokenize('机器学习与数据中心'), [], '机器学习/数据中心内部 bigram 全停用')
+  // 同一实体中文串产出稳定 bigram（按相邻对插入序，确定性）；9/19 起尾字属通用词表的 bigram 被停用
+  assert.deepEqual(clusterTokenize('星尘智能'), ['星尘', '尘智'], '两字名拆相邻对；「智能」入 9/19 停用表')
 })
 
 test('mergeCluster：sources 去重、mergedCount 记数、claim 为合并 key、title/summary 保首条', () => {
@@ -96,4 +99,41 @@ test('mergeCluster：空输入容错返回对象不崩', () => {
   assert.equal(m.mergedCount, 0)
   assert.equal(m.claim, '', '空 claim 不崩')
   assert.deepEqual(m.sources, [])
+})
+
+// ─── 9/19 P1 误合修复契约：CJK 阈值 4 + 四字术语停用 + 簇上限 + status 仲裁 ───
+
+test('clusterClaims：无关中文条目各含一个四字术语不再并簇（9/19 实证误合根因）', () => {
+  // 旧版：各含「人工智能」即凑满 3 bigram → 误合。9/19：内部 bigram 全停用 → 无共享 token。
+  const a = mk('OpenAI 发布新模型', 'OpenAI 发布新一代人工智能模型')
+  const b = mk('国内智算中心项目开工', '某地人工智能数据中心项目开工')
+  const clusters = clusterClaims([a, b])
+  assert.equal(clusters.length, 2, '共享的只有四字术语 bigram（已停用）→ 2 簇')
+})
+
+test('clusterClaims：CJK 同事件改写 ≥4 共享 bigram 仍聚簇（升级不丢能力）', () => {
+  const a = mk('智谱清言 X 发布', '智谱清言 X 正式发布：智能体能力全面升级')
+  const b = mk('智谱清言 X 上线', '智谱推出清言 X：智能体功能大幅增强')
+  const clusters = clusterClaims([a, b])
+  assert.equal(clusters.length, 1, '共享 智谱/清言/智能体/功能 等实体 bigram ≥4 → 一簇')
+})
+
+test('clusterClaims：簇大小上限 4——桥接 token 传递闭包不再串 5+ 条', () => {
+  const mkA = n => mk('公司 X 新闻 ' + n, 'acmecorp 相关动态 ' + n)
+  const items = [1, 2, 3, 4, 5].map(mkA)
+  const clusters = clusterClaims(items)
+  const big = clusters.filter(cl => cl.items.length > 1)
+  assert.ok(big.every(cl => cl.items.length <= 4), '任一簇不得超 4 条（实得 ' + big.map(cl => cl.items.length) + '）')
+  assert.equal(clusters.reduce((n, cl) => n + cl.items.length, 0), 5, '条数守恒（不丢条目）')
+})
+
+test('mergeCluster：status 仲裁取「最已核查」——首条未核查不再覆盖已核查', () => {
+  const a = mk('T1', '同事件', ['https://a/1'], { status: '[窗口外·重大]' })
+  const b = mk('T2', '同事件 B', ['https://b/2'], { status: '已核查 2-0' })
+  const merged = mergeCluster([a, b])
+  assert.equal(merged.status, '已核查 2-0', '已核查项不被首条的 [窗口外·重大] 拖成未核查')
+  const c = mk('T3', '同事件 C', ['https://c/3'], { status: '已核查 2-1' })
+  const d = mk('T4', '同事件 D', ['https://d/4'], { status: '已核查 2-0' })
+  assert.equal(mergeCluster([c, d]).status, '已核查 2-0', '已核查内部取支持票最强')
+  assert.equal(mergeCluster([mk('E', 'E1', null, { status: '未核查' }), mk('F', 'F1')]).status, '未核查', '无已核查项时取首条非空')
 })
