@@ -72,7 +72,7 @@ export function extractTopicsFromJson(raw) {
 // 权威外链域名表（9/19 L6 补齐：blog/research.google、ai.meta.com、hf.co、mistral/stability 等——
 // 含这些出链的帖子在编排层转为真实 fetch 目标，域名表漏网 = 高价值帖降级为普通 forum 直铸）。
 export const HIGH_VALUE_OUTLINK_RE =
-  /https?:\/\/(?:www\.)?(?:github\.com\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|arxiv\.org\/(?:abs|pdf)\/[0-9.]+|huggingface\.co\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|hf\.co\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|ai\.meta\.com\/[^\s)\]"']+|research\.google\/[^\s)\]"']+|blog\.google\/[^\s)\]"']+|deepmind\.google\/[^\s)\]"']+|(?:[a-zA-Z0-9-]+\.)?google\.com\/[^\s)\]"']+|(?:[a-zA-Z0-9-]+\.)?(?:openai|anthropic|nvidia|techcrunch|theverge|reuters|36kr|qbitai)\.com\/[^\s)\]"']+|(?:[a-zA-Z0-9-]+\.)?(?:mistral|stability)\.ai\/[^\s)\]"']+)/i
+  /https?:\/\/(?:www\.)?(?:github\.com\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|arxiv\.org\/(?:abs|pdf)\/[0-9.]+|huggingface\.co\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|hf\.co\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|ai\.meta\.com\/[^\s)\]"']+|research\.google\/[^\s)\]"']+|blog\.google\/[^\s)\]"']+|deepmind\.google\/[^\s)\]"']+|(?:[a-zA-Z0-9-]+\.)?google\.com\/[^\s)\]"']+|x\.com\/[^\s)\]"']+|twitter\.com\/[^\s)\]"']+|(?:[a-zA-Z0-9-]+\.)?(?:openai|anthropic|nvidia|techcrunch|theverge|reuters|36kr|qbitai)\.com\/[^\s)\]"']+|(?:[a-zA-Z0-9-]+\.)?(?:mistral|stability)\.ai\/[^\s)\]"']+)/i
 
 export function extractPostTextFromJson(raw) {
   if (!raw) return null
@@ -111,10 +111,14 @@ export function mintLinuxdoSource(post, date) {
   if (!title || !url || !snippet) return null
   const d = (typeof post.date === 'string' && post.date.trim()) ? post.date.trim() : date
   const quote = snippet.slice(0, 220)
+  // 09-20：claim=title 只剩标题级新闻（ZCode .git 上传）。claim 取正文首句，quote 仍是可溯源 snippet。
+  const firstSent = snippet.split(/[。！？\n]/)[0].replace(/\s+/g, ' ').trim()
+  const fromBody = firstSent.slice(0, 80)
+  const claim = fromBody.length >= 8 ? fromBody : title
   return {
     url, title, found_via: 'linuxdo-cdp', sourceQuality: 'forum', board: 'linuxdo', date: d,
     claims: [{
-      claim: title, quote, importance: 'supporting',
+      claim, quote, importance: 'supporting',
       sourceUrl: url, sourceTitle: title, sourceQuality: 'forum', date: d, board: 'linuxdo',
     }],
   }

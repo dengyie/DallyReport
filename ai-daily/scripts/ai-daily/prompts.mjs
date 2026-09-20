@@ -82,7 +82,7 @@ export const fetchPrompt = (src, ctx) => {
     : '⚠️ **浏览器唯一通道纪律（最高优先级）**：**禁止启动/打开任何独立浏览器**（Playwright/`mcp__playwright__*`/新 Chrome 实例/`open -a`）——本模式未启用 9222 通道，抓取一律 WebFetch 文本抓取；抓取失败 → claims:[] 且 sourceQuality:"unreliable"，不得改用任何浏览器工具兜底。\n') +
   indexNote +
   '2. 判定来源质量：primary(官方/一手) / secondary(主流媒体报道) / blog / forum / unreliable。\n' +
-  '3. 提取 2-3 条与本板块日报问题相关、可核实、具体的声明（非空泛结论）；每条必须带原文引语 quote（**逐字抄录支撑该声明的完整原句，≤220 字，且必须包含声明中的全部具体细节——日期/数字/机构名/对比结论**，只截 40 字短句会导致核查票无据可依而误否决）、重要性 central/supporting/tangential；若实际引用页与上方 URL 不同（索引页选中的文章页），每条 claim 另带字段 sourceUrl=该文章真实 URL。\n' +
+  '3. 提取 2-3 条与本板块日报问题相关、可核实、具体的声明（非空泛结论）；**每条 claim 只写一个可独立核验的事实**（数字/专名/对比拆开，禁止把 Star/Fork/npm/TUI 塞进同一条——一条 claim 塞多事实会被 quote≤220 截断，核查票因「细节未全覆盖」误否决）。每条必须带原文引语 quote（**逐字抄录支撑该声明的完整原句，≤220 字，且必须包含声明中的全部具体细节——日期/数字/机构名/对比结论**，只截 40 字短句会导致核查票无据可依而误否决）、重要性 central/supporting/tangential；若实际引用页与上方 URL 不同（索引页选中的文章页），每条 claim 另带字段 sourceUrl=该文章真实 URL。\n' +
   '4. 注明页面/事件日期 publishDate（YYYY-MM-DD 或 MM-DD）；无日期则空。\n' +
   '5. 页面较长时只精读与日报相关且日期在窗口内的部分，其余快速略读；抓取失败/付费墙/无关页面 → 返回 claims:[] 且 sourceQuality:"unreliable"。\n\nStructured output only.'
 }
@@ -105,11 +105,16 @@ export const externalVerifyPrompt = (c, ctx) =>
   '纪律：禁止截图/图片输入。Structured output only. Evidence 简短具体（≤80 字，注明佐证/否证来源域名）。'
 
 // verifyPrompt 需要 VOTES_PER_CLAIM/REFUTATIONS_REQUIRED，经 ctx 传入。
-export const verifyPrompt = (c, ctx) =>
-  '## 对抗性核查票 ' + '(voter)\n\n' +
+export const verifyPrompt = (c, ctx) => {
+  const isPrimary = c && c.sourceQuality === 'primary'
+  const defaultLine = isPrimary
+    ? '默认 refuted=false：一手源正文已抓、引语覆盖声明核心数字/专名即存活。仅当声明断言明显超出引语（引语只谈 X 却断言 Y）、日期明确超窗、或明显营销/标题党时才 refuted=true。'
+    : '默认 refuted=true，除非证据充分支撑。'
+  return '## 对抗性核查票 ' + '(voter)\n\n' +
   '请对下列声明持怀疑态度，尝试证伪。≥' + ctx.REFUTATIONS_REQUIRED + '/' + ctx.VOTES_PER_CLAIM + ' 票证伪即否决。\n\n' +
   '窗口：' + ctx.WINDOW_LABEL + '。\n\n## 声明\n' + '"' + c.claim + '"\n\n来源：' + c.sourceUrl + ' (' + c.sourceQuality + ')，页面日期：' + (c.publishDate || '未知') + '，条目标注日期：' + (c.date || '未知') + '\n引语："' + c.quote + '"\n\n## 清单\n' +
-  '1. 引语是**逐字抄录的完整支撑句**（契约要求覆盖声明全部细节——日期/数字/机构/对比）。声明中的细节凡能在引语中逐字溯源即视为被支撑；仅当声明断言明显超出引语范围（引语只谈 X 却断言 Y）才算过度引申。引语不是全文≠证据不足，勿因引语未铺陈全背景而否决。\n2. 时效：**窗口为 [' + (ctx.WFROM || ctx.DATE) + ', ' + (ctx.WTO || ctx.DATE) + ']**。事件/发布日期明显在窗口外（数天前/数周前/上月）→ refuted=true；页面日期在窗口内但内容陈述的是旧事件，按**事件实际发生日**判定，日期明确超窗仍 → refuted=true；无法判定日期则不因时效否决。\n3. 来源质量与声明强度是否匹配？（惊人声明需一手源）\n4. 是否营销话术/吹嘘/标题党/论坛猜测？（→ refuted=true）\n\n5. **禁止使用 WebSearch/WebFetch 等外部搜索工具**——本核查只依据上面给出的引语/来源/日期/声明做内部一致性判断，外部搜索会烧掉大量 token。\n\n默认 refuted=true，除非证据充分支撑。\n\nStructured output only. Evidence 简短具体（≤80 字）。'
+  '1. 引语是**逐字抄录的完整支撑句**（契约要求覆盖声明全部细节——日期/数字/机构/对比）。声明中的细节凡能在引语中逐字溯源即视为被支撑；仅当声明断言明显超出引语范围（引语只谈 X 却断言 Y）才算过度引申。引语不是全文≠证据不足，勿因引语未铺陈全背景而否决。\n2. 时效：**窗口为 [' + (ctx.WFROM || ctx.DATE) + ', ' + (ctx.WTO || ctx.DATE) + ']**。事件/发布日期明显在窗口外（数天前/数周前/上月）→ refuted=true；页面日期在窗口内但内容陈述的是旧事件，按**事件实际发生日**判定，日期明确超窗仍 → refuted=true；无法判定日期则不因时效否决。\n3. 来源质量与声明强度是否匹配？（惊人声明需一手源）\n4. 是否营销话术/吹嘘/标题党/论坛猜测？（→ refuted=true）\n\n5. **禁止使用 WebSearch/WebFetch 等外部搜索工具**——本核查只依据上面给出的引语/来源/日期/声明做内部一致性判断，外部搜索会烧掉大量 token。\n\n' + defaultLine + '\n\nStructured output only. Evidence 简短具体（≤80 字）。'
+}
 
 // reportPrompt 需要编排层预拼的 reportBody/refutedList/unverifiedList/missBlock/coverBlock 与统计数，经 ctx 传入。
 export const reportPrompt = ctx =>
@@ -131,7 +136,7 @@ export const reportPrompt = ctx =>
   "   - summary：**一段新闻正文**（2-3 句），写清楚发生了什么、为什么重要，不是重复 title。\n" +
   "   - status：核查状态，**直接照抄素材行标注的 `Status:`**（机器消费、精确匹配，不加括号/空格变体、禁止自行推导或改写）——编排层已按投票结果与外部抽查结果烘焙好：`已核查 2-0` / `已核查 2-1` / `[窗口外·重大]` / `未核查` / `已否决`。窗口外重大项**必须**写 `[窗口外·重大]`（含方括号）；（render 会按该值在标题后加徽标，写错字面量会漏标未核查徽标）\n" +
   "   - 多个 sources 时只保留最权威的 1-2 个 URL。\n\n" +
-  "4.5. **不确定度如实标注**（与 AI.md 风格一致）：summary 中若素材存在不确定性（单源/社区传闻/灰度状态/未官方确认），用「有用户称」「据讨论」「现有资料未说明」「暂不能确认」等措辞如实标注，不假装确定性；社区传闻与官方动态须用不同措辞区分。**对 status 为 `[窗口外·重大]` 或 `未核查` 的 item（未经窗口内对抗投票验证），summary 必须用不确定度措辞（「据报」「有媒体称」「宣称」「待官方确认」「暂不能确认」之一）描述其事项，禁止用「已解决」「完成」「正式发布」「确认」等肯定完成态措辞**。已核查项（status 为 `已核查 2-0`/`已核查 2-1`）有 vote 支撑，可正常陈述。社区传闻与官方动态须用不同措辞区分。\n\n" +
+  "4.5. **不确定度如实标注**（与 AI.md 风格一致）：summary 中若素材存在不确定性（社区传闻/灰度状态/未官方确认），用「有用户称」「据讨论」「现有资料未说明」「暂不能确认」等措辞如实标注，不假装确定性；社区传闻与官方动态须用不同措辞区分。**对 status 为 `[窗口外·重大]` 或 `未核查` 的 item（未经窗口内对抗投票验证），summary 必须用不确定度措辞（「据报」「有媒体称」「宣称」「待官方确认」「暂不能确认」之一）描述其事项，禁止用「已解决」「完成」「正式发布」「确认」等肯定完成态措辞**。已核查项（status 为 `已核查 2-0`/`已核查 2-1`）有 vote 支撑，可正常陈述——**禁止使用**不确定度套话（「据报」「暂不能确认」「有用户称」）；summary 必须从素材 Quote/claim 抄入具体数字、专名、对比，不得把已核事实写成空话。社区传闻与官方动态须用不同措辞区分。\n\n" +
   "4.6. **窗口外参考节由编排器统一渲染**：素材里「## 窗口外参考」的**次要超窗项（nearWindow）不要自己合成进 sections**——不要写独立的「窗口外参考」section，也不要把这些条目拼进任何板块 item；编排器会在文末统一渲染「## 📎 窗口外参考」节。你只负责**窗口内** + **[窗口外·重大]（major-out）** 的合成。分工与 discover 阶段一致：major-out（行业里程碑级客观事实）进正文并带 `[窗口外·重大]` 状态；nearWindow（普通更新/次要动态）只供参考节引用。\n\n" +
   "4.7.【聚类纪律】素材里「## 原始素材」开头的**「## 已聚类」区**（源自 fetch 阶段、被编排器标 `[cluster 已合并 N 条]` 的合并主视图）：\n" +
   "  - 同一事件出现于多条已聚类素材 → 只写 ONE 条标题正文，其他绝不重复（不并排、不\"此外\"再造一条）。若不同条沿用不同口径数字，直接写\"M 为 X、N 为 Y，口径不一\"，不再分别作文。\n" +
@@ -141,5 +146,5 @@ export const reportPrompt = ctx =>
   "5. **板块组织**：不要机械按来源分板。**labs（新模型/模型能力）板块如果有内容，必须放在第一个板块**。如果某板块今天无重要新闻，该板块可以不出现在正文（但保留 coverage 自检）。重磅新闻放在最靠前的板块下。\n\n" +
   "3.2. **数字口径**：同事件多条素材数字口径不一（如 4.25GW/$150-200B/$600B/$105B）时，直接并陈不同口径、不各自成条、提醒勿相加。\n\n" +
   "6. **caveats**：注明弱来源/厂商口径/时间敏感。openQuestions 2-4 个。\n\n" +
-  "7. 如果素材大部分是超窗重大项（major-out）而窗口内几乎为空，则 oneLiner 和 execSummary 如实反映这一情况，优先报道 major-out 中最重要的 1-2 条。\n\n" +
+  "7. 头条优先**窗口内已核查**项。如果素材大部分是超窗重大项（major-out）而窗口内几乎为空，则 oneLiner 和 execSummary 如实写「窗口内无已核头条」，**不得**用距报告日超过 **14 天** 的 major-out 顶 oneLiner/头条；更近的 major-out 至多 1 条进正文并保留 `[窗口外·重大]`。\n\n" +
   "Structured output only. 输出格式：{ sections, oneLiner, execSummary, caveats, openQuestions } 其中 sections 为 [{ board, title, items: [{ title, summary, confidence, sources, vote, status }] }]"

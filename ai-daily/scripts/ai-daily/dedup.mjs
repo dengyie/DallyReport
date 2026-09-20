@@ -28,7 +28,7 @@ const _hostnameOf = s => {
 const _mkMajor = (m, board) => {
   const host = _hostnameOf(m.url)
   return {
-    claim: m.name + '：' + m.note, quote: m.note,
+    claim: m.name + '：' + m.note, quote: '',
     sourceUrl: m.url || '(多源公认)',
     sourceTitle: host || '行业客观公认事实',
     date: m.date, board: board, publishDate: m.date, sourceQuality: 'primary', importance: 'central',
@@ -43,7 +43,7 @@ export const makeAddMajor = majorOutClaims => (m, board) => {
   const ex = majorOutClaims.find(x => majorKey(x.claim || '') === k || majorKey(String(x.claim || '').split('：')[0]) === k)
   if (ex) {
     const exHasDay = /\d{4}-\d{2}-\d{2}/.test(ex.date || ''); const newHasDay = /\d{4}-\d{2}-\d{2}/.test(m.date || '')
-    if (newHasDay && !exHasDay) { ex.date = m.date; ex.publishDate = m.date; ex.claim = m.name + '：' + m.note; ex.quote = m.note }
+    if (newHasDay && !exHasDay) { ex.date = m.date; ex.publishDate = m.date; ex.claim = m.name + '：' + m.note; ex.quote = '' }
     return
   }
   majorOutClaims.push(_mkMajor(m, board))
@@ -147,4 +147,24 @@ export const allocateFetchBudget = (boardURLMap, MAX_FETCH, opts) => {
   for (const b of boardURLs) for (const u of b.urls) { const k = normURL(u.url); keyCount.set(k, (keyCount.get(k) || 0) + 1) }
   for (const b of boardURLs) for (const u of b.urls) { const k = normURL(u.url); if ((keyCount.get(k) || 0) > 1) { dupes.push({ url: u.url, board: b.board }); keyCount.set(k, 0) } }
   return { fetchTargets, dupes, budgetDropped }
+}
+
+// 09-20 VERIFY-SALVAGE：rankedClaims 按 Map 插入序拼接，linuxdo mint 在 extracted 最前 →
+// slice(0,6) 全是论坛标题。按板轮询取 n 条，保证救护席跨板。
+export const roundRobinTake = (boardMap, n) => {
+  if (!(n > 0) || !boardMap || typeof boardMap.values !== 'function') return []
+  const queues = []
+  for (const arr of boardMap.values()) queues.push(Array.isArray(arr) ? arr.slice() : [])
+  const out = []
+  let progressed = true
+  while (out.length < n && progressed) {
+    progressed = false
+    for (const q of queues) {
+      if (out.length >= n) break
+      if (!q.length) continue
+      out.push(q.shift())
+      progressed = true
+    }
+  }
+  return out
 }

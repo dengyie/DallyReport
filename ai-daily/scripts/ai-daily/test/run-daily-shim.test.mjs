@@ -51,7 +51,8 @@ test('host shim：9/13 args 契约（webFetchViaCdp + reportedLedger 注入指�
   assert.match(sh, /LEDGER="\$\{LOGDIR\}\/published-ledger\.json"/, '账本路径定义在场（HOME 下，launchd TCC 可读；iCloud 路径不可读）')
   assert.match(promptLine, /\$LEDGER/, 'launch prompt 引用账本路径变量')
   assert.match(promptLine, /args\.reportedLedger/, '编排器被告知注入 args.reportedLedger')
-  assert.match(promptLine, /不存在则不传/, '账本缺失 fail-open（首跑/被清空不报错）')
+  assert.match(promptLine, /必须 Read/, '文件存在时必须注入，不得写成可选项（09-20 resume 漏传）')
+  assert.match(promptLine, /不存在.*省略|不存在才省略|仅当文件不存在/, '账本缺失才允许省略（首跑 fail-open）')
 })
 
 test('host shim：探针必须与主 launch 同属工具调用类，不得用短问答 OK 放行', (t) => {

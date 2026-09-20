@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { reportPrompt, fetchPrompt, externalVerifyPrompt } from '../prompts.mjs'
+import { reportPrompt, fetchPrompt, externalVerifyPrompt, verifyPrompt } from '../prompts.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PROMPTS = fs.readFileSync(path.join(HERE, '../prompts.mjs'), 'utf8')
@@ -37,6 +37,30 @@ test('reportPrompt §4.5：未核查项措辞硬约束在场（C.1 增量）', (
   assert.match(PROMPTS, /（「据报」「有媒体称」「宣称」「待官方确认」「暂不能确认」之一）/, '必须候选措辞列全')
   assert.match(PROMPTS, /禁止用「已解决」「完成」「正式发布」「确认」等肯定完成态措辞/, '禁令完整列全')
   assert.match(PROMPTS, /有 vote 支撑，可正常陈述/, '已核查项不被迫弱化')
+})
+
+test('reportPrompt §4.5：已核查项禁止套「据报/暂不能确认」且必须抄数字（09-20 MiniMax 含糊根因）', () => {
+  assert.match(PROMPTS, /已核查 2-0[\s\S]{0,80}已核查 2-1[\s\S]{0,120}禁止使用[\s\S]{0,40}不确定度/, '已核查不得被 4.5 单源条款逼成「据报」')
+  assert.match(PROMPTS, /Quote\/claim|claim\/Quote|素材 Quote/, '已核查 summary 必须吃素材数字/专名')
+})
+
+test('reportPrompt §7：窗口内已核查优先，不得用超龄 major-out 顶头条（09-20 Fable/Astra）', () => {
+  assert.match(PROMPTS, /窗口内已核查/, '头条优先窗口内已核查')
+  assert.match(PROMPTS, /14 天/, '超 14 天 major-out 不得顶 oneLiner')
+})
+
+test('verifyPrompt：一手源已抓正文不得默认证伪；缺背景 ≠ 否决（09-20 MiniMax 0-2 过杀）', () => {
+  const ctx = { WINDOW_LABEL: 'w', WFROM: '2026-09-18', WTO: '2026-09-20', DATE: '2026-09-20', REFUTATIONS_REQUIRED: 2, VOTES_PER_CLAIM: 3 }
+  const primary = verifyPrompt({ claim: 'MiniMax Code 2-0 Star 4200', sourceUrl: 'https://github.com/MiniMax-AI/Code', sourceQuality: 'primary', quote: 'Star 4200 Fork 800', publishDate: '2026-09-19' }, ctx)
+  assert.match(primary, /默认 refuted=false/, 'primary 默认通过（引语覆盖核心数字即存活）')
+  assert.doesNotMatch(primary, /默认 refuted=true，除非证据充分支撑/, '旧默认证伪不得再打在一手源上')
+  assert.match(primary, /未铺陈全背景/, '缺背景不得当否决理由')
+  const forum = verifyPrompt({ claim: '有人说 ZCode 上传了 .git', sourceUrl: 'https://linux.do/t/1', sourceQuality: 'forum', quote: '标题党', publishDate: '2026-09-19' }, ctx)
+  assert.match(forum, /默认 refuted=true/, 'forum 仍维持怀疑默认')
+})
+
+test('fetchPrompt：每条 claim 一个可核验事实（防 MiniMax npm/TUI/Star 塞一条被 quote 截断误杀）', () => {
+  assert.match(PROMPTS, /一个可独立核验的事实/, 'fetch 拆成原子 claim')
 })
 
 // ─── 2026-08-23 第二十一项：双轨聚类 prompt 纪律 ───

@@ -65,7 +65,8 @@ test('mintLinuxdoSource：有 snippet 铸 forum claim，形状对齐 Fetch 产�
   assert.equal(src.date, '2026-08-31')
   assert.equal(src.claims.length, 1)
   const c = src.claims[0]
-  assert.equal(c.claim, 'OpenClaw 2.0 发布')
+  assert.notEqual(c.claim, 'OpenClaw 2.0 发布', '09-20 实证：claim=title 只剩标题级新闻（ZCode .git 上传等）')
+  assert.match(c.claim, /OpenClaw 2\.0 正式发布/, 'claim 必须取自正文 snippet，不得复读标题')
   assert.equal(c.quote, '社区讨论 OpenClaw 2.0 正式发布，多 Agent 编排能力增强。')
   assert.equal(c.importance, 'supporting')
   assert.equal(c.sourceUrl, src.url)
@@ -97,6 +98,8 @@ test('mintLinuxdoSource：出链帖不再假提权——恒 forum + sourceUrl=�
   assert.equal(extractHighValueOutlink('无出链的普通帖子'), null)
   assert.equal(extractHighValueOutlink(''), null)
   assert.equal(extractHighValueOutlink(null), null)
+  assert.equal(extractHighValueOutlink('官宣见 https://x.com/karpathy/status/1970000000000000000 讨论'),
+    'https://x.com/karpathy/status/1970000000000000000', 'x.com 出链须转真实 fetch（旧正则漏网 → 热帖只铸标题）')
 })
 
 test('mintLinuxdoSource：空 snippet / 缺字段 → null（不造空 claim）', () => {

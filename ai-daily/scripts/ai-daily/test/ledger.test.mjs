@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import {
   LEDGER_OVERLAP_MIN, LEDGER_SHARE_MIN, LEDGER_LOOKBACK_DAYS, LEDGER_KEEP_DAYS,
   fingerprintTokens, makeLedgerEntry, storyMatch, filterReportedTargets, splitSeeds, pruneLedger,
+  parseReportedLedger,
 } from '../ledger.mjs'
 import { ledgerEntriesFromClaims, recordLedger, DEFAULT_LEDGER, PROD_DALLYREPORT_PREFIX, isProdOutDir } from '../finalize.mjs'
 
@@ -65,6 +66,30 @@ test('storyMatch：ISO 日期不得当强实体（日报/linux.do 标题常带 2
   const stillProduct = { url: 'https://other.example/v4', tokens: fingerprintTokens('V4-Flash-Vision-Exp') }
   const productEntry = makeLedgerEntry('2026-09-03', 'https://blog.google/v4', '谷歌发布 Gemini V4-Flash-Vision-Exp 多模态理解', true)
   assert.ok(storyMatch(stillProduct, productEntry), '真正的产品名强实体仍要命中')
+})
+
+test('storyMatch：09-20 实证——无连字符产品名 Fable/Astra 与 GPT-6 须命中已报道账本', () => {
+  // 生产 09-20：账本有 51 条仍 fail-open；即便注入，storyMatch 也放跑 Fable（9/1）与 Astra（9/3）
+  // ——URL 对不上「(多源公认)」、overlap < 0.8、fable/astra/gpt-6 都打不进「连字符≥8」强实体。
+  const priorFable = makeLedgerEntry('2026-09-02', '(多源公认)', 'Fable 与 Mythos 发布 5.1 编程模型，Agent 能力跃迁', true)
+  const againFable = { url: 'https://other.example/news', tokens: fingerprintTokens('Fable/Mythos 5.1 编程代理') }
+  assert.ok(storyMatch(againFable, priorFable), 'fable/mythos 产品名跨天同事件必须命中（不得因无连字符漏放）')
+  const priorAstra = makeLedgerEntry('2026-09-03', 'https://openai.com/news', 'OpenAI 预告 GPT-6 Astra 旗舰模型', true)
+  const againAstra = { url: '(多源公认)', tokens: fingerprintTokens('GPT-6 Astra 旗舰模型') }
+  assert.ok(storyMatch(againAstra, priorAstra), 'gpt-6 + astra 必须命中（短连字符+无连字符产品名）')
+  const unrelated = { url: 'https://ibm.example/ttm', tokens: fingerprintTokens('IBM 开源时序模型 TTM') }
+  assert.ok(!storyMatch(unrelated, priorFable), '无关事件不得因短词误杀')
+})
+
+test('parseReportedLedger：数组 / JSON 字符串均可；空/坏形态 → null（fail-open）', () => {
+  const row = { day: '2026-09-19', url: 'https://x.example/a', tokens: ['fable'], title: 'Fable 5.1', major: true }
+  assert.equal(parseReportedLedger([row])[0].day, '2026-09-19', '数组直通')
+  assert.equal(parseReportedLedger(JSON.stringify([row]))[0].day, '2026-09-19', '宿主偶发把账本当 JSON 字符串注入也要吃进去')
+  assert.equal(parseReportedLedger([]), null, '空数组 ≡ 不传')
+  assert.equal(parseReportedLedger('[]'), null, '空 JSON 数组 ≡ 不传')
+  assert.equal(parseReportedLedger('not-json'), null, '坏字符串不崩')
+  assert.equal(parseReportedLedger(null), null)
+  assert.equal(parseReportedLedger({ day: 'x' }), null, '非数组对象不崩')
 })
 
 // ─── filterReportedTargets ───

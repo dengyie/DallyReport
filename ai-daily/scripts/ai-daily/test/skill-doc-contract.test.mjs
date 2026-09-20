@@ -101,4 +101,5 @@ test('SKILL.md：步骤 4 示例 JSON 不得写 reportedLedger:[]（空数组 = 
   const example = SKILL.slice(jsonStart, jsonEnd)
   assert.doesNotMatch(example, /"reportedLedger"\s*:\s*\[\s*\]/, '示例不得教人传空数组关掉账本；存在则 Read 后传非空')
   assert.match(SKILL, /空数组.*ledger_unavailable|ledger_unavailable.*空数组/, '文字须写明空数组与不传等价')
+  assert.match(SKILL, /必须.*reportedLedger|reportedLedger.*必须/, '账本文件存在时必须注入（09-20 resume 漏传 → 旧头条重注入）')
 })

@@ -150,7 +150,7 @@ test('finalizePayloads：tmp+rename 原子写——落盘后目录无 .tmp 残�
 })
 
 test('recordLedger：账本损坏 → 备份 .corrupt + 重建 + stderr 告警（9/19 F2：不再静默丢 60 天历史）', () => {
-  const dir = fs.mkdtempSync(path.join('test/.tmp-'))
+	  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'finalize-corrupt-'))
   const ledgerPath = path.join(dir, 'ledger.json')
   try {
     fs.writeFileSync(ledgerPath, '{not-valid-json')

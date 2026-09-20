@@ -95,17 +95,8 @@ const LINUXDO_PREFETCHED = (() => {
   const posts = (raw.posts || []).filter(x => x && typeof x.url === 'string' && x.url && typeof x.title === 'string' && x.title)
   if (!posts.length) return null
   return { ok: true, host: raw.host || '', topics: Number(raw.topics) || posts.length, posts }
-})()
-// 9/13 跨天账本（严格去重）：args.reportedLedger = 编排器 Read ~/.ai-daily/published-ledger.json 注入的
-// 条目数组（{day,url,tokens,title,major}，记录端 finalize.mjs）。严格校验形态，坏形态视同无账本
-// （fail-open + degraded 旗标 ledger_unavailable，不因账本问题阻断成稿）。
-const REPORTED_LEDGER = (() => {
-  const raw = args.reportedLedger
-  if (!Array.isArray(raw) || !raw.length) return null
-  const ok = raw.filter(e => e && typeof e === 'object' && typeof e.day === 'string' && Array.isArray(e.tokens))
-  return ok.length ? ok : null
-})()
-// 9/13 fetch 通道门控：headless 显式传 webFetchViaCdp:true → fetch 代理先走 9222 CDP（宿主 cdp-fetch.mjs，
+	})()
+	// 9/13 fetch 通道门控：headless 显式传 webFetchViaCdp:true → fetch 代理先走 9222 CDP（宿主 cdp-fetch.mjs，
 // 复用登录态/临时标签），失败回落 WebFetch。手动 /ai-daily 默认 false 维持纯 WebFetch（既有纪律：
 // 离开 9222 环境不裸抓；realm 本身仍不碰 CDP——抓取发生在 fetch 子代理的 Bash 里）。
 const WEB_FETCH_VIA_CDP = args.webFetchViaCdp === true
@@ -139,11 +130,17 @@ const WEB_BUDGET_PER = 2  // 9/19 F4：WebSearch 预算改为组内独立计数�
 /* @inline: prompts */
 /* @inline: render-md */
 /* @inline: cluster */
-/* @inline: ledger */
-/* @inline: cdp-core */
-/* @inline: linuxdo */
+	/* @inline: ledger */
+	/* @inline: cdp-core */
+	/* @inline: linuxdo */
 
-// boards 由 BOARDS 花名册按选区派生（BOARDS 已 inline 就绪，此时访问无 TDZ）。
+	// 9/13 跨天账本（严格去重）：args.reportedLedger = 编排器 Read ~/.ai-daily/published-ledger.json 注入的
+	// 条目数组（{day,url,tokens,title,major}，记录端 finalize.mjs）。parseReportedLedger 吃数组与 JSON 字符串，
+	// 空/坏形态视同无账本（fail-open + degraded 旗标 ledger_unavailable，不因账本问题阻断成稿）。
+	// 必须在 ledger 内联之后赋值，否则 TDZ（09-20 reportSourceHallucinated 同类事故）。
+	const REPORTED_LEDGER = parseReportedLedger(args.reportedLedger)
+
+	// boards 由 BOARDS 花名册按选区派生（BOARDS 已 inline 就绪，此时访问无 TDZ）。
 const boards = BOARDS_SELECTED ? BOARDS.filter(b => BOARDS_SELECTED.has(b.key)) : BOARDS
 // 8/21 学术板修复：arXiv 官方 API 窗口查询（替代 HTML list 页——auto provider(Tavily) 把 HTML 压成 501 字符
 // → digest 空 → discover degraded）。URL 含 {{WFROM}}/{{WTO}} 占位（YYYYMMDD + 0000/2359 时刻），此处按窗口展开；
@@ -639,11 +636,31 @@ if (REPORTED_LEDGER) {
     log('LEDGER-FILTER 近 ' + LEDGER_LOOKBACK_DAYS + ' 天已报道候选丢弃 ' + reportedDeduped + ' 条（硬去重，不进 fetch 配额）：' +
       reportedDroppedDetail.slice(0, 6).map(d => '[' + (d.matchedDay || '?') + '] ' + String(d.url).slice(0, 64)).join(' ; '))
   }
-} else {
-  log('LEDGER-SKIP 无 args.reportedLedger（首跑或编排器未注入账本）→ 本轮跨天去重关闭')
-}
+	} else {
+	  log('LEDGER-SKIP 无 args.reportedLedger（首跑或编排器未注入账本）→ 本轮跨天去重关闭')
+	}
 
-let { fetchTargets, dupes, budgetDropped } = allocateFetchBudget(boardURLMap, MAX_FETCH)
+	// 9/20：linuxdo-cdp snippet 直铸必须在 allocateFetchBudget **之前**。
+	// 09-20 实证：mint 在配额后 → 8 席 linuxdo-cdp 先占满 MAX_FETCH，官方/一手源整板被 budgetDropped。
+	// mint 只计入 LINUXDO_MAX_SOURCES；铸出的 URL 从 boardURLMap 剔除，不占 MAX_FETCH。
+	let indexCitationTotal = 0  // 9/19 F2：索引页引用回落计数（degraded 旗标 index_page_citation:N）
+	const extracted = []
+	const mintedUrls = new Set()
+	{
+	  const linuxdoCands = boardURLMap.get('linuxdo') || []
+	  const remain = []
+	  for (const t of linuxdoCands) {
+	    if (t.found_via !== 'linuxdo-cdp') { remain.push(t); continue }
+	    const minted = mintLinuxdoSource(t, '')  // 9/19 review P3：无日期帖不再回退 DATE（归档口径诚实，同 F3）
+	    if (!minted) continue
+	    extracted.push(minted)
+	    mintedUrls.add(t.url)
+	  }
+	  if (linuxdoCands.length) boardURLMap.set('linuxdo', remain)
+	  if (mintedUrls.size) log('LINUXDO-MINT ' + mintedUrls.size + ' 条 snippet 直铸（不占 MAX_FETCH，跳过 fetch 代理）')
+	}
+
+	let { fetchTargets, dupes, budgetDropped } = allocateFetchBudget(boardURLMap, MAX_FETCH)
 // 8/27 prefer 通道：linuxdo-cdp 与 static-fallback 候选优先占位（预抓/兜底=已投入资源，真实进 Fetch），
 // 其余走轮询公平；MAX_FETCH 仍是硬上限（单板墙量配额经 preferCap=floor(MAX_FETCH×0.5) 封顶）。
 const linuxdoFetched = fetchTargets.filter(t => t.found_via === 'linuxdo-cdp' || t.found_via === 'linuxdo-outlink').length
@@ -660,28 +677,12 @@ log('Dedup: ' + dupes.length + ' dupes, ' + budgetDropped.length + ' budget-drop
 // 与 static-fallback；二次静态前置会把 linuxdo 挤出 FETCH 首批，BUDGET-BREAK 后整席蒸发。
 // 诚实书账：staticCount 只统计已经进入 fetchTargets 的项（已在 allocation 内获配额），
 // 不统计被预算丢弃（budgetDropped）或未进入配额的候选——不虚报未获配额的静态候选。
-const staticCount = fetchTargets.filter(t => t.found_via === 'static-fallback').length
-if (staticCount > 0) log('STATIC-FALLBACK quota: ' + staticCount + ' 条静态兜底 URL 已获 fetch 配额（fetchTargets 内实计）')
-// 9/01 P1：配额内带 snippet 的 linuxdo 直铸 forum claim，不再进 fetch 代理（linux.do 无 cookie → 403）。
-// 出链帖已在上方 LINUXDO-GOVERN 转为 linuxdo-outlink 真实 fetch 目标；空 snippet 已被丢弃。
-// 配额外的 budgetDropped 不铸——MAX_FETCH 硬上限不变。
-let indexCitationTotal = 0  // 9/19 F2：索引页引用回落计数（degraded 旗标 index_page_citation:N）
-const extracted = []
-{
-  const mintedUrls = new Set()
-  for (const t of fetchTargets) {
-    if (t.found_via !== 'linuxdo-cdp') continue
-    const minted = mintLinuxdoSource(t, '')  // 9/19 review P3：无日期帖不再回退 DATE（归档口径诚实，同 F3）
-    if (!minted) continue
-    extracted.push(minted)
-    mintedUrls.add(t.url)
-  }
-  if (mintedUrls.size) {
-    log('LINUXDO-MINT ' + mintedUrls.size + ' 条配额内 snippet 直铸（跳过 fetch 代理）')
-    fetchTargets = fetchTargets.filter(t => !mintedUrls.has(t.url))
-  }
-}
-// 首批固定 FETCH_BATCH：allocate 前缀已混排，不得用 staticCount 扩首批把 linuxdo 挤出。
+	const staticCount = fetchTargets.filter(t => t.found_via === 'static-fallback').length
+	if (staticCount > 0) log('STATIC-FALLBACK quota: ' + staticCount + ' 条静态兜底 URL 已获 fetch 配额（fetchTargets 内实计）')
+	// 出链帖已在上方 LINUXDO-GOVERN 转为 linuxdo-outlink 真实 fetch 目标；空 snippet 已被丢弃。
+	// mint 已在 allocate 前完成；此处再剥一次，防止任何漏网 linuxdo-cdp 进 fetch 代理（linux.do 无 cookie → 403）。
+	fetchTargets = fetchTargets.filter(t => !mintedUrls.has(t.url))
+	// 首批固定 FETCH_BATCH：allocate 前缀已混排，不得用 staticCount 扩首批把 linuxdo 挤出。
 // 静态注入不在 discoverRows.urls → urls_discovered 账本不变（boardURLMap 仅从 discoverRows 派生）。
 const FETCH_BATCH = 6
 const FETCH_FIRST_BATCH = FETCH_BATCH
@@ -776,9 +777,12 @@ if (totalClaims > 0) {
     quota.set(k, quota.get(k) + canTake); remainV -= canTake
   }
 }
-const rankedClaims = []
-for (const k of boardKeysV) rankedClaims.push(...claimsByBoard.get(k).slice(0, quota.get(k)))
-log('Verify: ' + rankedClaims.length + ' claims across ' + boardKeysV.length + ' boards [' + [...quota.entries()].map(e => e[0] + ':' + e[1]).join(' ') + '], adaptive 2+1 votes')
+	const rankedClaims = (() => {
+	  const quotaMap = new Map()
+	  for (const k of boardKeysV) quotaMap.set(k, (claimsByBoard.get(k) || []).slice(0, quota.get(k) || 0))
+	  return roundRobinTake(quotaMap, MAX_VERIFY)
+	})()
+	log('Verify: ' + rankedClaims.length + ' claims across ' + boardKeysV.length + ' boards [' + [...quota.entries()].map(e => e[0] + ':' + e[1]).join(' ') + '], adaptive 2+1 votes')
 phase('Verify')
 // 全 Verify 阶段共享一个阶梯 t0：6 票并发不得各自重新吃满 LADDER_BUDGET_MS（烟测 420s 已见后票把预算叠高）。
 const verifyLadderT0 = now()
@@ -830,10 +834,10 @@ for (const batch of chunkArr(rankedClaims, VERIFY_BATCH)) {
   } else if (salvage) {
     // 8/27 修复：Verify 死线已过但尚未跑任何批 → 救护首批（镜像 Fetch 的 FETCH-SALVAGE）
     // 保证非 0 核查——至少跑一批最高优先级 claim，避免整个 Verify 被跳过导致 report 缺输入。
-    const salvageCount = Math.min(VERIFY_BATCH, rankedClaims.length)
-    log('VERIFY-SALVAGE 已过 Verify 死线但执行救护首批：核查前 ' + salvageCount + ' 条最高优先级 claim（保证非 0 确认）')
-    const vtimeout = AGENT_TIMEOUT_MS
-    const salvageRes = await parallel(rankedClaims.slice(0, salvageCount).map(c => () => voteClaim(c, vtimeout)))
+	    const salvageCount = Math.min(VERIFY_BATCH, rankedClaims.length)
+	    log('VERIFY-SALVAGE 已过 Verify 死线但执行救护首批：核查前 ' + salvageCount + ' 条跨板轮询 claim（保证非 0 确认）')
+	    const vtimeout = AGENT_TIMEOUT_MS
+	    const salvageRes = await parallel(roundRobinTake(claimsByBoard, salvageCount).map(c => () => voteClaim(c, vtimeout)))
     voted.push(...salvageRes.filter(Boolean))
     break
   } else {
@@ -917,16 +921,24 @@ const _majorDupCheck = candidate => {
   for (const e of confirmedVerify) if (storyMatch(like, { url: e.sourceUrl, tokens: fingerprintTokens(e.claim) })) return 'in-window'
   return null
 }
-let majorDupSkipped = 0
-for (const d of discoverRows) for (const m of (d.majorOutOfWindow || [])) {
-  if (!(m && m.name)) continue
-  const dup = _majorDupCheck(m)
-  if (dup) { majorDupSkipped++; log('MAJOR-DUP 跳过 major-out 注入（' + dup + ' 已有同事件条目）：' + String(m.name).slice(0, 60)); continue }
-  _addMajor(m, d.boards[0])
-}
-// 种子 KNOWN_MAJOR_OUT 作为保底（未被发现代理上报的补上）
-const REPORT_DAY = normalizeDate(DATE)
-const MAX_SEED_AGE_DAYS = 21
+	const REPORT_DAY = normalizeDate(DATE)
+	const MAX_DISCOVER_MAJOR_AGE_DAYS = 14
+	let majorDupSkipped = 0
+	for (const d of discoverRows) {
+	  const _discMajors = filterSeedsByAge(d.majorOutOfWindow || [], REPORT_DAY, MAX_DISCOVER_MAJOR_AGE_DAYS)
+	  if (_discMajors.retired.length) {
+	    log('DISCOVER-MAJOR-AGE 超龄/无日期 major-out 退役 ' + _discMajors.retired.length + ' 条（阈值 ' + MAX_DISCOVER_MAJOR_AGE_DAYS + 'd）：' +
+	      _discMajors.retired.slice(0, 4).map(r => String((r.seed && r.seed.name) || '?').slice(0, 40) + (r.age != null ? ' ' + r.age + 'd' : ' ' + r.reason)).join('; '))
+	  }
+	  for (const m of _discMajors.kept) {
+	    if (!(m && m.name)) continue
+	    const dup = _majorDupCheck(m)
+	    if (dup) { majorDupSkipped++; log('MAJOR-DUP 跳过 major-out 注入（' + dup + ' 已有同事件条目）：' + String(m.name).slice(0, 60)); continue }
+	    _addMajor(m, d.boards[0])
+	  }
+	}
+	// 种子 KNOWN_MAJOR_OUT 作为保底（未被发现代理上报的补上）
+	const MAX_SEED_AGE_DAYS = 21
 const _seedResult = filterSeedsByAge(KNOWN_MAJOR_OUT, REPORT_DAY, MAX_SEED_AGE_DAYS)
 // 9/13 严格去重：已报道过的种子退役（splitSeeds 命中任何历史账本条目）→ 不再 21 天内逐日刷屏
 // （实证 V4-Flash-Vision-Exp 连续 3 天整条重复）。fail-open：无账本 → 全保留。
@@ -1061,8 +1073,8 @@ const _bakedStatus = c => {
   return '已核查 ' + (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount
 }
 const reportBody = (confirmed.length ? confirmed.map((c, i) =>
-  // 8/17 第十二项：quote 截断 140 字降 report 输入体积——合成只需要点，引语全文由核查阶段保证；大幅压单请求 payload（挂起敏感度 + token）。
-  '### ' + (c.isMajorOut ? '[窗口外·重大] ' : '') + '[' + i + '] ' + c.claim + '\nVote: ' + (c.isMajorOut ? '—（未投票，多源公认行业里程碑）' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount) + ' · Status: ' + _bakedStatus(c) + ' · Source: ' + c.sourceUrl + ' (' + c.sourceQuality + ') · Date: ' + (c.publishDate || c.date || '?') + '\nQuote: "' + c.quote.slice(0, 140) + (c.quote.length > 140 ? '…' : '') + '"\n')
+	  // 8/17 第十二项：quote 截断降 report 输入体积；09-20 提到 220——140 会把已核数字截掉，成稿只能写「据报」。
+	  '### ' + (c.isMajorOut ? '[窗口外·重大] ' : '') + '[' + i + '] ' + c.claim + '\nVote: ' + (c.isMajorOut ? '—（未投票，多源公认行业里程碑）' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount) + ' · Status: ' + _bakedStatus(c) + ' · Source: ' + c.sourceUrl + ' (' + c.sourceQuality + ') · Date: ' + (c.publishDate || c.date || '?') + '\nQuote: "' + c.quote.slice(0, 220) + (c.quote.length > 220 ? '…' : '') + '"\n')
   .join('\n')
   : '(无已确认声明)')
 // 8/23 第二十一项：聚类主视图并列注入 reportBody 开头的「## 已聚类」区（report prompt 4.7 专门读取）——
@@ -1094,6 +1106,31 @@ if (report) {
 } else {
   BREAKER.record(false, 'report')
   log('REPORT-FAIL 模型阶梯全废，降级 raw archive')
+}
+
+// ─── 9/19 烟测实证修复：report 幻觉引用确定性过滤 ───
+// 烟测（wf_ee8d35c3-925）实证：report 模型可能在 items.sources 编造 URL（`mdc-ov/...`、
+// `linuxdo.ai/api2/... not valid`），render 的 buildCitationMap 照单编号 → 参考来源出现幻觉链接。
+// 确定性防线：sources 只保留 confirmed 真实 sourceUrl 集合（normURL 对比，major-out 的
+// `(多源公认)` 也在集合内）命中的；全被丢弃的 item sources 置空（render 诚实标注无单一链接）。
+// 丢弃计数进 degraded 旗标 `report_source_hallucination:N` + meta 同名账目，供溯源与观察。
+// 9/19 TDZ 修复：本块必须在 degradedFlags 构建前执行（下面消费 reportSourceHallucinated），
+// 且必须在 report 赋值后（读 report.sections / confirmed）——原位置在消费点之后，抛
+// ReferenceError: Cannot access 'reportSourceHallucinated' before initialization（生产成稿前崩溃）。
+let reportSourceHallucinated = 0
+if (report && Array.isArray(report.sections)) {
+  const _knownSourceSet = new Set(confirmed.map(c => normURL(c.sourceUrl)))
+  for (const sec of report.sections) {
+    for (const it of (sec && sec.items) || []) {
+      if (!Array.isArray(it.sources)) continue
+      const known = it.sources.filter(u => _knownSourceSet.has(normURL(u)))
+      if (known.length < it.sources.length) {
+        reportSourceHallucinated += it.sources.length - known.length
+        it.sources = known
+      }
+    }
+  }
+  if (reportSourceHallucinated) log('REPORT-SOURCE-FILTER 幻觉引用丢弃 ' + reportSourceHallucinated + ' 条（不在 confirmed sourceUrl 集合内）')
 }
 
 // ─── md 确定性渲染（report 成功 → 完整版；失败 → 降级版）。render-md.mjs，不再有 mdWriter 代理。───
@@ -1132,27 +1169,6 @@ const confirmedOut = confirmed.map(c => ({ claim: c.claim, quote: c.quote, sourc
 const refutedOut = killed.map(c => ({ claim: c.claim, source: c.sourceUrl, vote: (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, erroredCount: c.erroredCount || 0 }))
 const unverifiedOut = unverified.map(c => ({ claim: c.claim, source: c.sourceUrl }))
 const outOfWindowOut = outOfWindow.map(c => ({ claim: c.claim, source: c.sourceUrl, date: c.publishDate || c.date, vote: (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, erroredCount: c.erroredCount || 0 }))
-// ─── 9/19 烟测实证修复：report 幻觉引用确定性过滤 ───
-// 烟测（wf_ee8d35c3-925）实证：report 模型可能在 items.sources 编造 URL（`mdc-ov/...`、
-// `linuxdo.ai/api2/... not valid`），render 的 buildCitationMap 照单编号 → 参考来源出现幻觉链接。
-// 确定性防线：sources 只保留 confirmed 真实 sourceUrl 集合（normURL 对比，major-out 的
-// `(多源公认)` 也在集合内）命中的；全被丢弃的 item sources 置空（render 诚实标注无单一链接）。
-// 丢弃计数进 degraded 旗标 `report_source_hallucination:N` + meta 同名账目，供溯源与观察。
-let reportSourceHallucinated = 0
-if (report && Array.isArray(report.sections)) {
-  const _knownSourceSet = new Set(confirmed.map(c => normURL(c.sourceUrl)))
-  for (const sec of report.sections) {
-    for (const it of (sec && sec.items) || []) {
-      if (!Array.isArray(it.sources)) continue
-      const known = it.sources.filter(u => _knownSourceSet.has(normURL(u)))
-      if (known.length < it.sources.length) {
-        reportSourceHallucinated += it.sources.length - known.length
-        it.sources = known
-      }
-    }
-  }
-  if (reportSourceHallucinated) log('REPORT-SOURCE-FILTER 幻觉引用丢弃 ' + reportSourceHallucinated + ' 条（不在 confirmed sourceUrl 集合内）')
-}
 const md = report
   ? renderMarkdown({ date: DATE, window: WINDOW_LABEL, report, coverage, windowMisses, degraded: degradedFlags, meta: {
       date: DATE, window: WINDOW_LABEL,

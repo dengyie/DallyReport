@@ -206,7 +206,7 @@ test('模板：Verify 死线已过且 0 批已跑 → SALVAGE 救护首批（镜
   assert.match(TPL, /VERIFY-SALVAGE/, 'VERIFY-SALVAGE 救护日志在场')
   assert.match(TPL, /let stageVerifyRan = false/, 'stageVerifyRan 一次性状态在场')
   assert.match(TPL, /const salvage = !stageVerifyRan && voted\.length === 0 && rankedClaims\.length > 0 && budgetGate\.roomTo\('Verify'\) === 0/, '救护条件：0 批已跑 + 有待核查 claim + roomTo 纯读')
-  assert.match(TPL, /rankedClaims\.slice\(0, salvageCount\)/, '救护首批取前 salvageCount 条最高优先级 claim')
+  assert.match(TPL, /roundRobinTake\(claimsByBoard,\s*salvageCount\)/, '救护按板轮询取票，不得 slice 掉 linuxdo-first 的 rankedClaims 前 6 条（09-20 只核到论坛标题）')
   assert.match(TPL, /salvageCount\s*=\s*Math\.min\(VERIFY_BATCH,\s*rankedClaims\.length\)/, 'salvageCount = min(VERIFY_BATCH, rankedClaims.length)')
   // 救护后 break（不继续下一批），与 FETCH-SALVAGE 行为一致
   const vsIdx = TPL.indexOf('VERIFY-SALVAGE')
@@ -237,7 +237,7 @@ test('模板 P1：配额内 linuxdo+snippet 在 Fetch 循环前 mint，并从 fe
   const idxFetchAgent = TPL.indexOf('safeAgent(fetchPrompt(')
   assert.ok(idxAlloc >= 0 && idxMint >= 0 && idxPhaseFetch >= 0 && idxFetchAgent >= 0,
     'allocation / mintLinuxdoSource / Fetch phase / fetchPrompt 都在场')
-  assert.ok(idxMint > idxAlloc, 'mint 在 allocateFetchBudget 之后（只铸已获配额项）')
+  assert.ok(idxMint < idxAlloc, 'mint 必须在 allocateFetchBudget 之前：linuxdo-cdp 直铸不占 MAX_FETCH（09-20 8 席 mint 挤掉官方源）')
   assert.ok(idxMint < idxPhaseFetch, 'mint 在 phase(Fetch) 之前（BUDGET-BREAK 也保得住）')
   assert.ok(idxFetchAgent > idxPhaseFetch, 'fetch 代理仍在 Fetch 阶段')
   // 铸出的 URL 必须从 fetchTargets 剔除，否则同一帖既 mint 又 WebFetch。
@@ -367,7 +367,7 @@ test('模板：超时日志不再写 report 有内容至多 2 试', () => {
 // ─── 9/13 重构：跨天账本 + fetch 9222 门控接线契约 ───
 
 test('模板：账本硬过滤在 allocateFetchBudget 之前，fail-open 旗标与 meta 计数接线', () => {
-  assert.match(TPL, /const REPORTED_LEDGER = \(\(\) => \{/, 'args.reportedLedger 严格校验 IIFE 在场')
+  assert.match(TPL, /const REPORTED_LEDGER = parseReportedLedger\(args\.reportedLedger\)/, 'args.reportedLedger 走 parseReportedLedger（吃数组与 JSON 字符串）')
   assert.match(TPL, /filterReportedTargets\(urls, REPORTED_LEDGER, \{ today: DATE \}\)/, 'boardURLMap 逐板过滤')
   const filterIdx = TPL.indexOf('LEDGER-FILTER')
   const allocIdx = TPL.indexOf('allocateFetchBudget(boardURLMap, MAX_FETCH)')
@@ -480,4 +480,26 @@ test('模板：report 幻觉引用确定性过滤（9/19 烟测实证 mdc-ov/lin
   assert.match(TPL, /const _knownSourceSet = new Set\(confirmed\.map\(c => normURL\(c\.sourceUrl\)\)\)/, '白名单 = confirmed 真实 sourceUrl 集（normURL 对比，major-out 的 (多源公认) 也在内）')
   assert.match(TPL, /it\.sources = known/, 'sources 收敛为命中子集（全丢则置空 → render 诚实标注无单一链接）')
   assert.match(TPL, /report_source_hallucination/, 'degraded 旗标 + meta 账目在场')
+})
+
+test('模板：reportSourceHallucinated 必须在 degradedFlags 之前声明（09-20 08:51 TDZ 崩溃）', () => {
+  const hallu = TPL.indexOf('let reportSourceHallucinated')
+  const flags = TPL.indexOf('const degradedFlags = []')
+  const reportAssign = TPL.indexOf('const report = await safeAgentWithLadder(reportPrompt({')
+  assert.ok(hallu >= 0 && flags >= 0 && reportAssign >= 0, '三处锚点在场')
+  assert.ok(reportAssign < hallu, '过滤块在 report 赋值之后')
+  assert.ok(hallu < flags, '声明必须早于 degradedFlags 消费，否则成稿前 ReferenceError')
+})
+
+test('模板：discover major-out 必须走 14 天 age gate（09-20 Fable 19d / Astra 17d 顶头条）', () => {
+  assert.match(TPL, /MAX_DISCOVER_MAJOR_AGE_DAYS\s*=\s*14/, 'discover 超窗项 14 天（种子仍 21）')
+  assert.match(TPL, /DISCOVER-MAJOR-AGE/, '超龄 discover major 退役日志')
+  assert.match(TPL, /filterSeedsByAge\(\s*(?:d\.majorOutOfWindow|\(d\.majorOutOfWindow)/, 'discover majors 必须走 filterSeedsByAge，不得只滤 KNOWN 种子')
+  const discAge = TPL.indexOf('MAX_DISCOVER_MAJOR_AGE_DAYS')
+  const seedAge = TPL.indexOf('filterSeedsByAge(KNOWN_MAJOR_OUT')
+  assert.ok(discAge >= 0 && seedAge > discAge, 'KNOWN 种子 age gate 仍在 discover 超窗门之后')
+})
+
+test('模板：reportBody quote 截断 ≥220，已核查数字才进得了终稿', () => {
+  assert.match(TPL, /c\.quote\.slice\(0,\s*220\)/, '合成素材 quote 至少 220 字（旧 140 把数字截掉 → 成稿含糊）')
 })

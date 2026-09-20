@@ -27,6 +27,29 @@ export const LEDGER_KEEP_DAYS = 60
 // ASCII 在前，长英文 snippet 的中文 bigram 全被截掉，「中文账本条目 vs 长英文混排候选」overlap=0，
 // 同事件换 URL 的中文重复漏过硬过滤。改为 ASCII/CJK 两桶各留一半（分桶截断，类别间不再互相挤压）。
 export const LEDGER_MAX_TOKENS = 64
+// 09-20：无连字符产品名（fable/astra）与短版本号（gpt-6）打不进「连字符≥8」强实体，
+// overlap 又因 note 改写 <0.8 → 昨日 [窗口外·重大] 次日重注入。通用厂商词不得进此路径。
+const LEDGER_GENERIC_ASCII = new Set(['gemini', 'flash', 'grok', 'openai', 'google', 'agent', 'anthropic', 'nvidia', 'github', 'linux', 'huggingface', 'deepseek', 'claude', 'qwen', 'minimax', 'meta', 'microsoft', 'amazon', 'apple', 'intel', 'paper', 'blog', 'news', 'note', 'report', 'model', 'models', 'open', 'new', 'post', 'api', 'app', 'apps', 'ai', 'pro', 'free', 'beta', 'tool', 'tools', 'official', 'release', 'update', 'announce', 'launch', 'said', 'code', 'test', 'data', 'chat'])
+
+const _isDistinctiveAscii = t => {
+  if (typeof t !== 'string' || t.length < 5) return false
+  if (!/^[a-z0-9][a-z0-9.%\-]*$/.test(t)) return false
+  if (!/[a-z]/.test(t)) return false
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return false
+  if (LEDGER_GENERIC_ASCII.has(t)) return false
+  return true
+}
+
+// 消费端入口：宿主偶发把账本当 JSON 字符串注入；空/坏形态 → null（fail-open）。
+export const parseReportedLedger = raw => {
+  let v = raw
+  if (typeof v === 'string') {
+    try { v = JSON.parse(v) } catch { return null }
+  }
+  if (!Array.isArray(v) || !v.length) return null
+  const ok = v.filter(e => e && typeof e === 'object' && typeof e.day === 'string' && Array.isArray(e.tokens))
+  return ok.length ? ok : null
+}
 
 // 指纹 token：复用 cluster 的 tokenizer（ASCII ≥4 + CJK bigram、双停用表），Set 去重后分桶截断。
 export const fingerprintTokens = s => {
@@ -73,6 +96,14 @@ export const storyMatch = (claimLike, entry) => {
     if (!/[a-z]/.test(t)) continue
     if (/^\d{4}-\d{2}-\d{2}$/.test(t)) continue
     if (eSet.has(t)) return true
+  }
+  // 09-20：fable/mythos 无连字符、gpt-6 连字符不足 8。共享 ≥2 个特异 ASCII，或带数字的产品版本号，即同事件。
+  let distinctiveShared = 0
+  for (const t of cTok) {
+    if (!_isDistinctiveAscii(t) || !eSet.has(t)) continue
+    if (/\d/.test(t)) return true
+    distinctiveShared++
+    if (distinctiveShared >= 2) return true
   }
   return false
 }

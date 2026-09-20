@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { majorKey, makeAddMajor, allocateFetchBudget } from '../dedup.mjs'
+import { majorKey, makeAddMajor, allocateFetchBudget, roundRobinTake } from '../dedup.mjs'
 
 // ─── 三个历史指纹 bug 固化 ───
 
@@ -58,6 +58,7 @@ test('_mkMajor 带 url 种子 → sourceUrl 是真 URL + sourceTitle 为 hostnam
   assert.equal(arr[0].sourceUrl, 'https://api-docs.deepseek.com/news/')
   assert.equal(arr[0].sourceTitle, 'api-docs.deepseek.com', 'hostname 提取')
   assert.equal(arr[0].isMajorOut, true)
+  assert.equal(arr[0].quote, '', 'note 是代理转述不是引语；quote 留空以免 [窗口外·重大] 拿转述冒充原文（09-20 Fable/Astra 空话头条）')
 })
 
 test('_mkMajor 无 url → sourceUrl 退回 (多源公认) + sourceTitle 行业客观公认事实', () => {
@@ -247,6 +248,18 @@ test('P2：单通道场景行为不变（无第二通道时不因等分而缩水
   assert.equal(fetchTargets.slice(0, 6).filter(t => t.found_via === 'linuxdo-cdp').length, 6,
     '唯一活跃通道仍吃满 preferCap（不因新等分逻辑缩水）')
   assert.ok(fetchTargets.some(t => t.board === 'labs'), '普通板轮询名额不受影响')
+})
+
+test('roundRobinTake：按板轮询，linuxdo-first 的 Map 不得独占救护席（09-20 VERIFY-SALVAGE）', () => {
+  const m = new Map([
+    ['linuxdo', ['ld1', 'ld2', 'ld3', 'ld4', 'ld5', 'ld6']],
+    ['labs', ['lab1']],
+    ['opensource', ['os1']],
+  ])
+  assert.deepEqual(roundRobinTake(m, 6), ['ld1', 'lab1', 'os1', 'ld2', 'ld3', 'ld4'],
+    '6 席必须跨板：旧 rankedClaims.slice(0,6) 会全是 linuxdo 标题 mint')
+  assert.deepEqual(roundRobinTake(m, 0), [])
+  assert.deepEqual(roundRobinTake(new Map(), 6), [])
 })
 
 // ─── 9/01 覆盖韧性：allocation 结果本身已是混排，编排层不得再 preferStaticFirst ───
