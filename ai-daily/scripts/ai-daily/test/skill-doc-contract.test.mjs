@@ -103,3 +103,10 @@ test('SKILL.md：步骤 4 示例 JSON 不得写 reportedLedger:[]（空数组 = 
   assert.match(SKILL, /空数组.*ledger_unavailable|ledger_unavailable.*空数组/, '文字须写明空数组与不传等价')
   assert.match(SKILL, /必须.*reportedLedger|reportedLedger.*必须/, '账本文件存在时必须注入（09-20 resume 漏传 → 旧头条重注入）')
 })
+
+test('SKILL.md：headless 落盘是宿主 HOST-FINALIZE，不得再写子代理直接落盘', () => {
+  // 09-20 422：workflow 只 return payloads；编排器 Write 是加速不是唯一路径。
+  assert.doesNotMatch(SKILL, /子代理完成发现\/抓取\/核查\/合成并\*\*直接落盘\*\*/, '流程总览不得再写子代理直接落盘（realm 无 fs）')
+  assert.match(SKILL, /HOST-FINALIZE/, '须写明 headless 由 run-daily.sh HOST-FINALIZE 落盘')
+  assert.match(SKILL, /host-finalize\.mjs/, '宿主 CLI 文件名须文档化')
+})

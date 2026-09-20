@@ -111,3 +111,21 @@ test('host shim：子代理跟当前档模型，连续 11128 快切换档', (t) 
   assert.ok(launchLine, '主 launch 行在场')
   assert.match(sh, /LAUNCH_OUT=/, '须捕获 launch 输出才能认 11128，不能只看 rc')
 })
+
+test('host shim：编排器死后必须 HOST-FINALIZE，不得只靠 LLM Write 再 ARTIFACT-FAIL', (t) => {
+  if (!fs.existsSync(SHIM)) {
+    t.skip('本机无 ~/.ai-daily/run-daily.sh（镜像 CI）')
+    return
+  }
+  const sh = fs.readFileSync(SHIM, 'utf8')
+  // 09-20 夜烟测：workflow realm completed + payloads 齐全，编排器 422 死在 Write 前，
+  // run-daily.sh 只跑 artifact-check → ARTIFACT-FAIL。落盘必须是宿主 Node，不经 LLM。
+  assert.match(sh, /host-finalize\.mjs/, '须调用宿主 host-finalize.mjs（从 completed workflow json 确定性落盘）')
+  assert.match(sh, /HOST-FINALIZE/, '须打 HOST-FINALIZE 日志，便于次日审计 422 空盘')
+  const finalizeIdx = sh.indexOf('host-finalize.mjs')
+  const checkIdx = sh.indexOf('artifact-check.mjs')
+  assert.ok(finalizeIdx >= 0 && checkIdx >= 0, 'finalize 与 artifact-check 都在场')
+  assert.ok(finalizeIdx < checkIdx, 'HOST-FINALIZE 必须在 artifact-check 之前（先落盘再自检）')
+  assert.match(sh, /--since-epoch/, '只收本次 WALL_START 之后的 workflow json，不得误收昨日/烟测')
+  assert.match(sh, /\[ ! -f "\$REPORT" \]/, '报告已在盘上则跳过 finalize，避免覆盖编排器已写产物')
+})

@@ -151,6 +151,8 @@ export const allocateFetchBudget = (boardURLMap, MAX_FETCH, opts) => {
 
 // 09-20 VERIFY-SALVAGE：rankedClaims 按 Map 插入序拼接，linuxdo mint 在 extracted 最前 →
 // slice(0,6) 全是论坛标题。按板轮询取 n 条，保证救护席跨板。
+// 09-21：模板救护必须切已配额的 rankedClaims，不得再 roundRobinTake(claimsByBoard)——
+// 未配额全量队列里 linuxdo 出链 secondary 会按质量排到队头，把 mint 挤出 6 席。
 export const roundRobinTake = (boardMap, n) => {
   if (!(n > 0) || !boardMap || typeof boardMap.values !== 'function') return []
   const queues = []

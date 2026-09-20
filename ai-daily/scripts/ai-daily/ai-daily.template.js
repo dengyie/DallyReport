@@ -834,10 +834,13 @@ for (const batch of chunkArr(rankedClaims, VERIFY_BATCH)) {
   } else if (salvage) {
     // 8/27 修复：Verify 死线已过但尚未跑任何批 → 救护首批（镜像 Fetch 的 FETCH-SALVAGE）
     // 保证非 0 核查——至少跑一批最高优先级 claim，避免整个 Verify 被跳过导致 report 缺输入。
+    // 09-21：救护必须切 rankedClaims（已按板配额 + roundRobinTake）。旧版 roundRobinTake(claimsByBoard)
+    // 走未配额全量队列：linuxdo 出链 reuters（secondary）按质量排到队头，strategy 余票把 6 席吃满，
+    // 5 条 linuxdo mint 0 票（wf_812478c6-a01：Verify: 8 [linuxdo:6 strategy:2] → 只核 6 条一手/二手）。
 	    const salvageCount = Math.min(VERIFY_BATCH, rankedClaims.length)
 	    log('VERIFY-SALVAGE 已过 Verify 死线但执行救护首批：核查前 ' + salvageCount + ' 条跨板轮询 claim（保证非 0 确认）')
 	    const vtimeout = AGENT_TIMEOUT_MS
-	    const salvageRes = await parallel(roundRobinTake(claimsByBoard, salvageCount).map(c => () => voteClaim(c, vtimeout)))
+	    const salvageRes = await parallel(rankedClaims.slice(0, salvageCount).map(c => () => voteClaim(c, vtimeout)))
     voted.push(...salvageRes.filter(Boolean))
     break
   } else {
@@ -899,7 +902,17 @@ const confirmedVerify = voted.filter(c => c.survives && claimWindow(c) !== 'out'
 const confirmed = [...confirmedVerify]  // copy：后续 major-out 注入不许污染 confirmedVerify 计数（reportPrompt 分开统计）
 const outOfWindow = voted.filter(c => c.survives && claimWindow(c) === 'out')
 const killed = voted.filter(c => c.isRefuted)
-const unverified = voted.filter(c => !c.survives && !c.isRefuted)
+// 09-21：salvage / BUDGET-BREAK 截断的配额内 claim 必须进 unverified，不得从账本蒸发
+// （wf_812478c6-a01：rankedClaims=8 只核 6，余 2 条 linuxdo 配额既不进 unverified 也不进正文）。
+const votedKey = c => (c.sourceUrl || '') + '\0' + (c.claim || '')
+const votedKeys = new Set(voted.map(votedKey))
+const skippedUnverified = rankedClaims.filter(c => !votedKeys.has(votedKey(c))).map(c => ({
+  ...c, survives: false, isRefuted: false, verdicts: c.verdicts || [], refutedCount: 0, erroredCount: c.erroredCount || 0,
+}))
+if (skippedUnverified.length) {
+  log('VERIFY-SKIP 配额内未投票 ' + skippedUnverified.length + ' 条（salvage/BUDGET-BREAK 截断，记 unverified 不蒸发）')
+}
+const unverified = voted.filter(c => !c.survives && !c.isRefuted).concat(skippedUnverified)
 const toolError = voted.filter(c => c.erroredCount >= 1).length  // 8/17 全量修复（观察项③）：阈值 2→1，单票错误不再被成品抹掉
 log('Verify done: ' + voted.length + ' → ' + confirmedVerify.length + ' verified, ' + killed.length + ' refuted, ' + unverified.length + ' unverified')
 

@@ -115,7 +115,7 @@ test('F2 宿主 CLI 辅助（cli-main / prefetch / artifact-check）不进 MODUL
   const m = src.match(/const MODULES = \[([^\]]+)\]/)
   assert.ok(m, 'build.mjs 含 MODULES 列表')
   const list = m[1]
-  for (const host of ['cli-main', 'linuxdo-prefetch', 'artifact-check']) {
+  for (const host of ['cli-main', 'linuxdo-prefetch', 'artifact-check', 'host-finalize']) {
     assert.ok(!list.includes("'" + host + "'"), host + ' 是宿主 Node CLI，不得 inline')
   }
 })

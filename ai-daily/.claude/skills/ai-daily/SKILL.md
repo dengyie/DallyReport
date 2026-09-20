@@ -11,7 +11,7 @@ description: 生成 AI 每日日报（自动每天 08:40 由 launchd 触发，�
 - 每日 08:40 由 launchd 以 headless 方式自动触发（无需用户在场）。
 
 ## 流程总览
-编排器（本 skill，主会话）→ 调用 Workflow 工具跑 `.claude/workflows/ai-daily.js` → 子代理完成发现/抓取/核查/合成并**直接落盘** → 本 skill 汇报摘要 + 降级标记。
+编排器（本 skill，主会话）→ 调用 Workflow 工具跑 `.claude/workflows/ai-daily.js` → 子代理完成发现/抓取/核查/合成并 **return payloads**（realm 无 fs，不写盘）→ headless 由 `run-daily.sh` **HOST-FINALIZE**（`host-finalize.mjs` 从 completed workflow json 调 `finalize.mjs` 确定性落盘；编排器 Write 是加速不是唯一路径）→ 本 skill 汇报摘要 + 降级标记。
 
 ## 步骤
 
@@ -89,6 +89,7 @@ description: 生成 AI 每日日报（自动每天 08:40 由 launchd 触发，�
   `<date>.sources.json`、`<date>.meta.json`、`<date>-ai日报.md`，缺任一字段报错非 0 退出（可一键重放、可单测，
   不再依赖主会话手工 Write——8/21 直跑 Workflow 工具时曾因跳过手工落盘而缺失产物）。md 由 workflow 内确定性渲染
   （render-md 模块）产出，report 成功即完整版、失败即降级版，**必然成功**，不再有 mdWriter 代理。
+  - **headless HOST-FINALIZE（09-21）**：编排器 422/Connection lost 死在 Write 前时，`run-daily.sh` 在 artifact-check **之前**跑 `node scripts/ai-daily/host-finalize.mjs --date <T> --out <outDir> --since-epoch <WALL_START>`——从 `~/.claude/projects/<session>/workflows/wf_*.json` 找回本次 completed payloads 落盘。报告已在盘上则 `HOST-FINALIZE-SKIP report_exists`。烟测 /tmp json 对不上生产 outDir，不会误收。
   - 直跑 Workflow 工具（非 skill 入口）时，workflow result 落在 task 的 output 文件，用上述 finalize 命令即可落盘。
 - 确认 `<iCloud DallyReport/<date>/<date>-ai日报.md>` 等文件存在，向用户给出：
   - 统计：`stats`（抓取 URL 数 / 提取 claim 数 / 核查数 / 确认数 / 否决数 / **重大超窗事实数 `major_out`**——`[窗口外·重大]` 行业里程碑，非窗口内、未经投票，但应出现在正文/头条并如实标注）

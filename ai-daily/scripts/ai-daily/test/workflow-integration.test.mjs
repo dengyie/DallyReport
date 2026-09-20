@@ -206,12 +206,26 @@ test('模板：Verify 死线已过且 0 批已跑 → SALVAGE 救护首批（镜
   assert.match(TPL, /VERIFY-SALVAGE/, 'VERIFY-SALVAGE 救护日志在场')
   assert.match(TPL, /let stageVerifyRan = false/, 'stageVerifyRan 一次性状态在场')
   assert.match(TPL, /const salvage = !stageVerifyRan && voted\.length === 0 && rankedClaims\.length > 0 && budgetGate\.roomTo\('Verify'\) === 0/, '救护条件：0 批已跑 + 有待核查 claim + roomTo 纯读')
-  assert.match(TPL, /roundRobinTake\(claimsByBoard,\s*salvageCount\)/, '救护按板轮询取票，不得 slice 掉 linuxdo-first 的 rankedClaims 前 6 条（09-20 只核到论坛标题）')
   assert.match(TPL, /salvageCount\s*=\s*Math\.min\(VERIFY_BATCH,\s*rankedClaims\.length\)/, 'salvageCount = min(VERIFY_BATCH, rankedClaims.length)')
+  // 09-20 夜烟测 wf_812478c6-a01：roundRobinTake(claimsByBoard) 用未配额全量队列。
+  // linuxdo 出链 reuters（secondary）按质量排到队头，strategy 余票把 6 席吃满 → 5 条 linuxdo mint 0 票。
+  // rankedClaims 已经是配额内跨板轮询结果，救护必须切它，不得重走 claimsByBoard。
+  assert.match(TPL, /rankedClaims\.slice\(\s*0\s*,\s*salvageCount\s*\)/, '救护切 rankedClaims 前 salvageCount 条（已配额跨板）')
+  assert.doesNotMatch(TPL, /roundRobinTake\(claimsByBoard,\s*salvageCount\)/, '不得对未配额 claimsByBoard 再 roundRobin（出链 secondary 会饿死 linuxdo mint）')
   // 救护后 break（不继续下一批），与 FETCH-SALVAGE 行为一致
   const vsIdx = TPL.indexOf('VERIFY-SALVAGE')
-  const afterSalvage = TPL.slice(vsIdx, vsIdx + 400)
+  const afterSalvage = TPL.slice(vsIdx, vsIdx + 500)
   assert.match(afterSalvage, /break/, 'SALVAGE 后 break（不续批）')
+})
+
+test('模板：Verify 截断的配额内 claim 必须记 unverified，不得从账本蒸发', () => {
+  // 09-20 烟测 Verify done 6→3/3/0：rankedClaims=8 但 salvage 只核 6，余 2 条配额内 claim 既不进 unverified 也不进正文。
+  assert.match(TPL, /VERIFY-SKIP/, '截断须打 VERIFY-SKIP 日志')
+  assert.match(TPL, /skippedUnverified/, '须收集配额内未投票 claim')
+  const unvIdx = TPL.indexOf('const unverified =')
+  assert.ok(unvIdx >= 0, 'unverified 赋值在场')
+  const unvSlice = TPL.slice(unvIdx, unvIdx + 280)
+  assert.match(unvSlice, /skippedUnverified/, 'unverified 必须并入配额内未投票（salvage/BUDGET-BREAK 截断）')
 })
 
 test('模板：后续批次 stageVerifyRan 纯读停止——不记 budget_skipped:Verify', () => {
