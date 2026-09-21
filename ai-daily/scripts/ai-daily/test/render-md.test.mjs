@@ -550,3 +550,86 @@ test('降级版 P3-②：labs degraded 与「无动态」花名册并存渲染�
   assert.ok(!cleanRow.includes('degraded'), '非 degraded 板不得凭空出现 degraded')
   assert.ok(cleanRow.includes('无动态：OpenAI'), '非 degraded 板无动态照常渲染')
 })
+
+// ─── 09-21：窗口外参考中文近重复（ASCII-only tokenize 漏折叠）───
+// 实证：meta.window_misses 同时保留
+//   「A社（Anthropic）承认 Claude 安全对齐存在缺陷但“尚无解决方案”」
+//   「Anthropic 承认 Claude 安全对齐存在缺陷，尚无解决方案」
+//   「陶哲轩、邓煜等 25 位菲尔兹奖得主联名反对 AI 暴力解题」
+//   「25 位菲尔兹奖得主联名，陶哲轩邓煜反对 AI 暴力解题」
+// 旧 tokenize 只吃拉丁 ≥4：陶哲轩条 token 集为空，永不互折；Anthropic 条虽有拉丁 token
+// 但 dedupWindowMisses 只对 major-out/sections 比，不做 windowMisses 内部折叠。
+
+const reportNoOverlap = {
+  oneLiner: 'o', execSummary: 'e',
+  sections: [{ board: 'labs', title: '头部实验室', items: [
+    { title: 'Grok 语音转写 2.0 发布', summary: 's', confidence: 'medium', sources: ['https://x.ai/news/grok-voice-transcribe-2'], vote: '2-1' },
+  ]}],
+  caveats: [], openQuestions: [],
+}
+
+test('完整版：09-21 中文窗口外参考近重复折叠（Anthropic 安全对齐 / 陶哲轩联名）', () => {
+  const windowMisses = [
+    { name: 'A社（Anthropic）承认 Claude 安全对齐存在缺陷但“尚无解决方案”', date: '2026-09-18', note: 'qbitai 窗口外' },
+    { name: '陶哲轩、邓煜等 25 位菲尔兹奖得主联名反对 AI 暴力解题', date: '2026-09-18', note: 'qbitai 窗口外' },
+    { name: '智谱管理层调整（融资负责人张阔、副总裁曲滕离职）', date: '2025-01', note: '陈旧旧闻' },
+    { name: 'Kimi K2.8 突发发布（性能逼近K3）', date: '2026-09-18', note: '早窗口 1 天' },
+    { name: 'Anthropic 承认 Claude 安全对齐存在缺陷，尚无解决方案', date: '2026-09-18', note: '同事件另一表述' },
+    { name: '25 位菲尔兹奖得主联名，陶哲轩邓煜反对 AI 暴力解题', date: '2026-09-18', note: '同事件另一表述' },
+  ]
+  const md = renderMarkdown({ date: 'd', window: 'w', report: reportNoOverlap, coverage: [], windowMisses, degraded: [] })
+  const wmBlock = md.split('## 📎 窗口外参考')[1] || ''
+  const anthropicHits = wmBlock.split('\n').filter(l => /Anthropic|A社/.test(l) && /安全对齐/.test(l))
+  assert.equal(anthropicHits.length, 1, 'Anthropic 安全对齐两条近重复只留一条，实得 ' + anthropicHits.length)
+  const taoHits = wmBlock.split('\n').filter(l => /陶哲轩/.test(l) || /菲尔兹/.test(l))
+  assert.equal(taoHits.length, 1, '陶哲轩/菲尔兹联名两条近重复只留一条，实得 ' + taoHits.length)
+  assert.ok(md.includes('智谱管理层调整'), '无关的智谱管理层条目保留')
+  assert.ok(md.includes('Kimi K2.8'), '无关的 Kimi 条目保留')
+})
+
+test('完整版：纯中文窗口外项与正文标题按 CJK bigram 去重（不再只靠拉丁 token）', () => {
+  const report = {
+    oneLiner: 'o', execSummary: 'e',
+    sections: [{ board: 'safety', title: '安全与伦理', items: [
+      { title: '陶哲轩等菲尔兹奖得主联名反对 AI 暴力解题', summary: 's', confidence: 'low', sources: ['https://www.qbitai.com/2026/09/487653.html'], vote: '—', status: '[窗口外·重大]' },
+    ]}],
+    caveats: [], openQuestions: [],
+  }
+  const windowMisses = [
+    { name: '25 位菲尔兹奖得主联名，陶哲轩邓煜反对 AI 暴力解题', date: '2026-09-18', note: '同事件' },
+    { name: 'Kimi K2.8 突发发布', date: '2026-09-18', note: '另一事件' },
+  ]
+  const md = renderMarkdown({ date: 'd', window: 'w', report, coverage: [], windowMisses, degraded: [] })
+  assert.ok(!md.includes('25 位菲尔兹奖得主联名，陶哲轩邓煜反对 AI 暴力解题'), '已入正文的纯中文同事件不得再出现在窗口外参考')
+  assert.ok(md.includes('Kimi K2.8 突发发布'), '无关窗口外项保留')
+  assert.ok(md.includes('陶哲轩等菲尔兹奖得主联名反对 AI 暴力解题'), '正文标题本身不受去重影响')
+})
+
+test('完整版：窗口外列表内部不得因共享一个厂商拉丁词折叠不同事件', () => {
+  // 对正文的去重仍是 1 个实体 token（8/22 OpenAI/Grok 契约）。
+  // 列表内部不然：两条都写 Claude、事件不同，asciiShared=1 会静默删掉后一条。
+  const windowMisses = [
+    { name: 'Claude 安全对齐存在缺陷但尚无解决方案', date: '2026-09-18', note: '对齐' },
+    { name: 'Claude 发布编程助手并开放接口访问', date: '2026-09-18', note: '产品' },
+  ]
+  const md = renderMarkdown({ date: 'd', window: 'w', report: reportNoOverlap, coverage: [], windowMisses, degraded: [] })
+  const wmBlock = md.split('## 📎 窗口外参考')[1] || ''
+  assert.ok(wmBlock.includes('安全对齐存在缺陷'), '对齐事件保留')
+  assert.ok(wmBlock.includes('发布编程助手并开放接口访问'), '只共享 Claude 的另一事件不得被折掉')
+})
+
+test('降级版：windowMisses 内部中文近重复同样折叠', () => {
+  const md = renderDegradedMarkdown({
+    date: 'd', window: 'w',
+    confirmed: [{ claim: '窗口内项', window: 'in', vote: '2-0', verifiedByVote: true, source: 'https://x.ai/news/a', sourceQuality: 'primary' }],
+    refuted: [], coverage: [],
+    windowMisses: [
+      { name: 'A社（Anthropic）承认 Claude 安全对齐存在缺陷但“尚无解决方案”', date: '2026-09-18', note: 'a' },
+      { name: 'Anthropic 承认 Claude 安全对齐存在缺陷，尚无解决方案', date: '2026-09-18', note: 'b' },
+    ],
+    degraded: [], noNewsCompanies: [],
+  })
+  const wmBlock = md.split('### 📎 窗口外参考')[1] || ''
+  const hits = wmBlock.split('\n').filter(l => /Anthropic|A社/.test(l) && /安全对齐/.test(l))
+  assert.equal(hits.length, 1, '降级版同样只留一条 Anthropic 安全对齐')
+})

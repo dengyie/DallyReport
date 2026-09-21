@@ -195,21 +195,71 @@ export const renderMarkdown = ({ date, window, report, coverage, windowMisses, d
 // 8/22 改为新闻快讯风格：按窗口内/窗口外/否决分节，每条 claim 写为完整句子，附加核查徽标；
 // 2026-08-22 再改：来源角标化对齐完整版 + 修 reportError 硬编码 + windowMisses 与 major-out 去重。
 
-// windowMisses 去重：过滤已在 major-out 出现的 name（spec D.3）。
-// 判定：完全包含 或 共享区分性拉丁实体 token（如 Grok、Qwen3.8-27B）——8/21 实况「Grok 4.6 in Copilot」与「Qwen3.8-27B edge model」即靠实体 token 命中。
-const STOP_TOKENS = new Set(['news', 'note', 'report', 'model', 'models', 'open', 'new', 'blog', 'post', 'api', 'app', 'apps', 'ai', 'pro', 'free', 'beta', 'tool', 'tools', 'official', 'release', 'update'])
-const tokenize = s => (String(s || '').toLowerCase().match(/[a-z0-9][a-z0-9.%\-]*/g) || []).filter(t => t.length >= 4 && !STOP_TOKENS.has(t))
+// windowMisses 去重：过滤已在 major-out/正文出现的 name（spec D.3）+ 09-21 列表内部近重复折叠。
+// 词法名必须用 wm* 前缀——build.mjs 整文件 inline 后与 cluster.mjs 的 clusterTokenize 同顶层；
+// 旧名 tokenize/STOP_TOKENS 也曾与 cluster 撞车（产物 C1 SyntaxError）。
+// 判定：完全包含、CJK bigram 共享 ≥4，或拉丁实体 token 共享。
+// 对正文/major-out：共享 1 个拉丁 token 即去掉（8/22 OpenAI/Grok 契约）。
+// 列表内部：拉丁 token 必须共享 ≥2。只共享一个厂商标记（claude/openai）的两条不同事件不得互折。
+// 09-21「陶哲轩联名」纯中文近重复走 CJK 路径，不靠拉丁 token。
+const wmStopTokens = new Set(['news', 'note', 'report', 'model', 'models', 'open', 'new', 'blog', 'post', 'api', 'app', 'apps', 'ai', 'pro', 'free', 'beta', 'tool', 'tools', 'official', 'release', 'update'])
+const wmCjkStopChars = new Set('的一是在不了有和人这中大为上个时来用们生到作地于出就分对成会可主发年动同进还也说要把被给跟与或及但很太更都也又再才只之所得自心又如其事吗吧呢啊嘛呀么'.split(''))
+const wmCjkStopBigrams = new Set(['发布', '推出', '宣布', '上线', '开源', '报道', '消息', '披露', '据悉', '表示', '今日', '今天', '昨日', '昨天', '最新', '正式', '已经', '即将', '预计', '有望', '目前', '全新', '相关', '升级', '更新', '支持', '提供', '包括', '通过', '之后', '以前', '以后', '进行', '出现', '成为', '以及', '同时', '另外', '此外', '其中', '日报', '视频', '图片', '模型',
+  '智能', '人工', '工智', '数据', '中心', '学习', '机器', '器学', '神经', '网络', '训练', '推理', '算力', '算法', '芯片', '基准', '评测', '能力', '性能', '参数', '版本', '公司', '科技', '集团', '有限', '全球', '首个', '业界', '行业', '产品', '用户', '服务', '平台', '系统', '技术', '团队', '计划', '投资', '融资', '市场', '收入', '增长'])
+const WM_CJK_RE = /[\u4e00-\u9fff]/
+const WM_CJK_MIN_SHARED = 4
+const wmTokenize = s => {
+  const text = String(s || '').toLowerCase()
+  const out = []
+  for (const t of (text.match(/[a-z0-9][a-z0-9.%\-]*/g) || [])) {
+    if (t.length >= 4 && !wmStopTokens.has(t)) out.push(t)
+  }
+  for (const run of (text.match(/[\u4e00-\u9fff]+/g) || [])) {
+    for (let i = 0; i < run.length - 1; i++) {
+      const bg = run.slice(i, i + 2)
+      if (wmCjkStopChars.has(bg[0]) || wmCjkStopChars.has(bg[1])) continue
+      if (wmCjkStopBigrams.has(bg)) continue
+      out.push(bg)
+    }
+  }
+  return out
+}
+const WM_ASCII_MIN_INTERNAL = 2
+const wmNearDup = (a, b, minAscii) => {
+  const na = String(a || '').replace(/\s+/g, ' ').trim()
+  const nb = String(b || '').replace(/\s+/g, ' ').trim()
+  if (!na || !nb) return false
+  if (na === nb) return true
+  if (na.length >= 8 && nb.includes(na)) return true
+  if (nb.length >= 8 && na.includes(nb)) return true
+  const ta = new Set(wmTokenize(na))
+  const tb = new Set(wmTokenize(nb))
+  let asciiShared = 0, cjkShared = 0
+  for (const t of ta) {
+    if (!tb.has(t)) continue
+    if (WM_CJK_RE.test(t)) cjkShared++
+    else asciiShared++
+  }
+  if (asciiShared >= minAscii) return true
+  return cjkShared >= WM_CJK_MIN_SHARED
+}
+export const foldWindowMisses = items => {
+  const out = []
+  for (const m of items || []) {
+    if (!m || !String(m.name || '').trim()) continue
+    if (out.some(w => wmNearDup(w.name, m.name, WM_ASCII_MIN_INTERNAL))) continue
+    out.push(m)
+  }
+  return out
+}
 const dedupWindowMisses = (windowMisses, maj) => {
-  if (!windowMisses.length || !maj.length) return windowMisses
-  const majClaims = maj.map(m => String(m.claim || '').replace(/\s+/g, ' ').trim())
-  const majTokens = new Set()
-  for (const c of majClaims) for (const t of tokenize(c)) majTokens.add(t)
-  return windowMisses.filter(w => {
+  const folded = foldWindowMisses(windowMisses)
+  if (!folded.length || !maj.length) return folded
+  const majClaims = maj.map(m => String(m.claim || '').replace(/\s+/g, ' ').trim()).filter(Boolean)
+  return folded.filter(w => {
     const name = String(w.name || '').trim()
     if (!name) return true
-    if (majClaims.some(c => c.includes(name))) return false
-    if (tokenize(name).some(t => majTokens.has(t))) return false
-    return true
+    return !majClaims.some(c => wmNearDup(c, name, 1))
   })
 }
 

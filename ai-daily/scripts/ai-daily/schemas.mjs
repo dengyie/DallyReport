@@ -44,6 +44,31 @@ export const EXTRACT_SCHEMA = {
     }},
   },
 }
+
+// 09-21：把抽取结果绑到来源。索引页（static-fallback）缺合法文章 sourceUrl 的 claim 丢弃并计数，
+// 不得把栏目 URL 注入引用链；文章页缺可选 sourceUrl 只回落 src.url、不计数。
+// 计数字段是 indexClaimDropped（已丢弃、未进引用），不得再叫 citation。
+export const bindExtractedClaims = (ext, src) => {
+  const httpUrl = u => (typeof u === 'string' && /^https?:\/\//i.test(u)) ? u : null
+  const isIndex = !!(src && src.found_via === 'static-fallback')
+  let indexClaimDropped = 0
+  const claims = []
+  for (const c of (ext && ext.claims) || []) {
+    const su = httpUrl(c && c.sourceUrl)
+    if (isIndex && !su) { indexClaimDropped++; continue }
+    claims.push({
+      ...c,
+      sourceUrl: su || (src && src.url),
+      sourceTitle: src && src.title,
+      sourceQuality: ext && ext.sourceQuality,
+      date: src && src.date,
+      board: src && src.board,
+    })
+  }
+  const sourceQuality = (isIndex && claims.length === 0) ? 'unreliable' : (ext && ext.sourceQuality)
+  return { ...src, sourceQuality, publishDate: ext && ext.publishDate, claims, indexClaimDropped }
+}
+
 export const VERDICT_SCHEMA = {
   type: 'object', required: ['refuted', 'evidence', 'confidence'],
   properties: {

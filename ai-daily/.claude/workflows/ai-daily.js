@@ -257,6 +257,31 @@ const EXTRACT_SCHEMA = {
     }},
   },
 }
+
+// 09-21：把抽取结果绑到来源。索引页（static-fallback）缺合法文章 sourceUrl 的 claim 丢弃并计数，
+// 不得把栏目 URL 注入引用链；文章页缺可选 sourceUrl 只回落 src.url、不计数。
+// 计数字段是 indexClaimDropped（已丢弃、未进引用），不得再叫 citation。
+const bindExtractedClaims = (ext, src) => {
+  const httpUrl = u => (typeof u === 'string' && /^https?:\/\//i.test(u)) ? u : null
+  const isIndex = !!(src && src.found_via === 'static-fallback')
+  let indexClaimDropped = 0
+  const claims = []
+  for (const c of (ext && ext.claims) || []) {
+    const su = httpUrl(c && c.sourceUrl)
+    if (isIndex && !su) { indexClaimDropped++; continue }
+    claims.push({
+      ...c,
+      sourceUrl: su || (src && src.url),
+      sourceTitle: src && src.title,
+      sourceQuality: ext && ext.sourceQuality,
+      date: src && src.date,
+      board: src && src.board,
+    })
+  }
+  const sourceQuality = (isIndex && claims.length === 0) ? 'unreliable' : (ext && ext.sourceQuality)
+  return { ...src, sourceQuality, publishDate: ext && ext.publishDate, claims, indexClaimDropped }
+}
+
 const VERDICT_SCHEMA = {
   type: 'object', required: ['refuted', 'evidence', 'confidence'],
   properties: {
@@ -1280,21 +1305,71 @@ const renderMarkdown = ({ date, window, report, coverage, windowMisses, degraded
 // 8/22 改为新闻快讯风格：按窗口内/窗口外/否决分节，每条 claim 写为完整句子，附加核查徽标；
 // 2026-08-22 再改：来源角标化对齐完整版 + 修 reportError 硬编码 + windowMisses 与 major-out 去重。
 
-// windowMisses 去重：过滤已在 major-out 出现的 name（spec D.3）。
-// 判定：完全包含 或 共享区分性拉丁实体 token（如 Grok、Qwen3.8-27B）——8/21 实况「Grok 4.6 in Copilot」与「Qwen3.8-27B edge model」即靠实体 token 命中。
-const STOP_TOKENS = new Set(['news', 'note', 'report', 'model', 'models', 'open', 'new', 'blog', 'post', 'api', 'app', 'apps', 'ai', 'pro', 'free', 'beta', 'tool', 'tools', 'official', 'release', 'update'])
-const tokenize = s => (String(s || '').toLowerCase().match(/[a-z0-9][a-z0-9.%\-]*/g) || []).filter(t => t.length >= 4 && !STOP_TOKENS.has(t))
+// windowMisses 去重：过滤已在 major-out/正文出现的 name（spec D.3）+ 09-21 列表内部近重复折叠。
+// 词法名必须用 wm* 前缀——build.mjs 整文件 inline 后与 cluster.mjs 的 clusterTokenize 同顶层；
+// 旧名 tokenize/STOP_TOKENS 也曾与 cluster 撞车（产物 C1 SyntaxError）。
+// 判定：完全包含、CJK bigram 共享 ≥4，或拉丁实体 token 共享。
+// 对正文/major-out：共享 1 个拉丁 token 即去掉（8/22 OpenAI/Grok 契约）。
+// 列表内部：拉丁 token 必须共享 ≥2。只共享一个厂商标记（claude/openai）的两条不同事件不得互折。
+// 09-21「陶哲轩联名」纯中文近重复走 CJK 路径，不靠拉丁 token。
+const wmStopTokens = new Set(['news', 'note', 'report', 'model', 'models', 'open', 'new', 'blog', 'post', 'api', 'app', 'apps', 'ai', 'pro', 'free', 'beta', 'tool', 'tools', 'official', 'release', 'update'])
+const wmCjkStopChars = new Set('的一是在不了有和人这中大为上个时来用们生到作地于出就分对成会可主发年动同进还也说要把被给跟与或及但很太更都也又再才只之所得自心又如其事吗吧呢啊嘛呀么'.split(''))
+const wmCjkStopBigrams = new Set(['发布', '推出', '宣布', '上线', '开源', '报道', '消息', '披露', '据悉', '表示', '今日', '今天', '昨日', '昨天', '最新', '正式', '已经', '即将', '预计', '有望', '目前', '全新', '相关', '升级', '更新', '支持', '提供', '包括', '通过', '之后', '以前', '以后', '进行', '出现', '成为', '以及', '同时', '另外', '此外', '其中', '日报', '视频', '图片', '模型',
+  '智能', '人工', '工智', '数据', '中心', '学习', '机器', '器学', '神经', '网络', '训练', '推理', '算力', '算法', '芯片', '基准', '评测', '能力', '性能', '参数', '版本', '公司', '科技', '集团', '有限', '全球', '首个', '业界', '行业', '产品', '用户', '服务', '平台', '系统', '技术', '团队', '计划', '投资', '融资', '市场', '收入', '增长'])
+const WM_CJK_RE = /[\u4e00-\u9fff]/
+const WM_CJK_MIN_SHARED = 4
+const wmTokenize = s => {
+  const text = String(s || '').toLowerCase()
+  const out = []
+  for (const t of (text.match(/[a-z0-9][a-z0-9.%\-]*/g) || [])) {
+    if (t.length >= 4 && !wmStopTokens.has(t)) out.push(t)
+  }
+  for (const run of (text.match(/[\u4e00-\u9fff]+/g) || [])) {
+    for (let i = 0; i < run.length - 1; i++) {
+      const bg = run.slice(i, i + 2)
+      if (wmCjkStopChars.has(bg[0]) || wmCjkStopChars.has(bg[1])) continue
+      if (wmCjkStopBigrams.has(bg)) continue
+      out.push(bg)
+    }
+  }
+  return out
+}
+const WM_ASCII_MIN_INTERNAL = 2
+const wmNearDup = (a, b, minAscii) => {
+  const na = String(a || '').replace(/\s+/g, ' ').trim()
+  const nb = String(b || '').replace(/\s+/g, ' ').trim()
+  if (!na || !nb) return false
+  if (na === nb) return true
+  if (na.length >= 8 && nb.includes(na)) return true
+  if (nb.length >= 8 && na.includes(nb)) return true
+  const ta = new Set(wmTokenize(na))
+  const tb = new Set(wmTokenize(nb))
+  let asciiShared = 0, cjkShared = 0
+  for (const t of ta) {
+    if (!tb.has(t)) continue
+    if (WM_CJK_RE.test(t)) cjkShared++
+    else asciiShared++
+  }
+  if (asciiShared >= minAscii) return true
+  return cjkShared >= WM_CJK_MIN_SHARED
+}
+const foldWindowMisses = items => {
+  const out = []
+  for (const m of items || []) {
+    if (!m || !String(m.name || '').trim()) continue
+    if (out.some(w => wmNearDup(w.name, m.name, WM_ASCII_MIN_INTERNAL))) continue
+    out.push(m)
+  }
+  return out
+}
 const dedupWindowMisses = (windowMisses, maj) => {
-  if (!windowMisses.length || !maj.length) return windowMisses
-  const majClaims = maj.map(m => String(m.claim || '').replace(/\s+/g, ' ').trim())
-  const majTokens = new Set()
-  for (const c of majClaims) for (const t of tokenize(c)) majTokens.add(t)
-  return windowMisses.filter(w => {
+  const folded = foldWindowMisses(windowMisses)
+  if (!folded.length || !maj.length) return folded
+  const majClaims = maj.map(m => String(m.claim || '').replace(/\s+/g, ' ').trim()).filter(Boolean)
+  return folded.filter(w => {
     const name = String(w.name || '').trim()
     if (!name) return true
-    if (majClaims.some(c => c.includes(name))) return false
-    if (tokenize(name).some(t => majTokens.has(t))) return false
-    return true
+    return !majClaims.some(c => wmNearDup(c, name, 1))
   })
 }
 
@@ -1388,11 +1463,10 @@ const renderDegradedMarkdown = ({ date, window, confirmed, refuted, coverage, wi
 // ai-daily 确定性聚类（verify → report 之间的纯函数去重，2026-08-23 第二十一项）。
 // 只做"主视图"聚类不放行：被合并的冗余 item 仍保留在 confirmed/claimsJson 归档，cluster 只影响
 // reportBody 的「已聚类」呈现与正文去重（report prompt 4.7 纪律据此写）。
-// clusterTokenize/clusterStopTokens 与 render-md 同款（正则 `/[a-z0-9][a-z0-9.%\-]*/g`、长度≥4、过滤
-// clusterStopTokens），但**必须用不同词法名**——build.mjs 整文件 inline 会让 render-md 的同名未导出
-// `tokenize`/`STOP_TOKENS` 与本文件的导出在同一顶层作用域 → 宿主 new Function 加载必抛
-// `Identifier 'tokenize' has already been declared` SyntaxError（产物 C1 溃败；node --check 是假绿）。
-// 双轨各自留副本（render-md 内 dedupWindowMisses 是私有函数、用户明令不改，不抽公共模块），仅为改名。
+// clusterTokenize/clusterStopTokens 与 render-md 的 wmTokenize/wmStopTokens 同款（ASCII ≥4 + CJK bigram），
+// 但**必须用不同词法名**——build.mjs 整文件 inline 会让两文件的顶层标识符撞车 → 宿主 new Function
+// 加载必抛 `Identifier 'tokenize' has already been declared` SyntaxError（产物 C1 溃败；node --check 是假绿）。
+// 双轨各自留副本，不抽公共模块：render-md 窗口外折叠用 wm*，本文件聚类/账本指纹用 cluster*。
 
 // 8/23 C1 复核修复：原名 STOP_TOKENS/tokenize 与 render-md 顶层同名冲突 → 改 clusterStopTokens/clusterTokenize。
 const clusterStopTokens = new Set(['news', 'note', 'report', 'model', 'models', 'open', 'new', 'blog', 'post', 'api', 'app', 'apps', 'ai', 'pro', 'free', 'beta', 'tool', 'tools', 'official', 'release', 'update', 'announce', 'launch', 'said'])
@@ -2441,7 +2515,7 @@ if (REPORTED_LEDGER) {
 	// 9/20：linuxdo-cdp snippet 直铸必须在 allocateFetchBudget **之前**。
 	// 09-20 实证：mint 在配额后 → 8 席 linuxdo-cdp 先占满 MAX_FETCH，官方/一手源整板被 budgetDropped。
 	// mint 只计入 LINUXDO_MAX_SOURCES；铸出的 URL 从 boardURLMap 剔除，不占 MAX_FETCH。
-	let indexCitationTotal = 0  // 9/19 F2：索引页引用回落计数（degraded 旗标 index_page_citation:N）
+	let indexClaimDroppedTotal = 0  // 索引页缺文章 URL 的丢弃数（degraded 旗标 index_claim_dropped:N；已丢弃，未进引用）
 	const extracted = []
 	const mintedUrls = new Set()
 	{
@@ -2516,21 +2590,14 @@ for (const batch of fetchBatches) {
         if (!ext) return null
         src.sourceQuality = ext.sourceQuality
         src.publishDate = ext.publishDate
-        // 9/13 索引页治理：claim 自带合法 http(s) sourceUrl（从索引页选中的真实文章页）时优先——
-        // 引用/verify/角标链落到真实文章页；索引页 URL 仍兜底（src.url），不丢 found_via 溯源。
-        // 9/19 F2：回落不再静默——计数 + 打点，degraded 旗标 index_page_citation 可见。
-        const _httpUrl = u => (typeof u === 'string' && /^https?:\/\//i.test(u)) ? u : null
-        let indexCitation = 0
-        src.claims = (ext.claims || []).map(c => {
-          const su = _httpUrl(c.sourceUrl)
-          if (!su) indexCitation++
-          return { ...c, sourceUrl: su || src.url, sourceTitle: src.title, sourceQuality: ext.sourceQuality, date: src.date, board: src.board }
-        })
-        if (indexCitation) {
-          indexCitationTotal += indexCitation
-          log('INDEX-CITATION ' + hostOf(src.url) + ' 有 ' + indexCitation + ' 条 claim 缺合法 sourceUrl → 回落来源 URL（引用可能落在栏目/索引页）')
+        // 09-21：bindExtractedClaims——索引页缺文章 sourceUrl 的 claim 丢弃并计数；
+        // 文章页缺可选 sourceUrl 只回落 src.url、不计数（09-21 把 21/42 都算进去）。
+        const bound = bindExtractedClaims(ext, src)
+        if (bound.indexClaimDropped) {
+          indexClaimDroppedTotal += bound.indexClaimDropped
+          log('INDEX-CLAIM-DROPPED ' + hostOf(src.url) + ' 有 ' + bound.indexClaimDropped + ' 条索引页 claim 缺合法文章 sourceUrl → 已丢弃，未进入引用')
         }
-        return src
+        return bound
       }).catch(e => {
         // 9/19 F10：吞错补 log——.then 映射段抛错与代理真实失败在账面上不可区分的问题。
         log('FETCH-ERR ' + hostOf(src.url) + ' 映射异常按 unreliable 处理: ' + String(e && e.message || e).slice(0, 100))
@@ -2863,8 +2930,7 @@ const noDynamicCompanies = labsCov ? labsCov.companiesChecked.filter(c => c.stat
 const discoveredMisses = []
 for (const d of discoverRows) for (const m of (d.nearWindow || [])) if (m && m.name) discoveredMisses.push(m)
 const gatedMisses = outOfWindow.map(c => ({ name: c.claim.slice(0, 36) + (c.claim.length > 36 ? '…' : ''), date: c.publishDate || c.date || null, note: '页面/标注日期在窗口外（' + (c.publishDate || c.date || '?') + '），不列入正文。来源：' + c.sourceUrl }))
-const windowMisses = []
-for (const m of discoveredMisses.concat(gatedMisses)) if (m && m.name && !windowMisses.some(w => w.name === m.name)) windowMisses.push(m)
+const windowMisses = foldWindowMisses(discoveredMisses.concat(gatedMisses))
 
 // ─── Synthesize（report 是一次性昂贵代理；入口与总墙钟脱钩）───
 phase('Synthesize')
@@ -2963,7 +3029,7 @@ if (linuxdoFailedRows.length) degradedFlags.push('linuxdo_degraded' + (linuxdoFa
 if (ladderUsed.length > 0) degradedFlags.push('ladder_used:' + ladderUsed.join('+'))
 if (ladderExhaustedStages.size) degradedFlags.push('ladder_exhausted:' + [...ladderExhaustedStages].join('+'))
 // 9/19 F2/F1 可见性：索引页引用回落与外部抽查未完成都必须在产物里可见。
-if (indexCitationTotal > 0) degradedFlags.push('index_page_citation:' + indexCitationTotal)
+if (indexClaimDroppedTotal > 0) degradedFlags.push('index_claim_dropped:' + indexClaimDroppedTotal)
 if (externalStats.unavailable > 0) degradedFlags.push('external_check_unavailable:' + externalStats.unavailable)
 // 9/19 烟测实证：report 幻觉引用被确定性过滤的计数必须可见。
 if (reportSourceHallucinated > 0) degradedFlags.push('report_source_hallucination:' + reportSourceHallucinated)

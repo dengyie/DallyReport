@@ -1,11 +1,10 @@
 // ai-daily 确定性聚类（verify → report 之间的纯函数去重，2026-08-23 第二十一项）。
 // 只做"主视图"聚类不放行：被合并的冗余 item 仍保留在 confirmed/claimsJson 归档，cluster 只影响
 // reportBody 的「已聚类」呈现与正文去重（report prompt 4.7 纪律据此写）。
-// clusterTokenize/clusterStopTokens 与 render-md 同款（正则 `/[a-z0-9][a-z0-9.%\-]*/g`、长度≥4、过滤
-// clusterStopTokens），但**必须用不同词法名**——build.mjs 整文件 inline 会让 render-md 的同名未导出
-// `tokenize`/`STOP_TOKENS` 与本文件的导出在同一顶层作用域 → 宿主 new Function 加载必抛
-// `Identifier 'tokenize' has already been declared` SyntaxError（产物 C1 溃败；node --check 是假绿）。
-// 双轨各自留副本（render-md 内 dedupWindowMisses 是私有函数、用户明令不改，不抽公共模块），仅为改名。
+// clusterTokenize/clusterStopTokens 与 render-md 的 wmTokenize/wmStopTokens 同款（ASCII ≥4 + CJK bigram），
+// 但**必须用不同词法名**——build.mjs 整文件 inline 会让两文件的顶层标识符撞车 → 宿主 new Function
+// 加载必抛 `Identifier 'tokenize' has already been declared` SyntaxError（产物 C1 溃败；node --check 是假绿）。
+// 双轨各自留副本，不抽公共模块：render-md 窗口外折叠用 wm*，本文件聚类/账本指纹用 cluster*。
 
 // 8/23 C1 复核修复：原名 STOP_TOKENS/tokenize 与 render-md 顶层同名冲突 → 改 clusterStopTokens/clusterTokenize。
 const clusterStopTokens = new Set(['news', 'note', 'report', 'model', 'models', 'open', 'new', 'blog', 'post', 'api', 'app', 'apps', 'ai', 'pro', 'free', 'beta', 'tool', 'tools', 'official', 'release', 'update', 'announce', 'launch', 'said'])

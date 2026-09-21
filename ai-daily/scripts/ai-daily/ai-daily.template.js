@@ -643,7 +643,7 @@ if (REPORTED_LEDGER) {
 	// 9/20：linuxdo-cdp snippet 直铸必须在 allocateFetchBudget **之前**。
 	// 09-20 实证：mint 在配额后 → 8 席 linuxdo-cdp 先占满 MAX_FETCH，官方/一手源整板被 budgetDropped。
 	// mint 只计入 LINUXDO_MAX_SOURCES；铸出的 URL 从 boardURLMap 剔除，不占 MAX_FETCH。
-	let indexCitationTotal = 0  // 9/19 F2：索引页引用回落计数（degraded 旗标 index_page_citation:N）
+	let indexClaimDroppedTotal = 0  // 索引页缺文章 URL 的丢弃数（degraded 旗标 index_claim_dropped:N；已丢弃，未进引用）
 	const extracted = []
 	const mintedUrls = new Set()
 	{
@@ -718,21 +718,14 @@ for (const batch of fetchBatches) {
         if (!ext) return null
         src.sourceQuality = ext.sourceQuality
         src.publishDate = ext.publishDate
-        // 9/13 索引页治理：claim 自带合法 http(s) sourceUrl（从索引页选中的真实文章页）时优先——
-        // 引用/verify/角标链落到真实文章页；索引页 URL 仍兜底（src.url），不丢 found_via 溯源。
-        // 9/19 F2：回落不再静默——计数 + 打点，degraded 旗标 index_page_citation 可见。
-        const _httpUrl = u => (typeof u === 'string' && /^https?:\/\//i.test(u)) ? u : null
-        let indexCitation = 0
-        src.claims = (ext.claims || []).map(c => {
-          const su = _httpUrl(c.sourceUrl)
-          if (!su) indexCitation++
-          return { ...c, sourceUrl: su || src.url, sourceTitle: src.title, sourceQuality: ext.sourceQuality, date: src.date, board: src.board }
-        })
-        if (indexCitation) {
-          indexCitationTotal += indexCitation
-          log('INDEX-CITATION ' + hostOf(src.url) + ' 有 ' + indexCitation + ' 条 claim 缺合法 sourceUrl → 回落来源 URL（引用可能落在栏目/索引页）')
+        // 09-21：bindExtractedClaims——索引页缺文章 sourceUrl 的 claim 丢弃并计数；
+        // 文章页缺可选 sourceUrl 只回落 src.url、不计数（09-21 把 21/42 都算进去）。
+        const bound = bindExtractedClaims(ext, src)
+        if (bound.indexClaimDropped) {
+          indexClaimDroppedTotal += bound.indexClaimDropped
+          log('INDEX-CLAIM-DROPPED ' + hostOf(src.url) + ' 有 ' + bound.indexClaimDropped + ' 条索引页 claim 缺合法文章 sourceUrl → 已丢弃，未进入引用')
         }
-        return src
+        return bound
       }).catch(e => {
         // 9/19 F10：吞错补 log——.then 映射段抛错与代理真实失败在账面上不可区分的问题。
         log('FETCH-ERR ' + hostOf(src.url) + ' 映射异常按 unreliable 处理: ' + String(e && e.message || e).slice(0, 100))
@@ -1065,8 +1058,7 @@ const noDynamicCompanies = labsCov ? labsCov.companiesChecked.filter(c => c.stat
 const discoveredMisses = []
 for (const d of discoverRows) for (const m of (d.nearWindow || [])) if (m && m.name) discoveredMisses.push(m)
 const gatedMisses = outOfWindow.map(c => ({ name: c.claim.slice(0, 36) + (c.claim.length > 36 ? '…' : ''), date: c.publishDate || c.date || null, note: '页面/标注日期在窗口外（' + (c.publishDate || c.date || '?') + '），不列入正文。来源：' + c.sourceUrl }))
-const windowMisses = []
-for (const m of discoveredMisses.concat(gatedMisses)) if (m && m.name && !windowMisses.some(w => w.name === m.name)) windowMisses.push(m)
+const windowMisses = foldWindowMisses(discoveredMisses.concat(gatedMisses))
 
 // ─── Synthesize（report 是一次性昂贵代理；入口与总墙钟脱钩）───
 phase('Synthesize')
@@ -1165,7 +1157,7 @@ if (linuxdoFailedRows.length) degradedFlags.push('linuxdo_degraded' + (linuxdoFa
 if (ladderUsed.length > 0) degradedFlags.push('ladder_used:' + ladderUsed.join('+'))
 if (ladderExhaustedStages.size) degradedFlags.push('ladder_exhausted:' + [...ladderExhaustedStages].join('+'))
 // 9/19 F2/F1 可见性：索引页引用回落与外部抽查未完成都必须在产物里可见。
-if (indexCitationTotal > 0) degradedFlags.push('index_page_citation:' + indexCitationTotal)
+if (indexClaimDroppedTotal > 0) degradedFlags.push('index_claim_dropped:' + indexClaimDroppedTotal)
 if (externalStats.unavailable > 0) degradedFlags.push('external_check_unavailable:' + externalStats.unavailable)
 // 9/19 烟测实证：report 幻觉引用被确定性过滤的计数必须可见。
 if (reportSourceHallucinated > 0) degradedFlags.push('report_source_hallucination:' + reportSourceHallucinated)

@@ -417,13 +417,19 @@ test('模板：已报道名单进 report ctx（软网），近窗过滤按 day',
   assert.match(TPL, /coverBlock, reportedBlock,/, 'reportedBlock 进 reportPrompt ctx')
 })
 
-test('模板：fetch claim sourceUrl 优先取合法 http(s) 文章页（索引页治理）', () => {
-  // 9/19 F2：回落不再静默——su 为空计数 indexCitation 并打 INDEX-CITATION log，degraded 旗标可见。
-  assert.match(TPL, /sourceUrl: su \|\| src\.url/, 'claim 自带合法 sourceUrl 优先，src.url 兜底')
-  assert.match(TPL, /if \(!su\) indexCitation\+\+/, 'sourceUrl 缺失回落计数（F2 可见性）')
-  assert.match(TPL, /index_page_citation/, 'degraded 旗标 index_page_citation 在场')
+test('模板：fetch claim 走 bindExtractedClaims（索引页缺文章 URL 丢弃，文章页不计 citation）', () => {
+  // 09-21：旧版 if (!su) indexCitation++ 把 huggingface/qbitai 文章页也算进 21。
+  assert.match(TPL, /bindExtractedClaims\(ext, src\)/, '抽取绑定走 schemas.bindExtractedClaims')
+  assert.match(TPL, /indexClaimDroppedTotal \+= /, '丢弃计数累加绑定结果（不再对所有 !su 计数）')
+  assert.match(TPL, /index_claim_dropped:/, 'degraded 旗标是丢弃数，不得再叫 citation')
+  assert.doesNotMatch(TPL, /index_page_citation:/, 'index_page_citation 会把已丢弃的栏目页 claim 读成仍在引用链上')
   assert.match(TPL, /const CDP_FETCH_CLI = '\/Users\/mango\/project\/claude-project\/obsidian\/scripts\/ai-daily\/cdp-fetch\.mjs'/, 'cdp-fetch CLI 绝对路径常量在场')
   assert.match(TPL, /webFetchViaCdp: WEB_FETCH_VIA_CDP/, 'ctx 携带门控标志')
+})
+
+test('模板：windowMisses 聚合走 foldWindowMisses（09-21 中文近重复不得只比全名）', () => {
+  assert.match(TPL, /foldWindowMisses\(/, '窗口外参考聚合必须折叠近重复，不得只 w.name === m.name')
+  assert.doesNotMatch(TPL, /!windowMisses\.some\(w => w\.name === m\.name\)/, '全等去重已退役')
 })
 
 // ─── 9/19 根因修复编排契约：linuxdo 治理 / 外部抽查票 / Status 烘焙 / 窗口预过滤 ───

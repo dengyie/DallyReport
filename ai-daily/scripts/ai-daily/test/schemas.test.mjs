@@ -3,7 +3,7 @@
 // 与 workflow 内逐字节一致（schemas.mjs 是真源，build 剥 export inline 进产物）。改 schema 结构须同步本文件。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { DISCOVER_SCHEMA, HARVEST_SCHEMA, EXTRACT_SCHEMA, VERDICT_SCHEMA, REPORT_SCHEMA, externalCheckState } from '../schemas.mjs'
+import { DISCOVER_SCHEMA, HARVEST_SCHEMA, EXTRACT_SCHEMA, VERDICT_SCHEMA, REPORT_SCHEMA, externalCheckState, bindExtractedClaims } from '../schemas.mjs'
 
 const ALL = {
   DISCOVER_SCHEMA,
@@ -105,4 +105,44 @@ test('externalCheckState：refuted / corroborated / unavailable 三态判定', (
 test('VERDICT_SCHEMA：toolsUnavailable 可选字段在场（内部票零影响）', () => {
   assert.equal(VERDICT_SCHEMA.properties.toolsUnavailable.type, 'boolean')
   assert.ok(!VERDICT_SCHEMA.required.includes('toolsUnavailable'), '可选字段——内部票不填仍过 schema')
+})
+
+// ─── 09-21：index_page_citation 把文章页缺 sourceUrl 也算进去（21/42）───
+// 根因：模板对所有 !su 的 claim 都 indexCitation++，再 sourceUrl 回落 src.url。
+// 文章页（huggingface/qbitai/reuters）的 src.url 本身就是正文页，缺可选 sourceUrl 不是索引页引用。
+// 只有 static-fallback 索引页缺文章 sourceUrl 才算 index citation，且不得把索引 URL 注入 claim。
+
+const _claim = (over = {}) => ({ claim: 'c', quote: 'q'.repeat(80), importance: 'central', ...over })
+
+test('bindExtractedClaims：文章页缺 sourceUrl 回落 src.url，不计 index citation（09-21 误计根因）', () => {
+  const src = { url: 'https://huggingface.co/papers/2609.20519', title: 'SoL-Pi', found_via: 'huggingface.co/papers 共享源摘要', date: '2026-09-17', board: 'opensource' }
+  const ext = { sourceQuality: 'primary', publishDate: '2026-09-17', claims: [_claim(), _claim({ claim: 'c2' })] }
+  const out = bindExtractedClaims(ext, src)
+  assert.equal(out.indexClaimDropped, 0, '文章页缺可选 sourceUrl 不是索引页引用')
+  assert.equal(out.indexCitation, undefined, '返回值不得再叫 indexCitation')
+  assert.equal(out.claims.length, 2)
+  assert.equal(out.claims[0].sourceUrl, src.url)
+  assert.equal(out.sourceQuality, 'primary')
+})
+
+test('bindExtractedClaims：索引页缺文章 sourceUrl → 丢弃 claim 且计数（不得拿栏目页当引用）', () => {
+  const src = { url: 'https://x.ai/news', title: 'xAI News', found_via: 'static-fallback', date: '2026-09-18', board: 'labs' }
+  const ext = { sourceQuality: 'primary', publishDate: '2026-09-18', claims: [_claim(), _claim({ claim: 'c2' }), _claim({ claim: 'c3' })] }
+  const out = bindExtractedClaims(ext, src)
+  assert.equal(out.indexClaimDropped, 3, '3 条缺文章 URL 的索引页 claim 计入丢弃数')
+  assert.equal(out.claims.length, 0, '不得把 https://x.ai/news 栏目页注入 claim.sourceUrl')
+  assert.equal(out.sourceQuality, 'unreliable', '索引页零文章 claim → unreliable（对齐 fetchPrompt）')
+})
+
+test('bindExtractedClaims：索引页选出真实文章 URL 则保留，不计 citation', () => {
+  const src = { url: 'https://www.anthropic.com/news', title: 'Anthropic News', found_via: 'static-fallback', date: '2026-09-18', board: 'labs' }
+  const ext = { sourceQuality: 'primary', publishDate: '2026-09-18', claims: [
+    _claim({ sourceUrl: 'https://www.anthropic.com/news/claude-opus' }),
+    _claim({ claim: '目录条目本身', sourceUrl: 'not-a-url' }),
+  ] }
+  const out = bindExtractedClaims(ext, src)
+  assert.equal(out.claims.length, 1)
+  assert.equal(out.claims[0].sourceUrl, 'https://www.anthropic.com/news/claude-opus')
+  assert.equal(out.indexClaimDropped, 1, '无合法文章 URL 的那条计入丢弃数')
+  assert.equal(out.sourceQuality, 'primary', '仍有真实文章 claim → 不降 unreliable')
 })
