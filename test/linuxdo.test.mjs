@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import {
   parseLinuxDoTopics,
   isAiRelatedTopic,
@@ -11,6 +14,9 @@ import {
   beijingDayRange,
   extractJsonApiTopics,
   fetchNews34ViaJsonApi,
+  fetchLinuxDoJsonPageWithBrowser,
+  extractAttachments,
+  enrichLinuxdoPosts,
 } from "../src/linuxdo.mjs";
 
 const LISTING_FIXTURE = `
@@ -598,4 +604,264 @@ test("mergeSourcesPreferLinuxDo: linuxdoMaxTotal gives linux.do its own budget",
   // maxTotal 0 still drops the general/community side even with linuxdoMaxTotal.
   const zero = mergeSourcesPreferLinuxDo(ld, gen, { maxTotal: 0, linuxdoMaxTotal: 5 });
   assert.deepEqual(zero.map((s) => s.provider), ["linux.do", "linux.do", "linux.do", "linux.do", "linux.do"]);
+});
+
+// --- news/34 JSON API: failure diagnostics, order=created, cache poisoning ---
+
+// Capture console.warn around fn() so the "every page failed" warn is asserted
+// without polluting test output.
+async function captureWarn(fn) {
+  const warns = [];
+  const orig = console.warn;
+  console.warn = (msg) => warns.push(String(msg));
+  try {
+    return { value: await fn(), warns };
+  } finally {
+    console.warn = orig;
+  }
+}
+
+test("fetchNews34ViaJsonApi: request URL pins order=created and carries the news34 cachePredicate", async () => {
+  const calls = [];
+  const runFetch = async (url, _cfg, opts = {}) => {
+    calls.push({ url, opts });
+    // Entirely old page → pagination stops after page 1.
+    return { text: fence([{ id: 9, title: "旧帖", created_at: "2020-01-01T00:00:00Z" }]), provider: "stub" };
+  };
+  const { value: out } = await captureWarn(() =>
+    fetchNews34ViaJsonApi({ date: "2026-08-06", cacheDir: "/tmp/dally-json-url" }, { runFetch }),
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://linux.do/c/news/34.json?page=1&order=created");
+  // The predicate travels with the call in runFetch's shape: raw text -> boolean,
+  // requiring a non-empty parsed topic_list.
+  const pred = calls[0].opts.cachePredicate;
+  assert.equal(typeof pred, "function");
+  assert.equal(pred("<html>Just a moment...</html>"), false);
+  assert.equal(pred("not json at all"), false);
+  assert.equal(pred(JSON.stringify({ topic_list: { topics: [{ id: 1 }] } })), true);
+  assert.equal(pred(JSON.stringify({ topic_list: { topics: [] } })), false, "empty list must not validate");
+  assert.deepEqual(out, []);
+});
+
+test("fetchNews34ViaJsonApi: every page failed -> jsonApiFailures diagnostics (non-enumerable) + exactly one warn", async () => {
+  const runFetch = async () => ({ text: "<html>Just a moment... (challenge)</html>", provider: "stub" });
+  const { value: out, warns } = await captureWarn(() =>
+    fetchNews34ViaJsonApi({ date: "2026-08-06", cacheDir: "/tmp/dally-json-diag" }, { runFetch }),
+  );
+
+  assert.deepEqual(out, []);
+  assert.equal(out.linuxdoDiagnostics?.jsonApiFailures?.length, 1);
+  assert.equal(out.linuxdoDiagnostics.jsonApiFailures[0].page, 1);
+  assert.match(out.linuxdoDiagnostics.jsonApiFailures[0].reason, /parse-failed/);
+  assert.equal(Object.prototype.propertyIsEnumerable.call(out, "linuxdoDiagnostics"), false);
+  assert.equal(warns.length, 1, "one concise warn when EVERY page failed");
+  assert.match(warns[0], /linux\.do news\/34 JSON API 1 页失败/);
+  assert.match(warns[0], /parse-failed/);
+});
+
+test("fetchNews34ViaJsonApi: partial success stays quiet but records the failed page", async () => {
+  const runFetch = async (url) => {
+    if (String(url).includes("page=1")) {
+      return {
+        text: fence([
+          { id: 1, title: "DeepSeek V4 Flash 发布", created_at: "2026-08-06T00:00:00Z", excerpt: "DeepSeek 发布新版，推理成本大幅下降。" },
+        ]),
+        provider: "stub",
+      };
+    }
+    return { text: "<html>challenge</html>", provider: "stub" };
+  };
+  const { value: out, warns } = await captureWarn(() =>
+    fetchNews34ViaJsonApi({ date: "2026-08-06", cacheDir: "/tmp/dally-json-partial" }, { runFetch }),
+  );
+
+  assert.equal(out.length, 1, "page-1 topic still collected");
+  assert.equal(out.linuxdoDiagnostics?.jsonApiFailures?.length, 1);
+  assert.equal(out.linuxdoDiagnostics.jsonApiFailures[0].page, 2);
+  assert.match(out.linuxdoDiagnostics.jsonApiFailures[0].reason, /parse-failed/);
+  assert.equal(warns.length, 0, "partial success must NOT warn");
+});
+
+test("fetchLinuxDoAiSources: HTML list fetch carries a parse-validating cachePredicate", async () => {
+  const calls = [];
+  const runFetch = async (url, _cfg, opts = {}) => {
+    calls.push({ url, opts });
+    return { text: LISTING_FIXTURE, provider: "stub" };
+  };
+  const out = await fetchLinuxDoAiSources(
+    {
+      date: "2026-07-31",
+      cacheDir: "/tmp/dally-linuxdo-listpred",
+      linuxdoEnabled: true,
+      linuxdoTopicLimit: 2,
+      linuxdoDeepFetch: false,
+      linuxdoNews34JsonApi: false,
+      linuxdoListUrls: ["https://linux.do/c/news/34"],
+    },
+    { runFetch },
+  );
+  assert.ok(out.length >= 1);
+  const pred = calls[0].opts.cachePredicate;
+  assert.equal(typeof pred, "function");
+  assert.equal(pred(LISTING_FIXTURE), true);
+  assert.equal(pred("<html>Just a moment...</html>"), false, "challenge page must not validate as a list");
+});
+
+// grok-search fetch.js fixture (same pattern as test/grok-cli.test.mjs) so the
+// REAL runFetch runs: cache-first read + predicate gate + cache write.
+async function fixtureGrokSearchDir(bodyText) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-linuxdo-fixture-"));
+  const scripts = path.join(root, "scripts");
+  await fs.mkdir(scripts, { recursive: true });
+  await fs.writeFile(
+    path.join(scripts, "fetch.js"),
+    `process.stdout.write(JSON.stringify({content:{text:${JSON.stringify(bodyText)}}}));`,
+    "utf8",
+  );
+  return root;
+}
+
+test("fetchNews34ViaJsonApi: poisoned news34 cache (challenge page) is not replayed — live fetch wins", async () => {
+  const date = "2026-08-06";
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "dally-linuxdo-poison-"));
+  const cacheDir = path.join(tmp, "cache");
+  await fs.mkdir(cacheDir, { recursive: true });
+  const cacheFile = path.join(cacheDir, `${date}-linuxdo-news34-page-1.txt`);
+  await fs.writeFile(cacheFile, "<html>Just a moment... (Cloudflare challenge)</html>", "utf8");
+
+  const topics = [
+    {
+      id: 400001,
+      title: "DeepSeek V4 Flash 正式版发布，API 已开放",
+      created_at: "2026-08-06T02:00:00Z",
+      excerpt: "DeepSeek 发布新版，推理成本大幅下降，开发者可直接调用 API。",
+    },
+    // Old filler topic so the early-stop heuristic ends pagination after page 1
+    // (the fixture ignores the page param and would otherwise serve every page).
+    { id: 999, title: "old filler post", created_at: "2020-01-01T00:00:00Z" },
+  ];
+  const grokSearchDir = await fixtureGrokSearchDir(JSON.stringify({ topic_list: { topics } }));
+
+  // No deps → the REAL runFetch runs: the poisoned cache must be rejected on
+  // read (cachePredicate), the live body fetched, and the cache rewritten.
+  const { value: out, warns } = await captureWarn(() => fetchNews34ViaJsonApi({ date, cacheDir, grokSearchDir }));
+
+  assert.equal(out.length, 1, "must NOT short-circuit on the poisoned cache");
+  assert.equal(out[0].id, 400001);
+  assert.equal(out.linuxdoDiagnostics?.jsonApiFailures?.length ?? 0, 0);
+  assert.equal(warns.length, 0, "a recovered run is not a failed run");
+  const nowCached = await fs.readFile(cacheFile, "utf8");
+  assert.ok(extractJsonApiTopics(nowCached)?.length >= 1, "live JSON replaced the poison on disk");
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
+// --- bare % attachment filenames (decodeURIComponent URIError guard) ---
+
+test("extractAttachments: bare % in a filename falls back to the raw basename instead of throwing", () => {
+  const html = `<img src="https://linux.do/uploads/default/original/100%off.png">`;
+  let list;
+  assert.doesNotThrow(() => { list = extractAttachments(html); }, "URIError must not escape extractAttachments");
+  assert.equal(list.length, 1);
+  assert.equal(list[0].basename, "100%off.png", "raw (undecoded) basename kept");
+});
+
+test("enrichLinuxdoPosts: bare-% attachment link no longer drops the post archive", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "dally-linuxdo-pct-"));
+  const config = {
+    date: "2026-08-07",
+    obsidianDir: tmp,
+    linuxdoFullPosts: true,
+    linuxdoDownloadAttachments: true,
+  };
+  const cards = [{ id: 10, url: "https://linux.do/t/topic/10", title: "A", created_at: "2026-08-07T00:00:00Z" }];
+  const fetchTopic = async () =>
+    JSON.stringify({
+      title: "A",
+      created_at: "2026-08-07T00:00:00Z",
+      post_stream: {
+        posts: [
+          {
+            cooked: `<p>正文足够长，包含实质内容，供归档阅读。</p><img src="https://linux.do/uploads/default/original/100%off.png">`,
+          },
+        ],
+      },
+    });
+  const download = async (_url, dest) => {
+    await fs.writeFile(dest, "x", "utf8");
+    return { bytes: 1 };
+  };
+
+  const out = await enrichLinuxdoPosts(cards, config, { fetchTopic, download });
+  assert.equal(out.length, 1, "the whole post must still archive despite the bare % attachment");
+  const postFile = path.join(tmp, "2026-08-07", "linuxdo-posts", path.basename(out[0].postFile));
+  assert.match(await fs.readFile(postFile, "utf8"), /正文足够长/);
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
+// --- 2026-09-25 review P1：CDP 路径无 deadline 的挂死回归 ---
+
+test("fetchLinuxDoJsonPageWithBrowser: socket that closes before opening rejects in bounded time (no eternal hang)", async () => {
+  // Old signature of the P1: ws.onopen was the only settle path besides onerror —
+  // a Chrome that closed the socket (sleep / tab killed) never called either, so
+  // the daily run awaited forever. The fix routes pre-open closes through the
+  // same rejection path; this test pins that contract with a fake WebSocket that
+  // fires ONLY onclose, and asserts the call resolves null in bounded time.
+  const realFetch = globalThis.fetch;
+  const RealWebSocket = globalThis.WebSocket;
+  try {
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({ id: "T1", webSocketDebuggerUrl: "ws://cdp.test/devtools/page/T1" }),
+    });
+    globalThis.WebSocket = class {
+      constructor() {
+        queueMicrotask(() => this.onclose?.());
+      }
+      send() {}
+      close() {}
+    };
+    const started = Date.now();
+    const out = await Promise.race([
+      fetchLinuxDoJsonPageWithBrowser("https://linux.do/c/news/34.json", "", "127.0.0.1:9222"),
+      new Promise((r) => setTimeout(() => r("HUNG"), 3000)),
+    ]);
+    assert.equal(out, null, "browser fetch falls back (null) when the socket dies pre-open");
+    assert.ok(Date.now() - started < 3000, "must not hang past the race window");
+  } finally {
+    globalThis.fetch = realFetch;
+    globalThis.WebSocket = RealWebSocket;
+  }
+});
+
+test("fetchLinuxDoJsonPageWithBrowser: socket that opens but never answers is bounded by the per-call timeout", async () => {
+  // Socket opens, Runtime.enable is sent, but the socket never answers and then
+  // dies: send()'s per-call timeout (or onclose rejection) must settle the await.
+  const realFetch = globalThis.fetch;
+  const RealWebSocket = globalThis.WebSocket;
+  try {
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({ id: "T2", webSocketDebuggerUrl: "ws://cdp.test/devtools/page/T2" }),
+    });
+    globalThis.WebSocket = class {
+      constructor() {
+        queueMicrotask(() => this.onopen?.());
+      }
+      send() {
+        // Never answers; simulate Chrome dying right after the call.
+        queueMicrotask(() => this.onclose?.());
+      }
+      close() {}
+    };
+    const out = await Promise.race([
+      fetchLinuxDoJsonPageWithBrowser("https://linux.do/c/news/34.json", "", "127.0.0.1:9222"),
+      new Promise((r) => setTimeout(() => r("HUNG"), 3000)),
+    ]);
+    assert.equal(out, null, "in-flight CDP call is rejected on socket death, not awaited forever");
+  } finally {
+    globalThis.fetch = realFetch;
+    globalThis.WebSocket = RealWebSocket;
+  }
 });

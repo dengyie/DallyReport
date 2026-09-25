@@ -4,6 +4,12 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { synthesizeWithWebSearch } from "../src/llm-synthesize.mjs";
 
+// 行为测试全部注入 stub、从不碰网；凭证门只查环境变量存在性。给无 .env 的机器也
+// 提供一次性凭证，保证套件在所有主机上全绿（node:test 每个测试文件独立进程，env
+// 不跨文件泄漏）。2026-09-25 review：此前无 .env 机器会静默蒸发十余个行为测试。
+if (!process.env.GROK_API_URL) process.env.GROK_API_URL = "https://gateway.test/v1";
+if (!process.env.GROK_API_KEY) process.env.GROK_API_KEY = "test-key";
+
 // Load .env if present so the cred-gated tests can run (they still never touch the
 // network — fetch and searchImpl are both injected stubs). A fresh checkout without
 // .env skips them like the existing llm-synthesize cases.
@@ -15,9 +21,6 @@ if (existsSync(path.resolve(process.cwd(), ".env"))) {
     /* dotenv is a dependency; if missing, cred tests just skip */
   }
 }
-
-const HAVE_CREDS = !!process.env.GROK_API_URL && !!process.env.GROK_API_KEY;
-const maybeCreds = HAVE_CREDS ? test : test.skip;
 
 // A fetch stub that replays a fixed sequence of /chat/completions payloads, one per
 // call. Lets each test script gemini's tool-call round(s) and the final text reply.
@@ -65,7 +68,7 @@ function textResponse(content, finishReason = "stop") {
   };
 }
 
-maybeCreds("synthesizeWithWebSearch: executes emitted web_search and converges to text", async () => {
+test("synthesizeWithWebSearch: executes emitted web_search and converges to text", async () => {
   const searched = [];
   const fetchStub = seqStubFetch([
     toolCallResponse("call_1", "2026年8月7日 AI 最新动态"),
@@ -90,7 +93,7 @@ maybeCreds("synthesizeWithWebSearch: executes emitted web_search and converges t
   assert.match(JSON.parse(fetchStub.calls[0].init.body).tools[0].function.name, /^web_search$/);
 });
 
-maybeCreds("synthesize turns: caps search rounds at maxSearchRounds, then a forced no-tool final reply", async () => {
+test("synthesize turns: caps search rounds at maxSearchRounds, then a forced no-tool final reply", async () => {
   const searched = [];
   const fetchStub = seqStubFetch([
     toolCallResponse("call_1", "q1"),
@@ -116,7 +119,7 @@ maybeCreds("synthesize turns: caps search rounds at maxSearchRounds, then a forc
   assert.equal(finalBody.tools, undefined, "final call drops the web_search tool");
 });
 
-maybeCreds("synthesize loop: won't run forever even if the model never stops", async () => {
+test("synthesize loop: won't run forever even if the model never stops", async () => {
   const fetchStub = seqStubFetch([
     toolCallResponse("c1", "q"),
     toolCallResponse("c2", "q"),
@@ -139,7 +142,7 @@ maybeCreds("synthesize loop: won't run forever even if the model never stops", a
   assert.equal(finalBody.tools, undefined, "final call drops the web_search tool");
 });
 
-maybeCreds("synthesizeWithWebSearch: a failing searchImpl renders 检索失败, still converges", async () => {
+test("synthesizeWithWebSearch: a failing searchImpl renders 检索失败, still converges", async () => {
   const fetchStub = seqStubFetch([
     toolCallResponse("call_1", "查询"),
     textResponse("即便检索失败也要出正文"),
@@ -165,7 +168,7 @@ maybeCreds("synthesizeWithWebSearch: a failing searchImpl renders 检索失败, 
   assert.equal(fetchStub.calls.length, 2);
 });
 
-maybeCreds("synthesizeWithWebSearch: missing searchImpl -> SYNTH_NO_SEARCH_IMPL", async () => {
+test("synthesizeWithWebSearch: missing searchImpl -> SYNTH_NO_SEARCH_IMPL", async () => {
   await assert.rejects(
     () =>
       synthesizeWithWebSearch({
@@ -188,7 +191,7 @@ maybeCreds("synthesizeWithWebSearch: missing searchImpl -> SYNTH_NO_SEARCH_IMPL"
 // Here a tiny timeoutMs + a fetch that outlives it burns the whole budget in round 1,
 // so the loop's next POST (round 2, since round 1 yields a tool_call) must surface the
 // spent deadline as SYNTH_TIMEOUT instead of issuing another request.
-maybeCreds("synthesizeWithWebSearch: spent overall budget -> SYNTH_TIMEOUT, not a padded 10s floor", async () => {
+test("synthesizeWithWebSearch: spent overall budget -> SYNTH_TIMEOUT, not a padded 10s floor", async () => {
   let fetchCalls = 0;
   const slowToolCallFetch = async () => {
     fetchCalls += 1;
@@ -222,4 +225,77 @@ maybeCreds("synthesizeWithWebSearch: spent overall budget -> SYNTH_TIMEOUT, not 
   // Exact count is timing-dependent (the spent deadline may trip on round 1 or round 2),
   // but we must never issue the full round 2 + forced-final cascade the old floor allowed.
   assert.ok(fetchCalls <= 2, `old 10s floor could keep POSTing; got ${fetchCalls} fetches`);
+});
+// --- 2026-09-25 review root fixes ---
+
+test("synthesizeWithWebSearch: a transition turn with text + tool_calls is not returned as the final report", async () => {
+  // 模型「先说一句再检索」是常见行为：带正文的 tool_calls 轮次是过渡轮，绝不能
+  // 被当作整篇日报提前返回（旧代码的 return text 正是这条路径，且声明的检索从未执行）。
+  const searched = [];
+  const fetchStub = seqStubFetch([
+    {
+      choices: [
+        {
+          message: {
+            content: "我先检索一下最新动态。",
+            tool_calls: [
+              {
+                id: "call_t1",
+                type: "function",
+                function: { name: "web_search", arguments: JSON.stringify({ query: "最新 AI 动态" }) },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+    },
+    textResponse("## 今日 AI 日报正文"),
+  ]);
+  const out = await synthesizeWithWebSearch({
+    query: "今天2026-09-25 AI 资讯",
+    date: "2026-09-25",
+    sources: [{ url: "https://example.com/a", title: "甲", snippet: "乙" }],
+    model: "gemini-3.6-flash",
+    maxSearchRounds: 2,
+    fetch: fetchStub,
+    searchImpl: async (q) => {
+      searched.push(q);
+      return "检索结果正文";
+    },
+  });
+  assert.equal(out, "## 今日 AI 日报正文", "the transition narration must never become the report");
+  assert.deepEqual(searched, ["最新 AI 动态"], "the declared search actually ran");
+  assert.equal(fetchStub.calls.length, 2, "one tool round + one final reply");
+  const secondBody = JSON.parse(fetchStub.calls[1].init.body);
+  const assistantTurn = secondBody.messages.find((m) => m.role === "assistant");
+  assert.equal(assistantTurn.content, "我先检索一下最新动态。", "narration is fed back as the assistant turn");
+});
+
+test("synthesizeWithWebSearch: a search that outlives the wall-clock budget is abandoned, budget surfaces as SYNTH_TIMEOUT", async () => {
+  // searchImpl（grok-search 子进程）此前完全运行在 deadline 之外；现在受墙钟预算
+  // 约束：超预算的检索被放弃（tool 消息记检索失败），预算耗尽后由 postChatComplete
+  // 的 deadline 检查收敛为 SYNTH_TIMEOUT。
+  const searched = [];
+  const fetchStub = seqStubFetch([
+    toolCallResponse("call_slow", "慢查询"),
+    textResponse("永远不会用到的正文"),
+  ]);
+  await assert.rejects(
+    synthesizeWithWebSearch({
+      query: "今天2026-09-25 AI 资讯",
+      date: "2026-09-25",
+      sources: [{ url: "https://example.com/a", title: "甲", snippet: "乙" }],
+      model: "gemini-3.6-flash",
+      maxSearchRounds: 2,
+      timeoutMs: 120,
+      fetch: fetchStub,
+      searchImpl: (q) => {
+        searched.push(q);
+        return new Promise(() => {}); // never settles — 模拟子进程挂死
+      },
+    }),
+    (e) => e.code === "SYNTH_TIMEOUT",
+  );
+  assert.equal(searched.length, 1, "the hanging search was attempted once, not retried");
 });

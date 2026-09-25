@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -17,8 +17,15 @@ import {
   sipsDownscale,
   decodeImageBuffer,
   checkPosterTemplate,
+  readVaultFileRetry,
   POSTER_TEMPLATE_VERSION,
 } from "../src/image-gen.mjs";
+
+// 行为测试全部注入 stub fetch、从不碰网；凭证门只查环境变量存在性。给无 .env 的
+// 机器也提供一次性凭证，保证套件在所有主机上全绿（node:test 每个测试文件独立
+// 进程，env 不会跨文件泄漏）。assertImageCreds 回退读 GROK_API_*，设这两个即可。
+if (!process.env.GROK_API_URL) process.env.GROK_API_URL = "https://gateway.test/v1";
+if (!process.env.GROK_API_KEY) process.env.GROK_API_KEY = "test-key";
 
 // Load .env if present so cred-gated paths behave like the synthesize tests.
 if (existsSync(path.resolve(process.cwd(), ".env"))) {
@@ -38,8 +45,14 @@ const PNG_1x1 = Buffer.from(
 );
 
 // Minimal config object (loadConfig shape, subset image-gen uses).
+const tmpDirs = [];
+after(() => {
+  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+});
+
 function cfg(over = {}) {
   const tmp = mkdtempSync(path.join(os.tmpdir(), "dally-img-"));
+  tmpDirs.push(tmp);
   const promptFile = path.join(tmp, "prompt.md");
   writeFileSync(
     promptFile,
@@ -310,11 +323,9 @@ test("hasAiPosterHeadlines: ignores injection-only titles", () => {
 });
 
 // --- generateGithubPoster ---
+// 行为测试不再按 HAVE_CREDS 门控：上方 env shim 已保证凭证存在，全部注入 stub。
 
-const HAVE_CREDS = !!process.env.GROK_API_URL && !!process.env.GROK_API_KEY;
-const maybeCreds = HAVE_CREDS ? test : test.skip;
-
-maybeCreds("image-gen: edits success writes PNG + embed path", async () => {
+test("image-gen: edits success writes PNG + embed path", async () => {
   const c = cfg();
   const fetchStub = stubFetch([
     { status: 200, ct: "application/json", body: { data: [{ b64_json: B64_IMG }] } },
@@ -334,7 +345,7 @@ maybeCreds("image-gen: edits success writes PNG + embed path", async () => {
   assert.match(fetchStub.calls[0].url, /\/images\/edits$/);
 });
 
-maybeCreds("image-gen: 524 with valid image body is salvaged (not an error)", async () => {
+test("image-gen: 524 with valid image body is salvaged (not an error)", async () => {
   // CPA quirk: status 524 but JSON body carries a real image.
   const c = cfg();
   const fetchStub = stubFetch([
@@ -348,7 +359,7 @@ maybeCreds("image-gen: 524 with valid image body is salvaged (not an error)", as
   assert.equal(res.error, null);
 });
 
-maybeCreds("image-gen: edits 524 (html) then retry then generations fallback", async () => {
+test("image-gen: edits 524 (html) then retry then generations fallback", async () => {
   const c = cfg({ imageRetries: 1 });
   // call1 edits -> 524 html; call2 edits retry -> 524 html; call3 generations -> image
   const fetchStub = stubFetch([
@@ -368,7 +379,7 @@ maybeCreds("image-gen: edits 524 (html) then retry then generations fallback", a
   assert.match(fetchStub.calls[2].url, /\/images\/generations$/);
 });
 
-maybeCreds("image-gen: HTTP 400 (non-retryable) -> skip retries, go generations fallback", async () => {
+test("image-gen: HTTP 400 (non-retryable) -> skip retries, go generations fallback", async () => {
   const c = cfg({ imageRetries: 2 });
   const fetchStub = stubFetch([
     { status: 400, ct: "application/json", body: { error: { message: "bad model" } } },
@@ -386,7 +397,7 @@ maybeCreds("image-gen: HTTP 400 (non-retryable) -> skip retries, go generations 
   assert.match(fetchStub.calls[1].url, /\/images\/generations$/);
 });
 
-maybeCreds("image-gen: all attempts fail -> IMG_HTTP_ERROR, ok false", async () => {
+test("image-gen: all attempts fail -> IMG_HTTP_ERROR, ok false", async () => {
   const c = cfg({ imageRetries: 1 });
   const fetchStub = stubFetch([
     { status: 524, ct: "text/html", body: "<html>524</html>" },
@@ -402,7 +413,7 @@ maybeCreds("image-gen: all attempts fail -> IMG_HTTP_ERROR, ok false", async () 
   assert.equal(res.error.status, 524);
 });
 
-maybeCreds("image-gen: fetch TimeoutError -> IMG_TIMEOUT { aborted }", async () => {
+test("image-gen: fetch TimeoutError -> IMG_TIMEOUT { aborted }", async () => {
   const c = cfg({ imageRetries: 0 });
   const fetchStub = async () => {
     const e = new Error("timed out");
@@ -419,7 +430,7 @@ maybeCreds("image-gen: fetch TimeoutError -> IMG_TIMEOUT { aborted }", async () 
   assert.equal(res.error.aborted, true);
 });
 
-maybeCreds("image-gen: 200 but empty data -> IMG_EMPTY then generations fallback ok", async () => {
+test("image-gen: 200 but empty data -> IMG_EMPTY then generations fallback ok", async () => {
   const c = cfg();
   const fetchStub = stubFetch([
     { status: 200, ct: "application/json", body: { data: [] } },
@@ -433,7 +444,7 @@ maybeCreds("image-gen: 200 but empty data -> IMG_EMPTY then generations fallback
   assert.equal(res.usedFallback, true);
 });
 
-maybeCreds("image-gen: url branch fetches + PNG signature check", async () => {
+test("image-gen: url branch fetches + PNG signature check", async () => {
   const c = cfg();
   // generations returns a url; the second fetch (url download) returns the PNG bytes.
   const pngBuf = PNG_1x1;
@@ -483,7 +494,7 @@ maybeCreds("image-gen: url branch fetches + PNG signature check", async () => {
   assert.equal(res.usedFallback, true);
 });
 
-maybeCreds("image-gen: missing prompt file -> IMG_BAD_PROMPT", async () => {
+test("image-gen: missing prompt file -> IMG_BAD_PROMPT", async () => {
   const c = cfg({ imagePromptFile: "/no/such/prompt.md" });
   // Non-empty repos: must pass the IMG_NO_ROWS guard so we actually reach the
   // prompt-file-existence check this test is exercising.
@@ -575,7 +586,7 @@ test("image-gen: AI poster missing prompt -> IMG_BAD_PROMPT", async () => {
   assert.equal(res.error.code, "IMG_BAD_PROMPT");
 });
 
-maybeCreds("image-gen: write failure -> IMG_WRITE_FAILED", async () => {
+test("image-gen: write failure -> IMG_WRITE_FAILED", async () => {
   const c = cfg({ obsidianDir: "/no/such/root/dir/that/cannot/exist/out" });
   const fetchStub = stubFetch([
     { status: 200, ct: "application/json", body: { data: [{ b64_json: B64_IMG }] } },
@@ -734,4 +745,103 @@ test("checkPosterTemplate: bare marker text without comment delimiters fails", (
   assert.match(checkPosterTemplate("海报模板版本：v2\n正文\n"), /缺少版本标记/);
   // No inner spaces is still a valid HTML comment marker.
   assert.equal(checkPosterTemplate("<!--海报模板版本：v2-->\n正文\n"), null);
+});
+
+// --- readVaultFileRetry（2026-09-25 iCloud 瞬时读失败根因修复）---
+
+test("readVaultFileRetry: transient EIO on first read -> retried and succeeds", async () => {
+  let calls = 0;
+  const out = await readVaultFileRetry("p", "utf8", {
+    readImpl: () => {
+      calls += 1;
+      if (calls === 1) {
+        const e = new Error("Input/output error");
+        e.code = "EIO";
+        throw e;
+      }
+      return "正文";
+    },
+    sleepImpl: async () => {},
+  });
+  assert.equal(out, "正文");
+  assert.equal(calls, 2, "exactly one retry");
+});
+
+test("readVaultFileRetry: ENOENT fails fast (permanent errors burn no retry budget)", async () => {
+  let calls = 0;
+  await assert.rejects(
+    readVaultFileRetry("p", "utf8", {
+      readImpl: () => {
+        calls += 1;
+        const e = new Error("no such file");
+        e.code = "ENOENT";
+        throw e;
+      },
+      sleepImpl: async () => {},
+    }),
+    /no such file/,
+  );
+  assert.equal(calls, 1, "permanent error must fail on the first attempt");
+});
+
+test("readVaultFileRetry: retries exhausted -> throws the last error", async () => {
+  let calls = 0;
+  await assert.rejects(
+    readVaultFileRetry("p", "utf8", {
+      attempts: 3,
+      readImpl: () => {
+        calls += 1;
+        const e = new Error(`EIO #${calls}`);
+        e.code = "EIO";
+        throw e;
+      },
+      sleepImpl: async () => {},
+    }),
+    /EIO #3/,
+  );
+  assert.equal(calls, 3);
+});
+
+test("readVaultFileRetry: codeless (injected) errors are treated as transient", async () => {
+  let calls = 0;
+  const out = await readVaultFileRetry("p", "utf8", {
+    readImpl: () => {
+      calls += 1;
+      if (calls === 1) throw new Error("flaky injected failure");
+      return "ok";
+    },
+    sleepImpl: async () => {},
+  });
+  assert.equal(out, "ok");
+  assert.equal(calls, 2);
+});
+
+test("image-gen: prompt file transient EIO is retried via deps.readImpl, poster still succeeds", async () => {
+  const c = cfg();
+  const fetchStub = stubFetch([
+    { status: 200, ct: "application/json", body: { data: [{ b64_json: B64_IMG }] } },
+  ]);
+  let promptReads = 0;
+  const realRead = readFileSync;
+  const res = await generateGithubPoster(
+    c,
+    [{ repo: "a/b", starsToday: 5, starsTotal: 10 }],
+    {
+      fetch: fetchStub,
+      sips: false,
+      readImpl: (p, opts) => {
+        if (String(p).endsWith("prompt.md")) {
+          promptReads += 1;
+          if (promptReads === 1) {
+            const e = new Error("Input/output error");
+            e.code = "EIO";
+            throw e;
+          }
+        }
+        return realRead(p, opts);
+      },
+    },
+  );
+  assert.equal(res.ok, true, "one transient EIO must not fail the poster");
+  assert.equal(promptReads, 2, "exactly one retry on the prompt file");
 });

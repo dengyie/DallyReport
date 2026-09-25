@@ -19,7 +19,9 @@ export function frontMatter(fields) {
   const lines = ["---"];
   for (const [k, v] of Object.entries(fields)) {
     if (v == null) continue;
-    if (Array.isArray(v)) lines.push(`${k}: [${v.map((s) => String(s).replace(/]/g, "\\]")).join(", ")}]`);
+    // YAML flow-sequence items are JSON-quoted so `[`, `]`, `,` and quotes inside
+    // a tag can never break out of the flow sequence or inject extra items.
+    if (Array.isArray(v)) lines.push(`${k}: [${v.map((s) => JSON.stringify(String(s))).join(", ")}]`);
     else lines.push(`${k}: ${String(v)}`);
   }
   lines.push("---");

@@ -155,6 +155,27 @@ export async function aiNewsSection(
   ]);
   result = searchResult;
 
+  // 2026-09-25 review: collector failures previously existed only as non-enumerable
+  // metadata that NO production code read — a nodeseek/v2ex/daily outage degraded
+  // the report silently while stdout showed a clean ✅. Collect them here so they
+  // reach the section summary line (launchd log) and the section result.
+  const degradedSources = [];
+  for (const [label, arr, errKey] of [
+    ["linux.do", linuxdoSources, "linuxdoError"],
+    ["nodeseek", nodeseekSources, "nodeseekError"],
+    ["v2ex", v2exSources, "v2exError"],
+    ["当日硬源", dailySources, "dailySourcesError"],
+  ]) {
+    if (arr?.[errKey]) {
+      degradedSources.push(`${label}（${arr[errKey].failures?.[0]?.message || "采集失败"}）`);
+      continue;
+    }
+    const diag = arr?.communityDiagnostics ?? arr?.linuxdoDiagnostics;
+    if (diag?.failures?.length) {
+      degradedSources.push(`${label}（${diag.failures.length} 项采集失败）`);
+    }
+  }
+
   const grokCitations =
     result?.diagnostics?.provider_attempts?.find((a) =>
       String(a.provider || "").startsWith("grok-responses"),
@@ -280,6 +301,15 @@ export async function aiNewsSection(
     }
   }
 
+  // 2026-09-25 review: when synthesis was attempted and failed, bodyText is the
+  // model's raw memory-based answer — exactly the hallucination "plan B" exists
+  // to replace. The ⚠️ used to live only in the stdout summary nobody reads; the
+  // delivered note must self-describe the degradation.
+  const synthAttemptedAndFailed = shouldSynth && synthError;
+  const synthFailedNote = synthAttemptedAndFailed
+    ? `> ⚠️ **综合失败（${synthError?.code || "unknown"}）**：以下为未经来源核实的模型原始回答，可能与当日事实不符，请谨慎阅读。\n\n`
+    : "";
+
   const fm = frontMatter({
     date: config.date,
     updated: new Date().toISOString(),
@@ -287,11 +317,13 @@ export async function aiNewsSection(
     days_dropped: daysDropped,
   });
 
-  // Material-window annotation (feature, not diagnostic): the report self-describes
-  // how many same-day vs older sources fed the synthesis, so a thin-material day is
-  // visible to the reader instead of silently blending old news. Uses neutral counts
-  // only — never names source platforms (de-pollution preserved for both).
-  const dailyCount = (dailySources || []).length;
+  // Material-window counts must reflect what the model ACTUALLY received: merge
+  // (URL-dedup + caps), event-cluster folding and the recency gate all shrink the
+  // raw fetch — counting the raw fetch overstated "当日素材" and could suppress
+  // the low-material warning (2026-09-25 review). Match survivors back to the
+  // daily fetch by URL.
+  const dailyUrlSet = new Set((dailySources || []).map((s) => s?.url).filter(Boolean));
+  const dailyCount = sources.filter((s) => dailyUrlSet.has(s?.url)).length;
   const genericCount = Math.max(0, sources.length - dailyCount);
   let header = "";
   if (config.reportStrictDaily !== false) {
@@ -338,6 +370,7 @@ export async function aiNewsSection(
     title ?? `# AI 热点 · ${config.date}`,
     "",
     header,
+    synthFailedNote,
     bodyText || "（模型未返回正文内容）",
     refSection,
     "",
@@ -349,7 +382,6 @@ export async function aiNewsSection(
   // - synthesized / degraded-dump / normal-citation -> ok.
   // - search failed AND no usable synthesis -> not ok.
   const searchOk = !!result && !searchError && !credErr;
-  const synthAttemptedAndFailed = shouldSynth && synthError;
   const { ok, summary } = computeAiNewsStatus({
     searchOk,
     synthesized,
@@ -370,11 +402,19 @@ export async function aiNewsSection(
     synthFallbackFrom,
   });
 
+  // Degraded collectors must be visible where operators actually look (the
+  // launchd summary line), not only in non-enumerable metadata.
+  const summaryLine = degradedSources.length
+    ? `${summary}；⚠️ 部分来源不可用：${degradedSources.join("、")}`
+    : summary;
+
   return {
     ok,
     name,
     markdown: body,
-    summary,
+    summary: summaryLine,
+    // Non-empty when any collector failed / partially failed (see above).
+    degradedSources,
     zeroCitation,
     synthesized,
     synthFailed: synthAttemptedAndFailed,

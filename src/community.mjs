@@ -124,7 +124,15 @@ export async function fetchCommunitySources(site, config, deps = {}) {
     listUrls.map(async (url, i) => {
       try {
         const cacheFile = path.join(config.cacheDir, `${config.date}-${site.key}-list-${i}.txt`);
-        const res = await doFetch(url, config, { maxChars, provider: "auto", cacheFile });
+        const res = await doFetch(url, config, {
+          maxChars,
+          provider: "auto",
+          cacheFile,
+          // Cache gate (READ + WRITE via runFetch): a 200 challenge/error page
+          // parses to zero topics, so it must neither be cached as a "valid list"
+          // nor replayed from a poisoned cache as an empty day.
+          cachePredicate: (text) => site.parse(text).length > 0,
+        });
         if (res?.text) listTexts.push(res.text);
         if (res?.cacheWriteError) {
           cacheWriteFailures.push({ url, cacheFile: res.cacheFile || cacheFile, ...res.cacheWriteError });
@@ -179,6 +187,10 @@ export async function fetchCommunitySources(site, config, deps = {}) {
             maxChars: Math.min(maxChars, 12000),
             provider: "auto",
             cacheFile,
+            // Topic-page analogue of the list gate: the live path's own parser
+            // (snippetOf) must extract something, so a cached challenge page is
+            // re-fetched instead of replayed as an empty topic body.
+            cachePredicate: (text) => site.snippetOf(text, "") !== "",
           });
           if (res?.cacheWriteError) {
             cacheWriteFailures.push({ url: t.url, cacheFile: res.cacheFile || cacheFile, ...res.cacheWriteError });

@@ -424,3 +424,53 @@ test("parseV2exTopics: greedy title must not span across adjacent markdown links
   assert.equal(topics[0].title, "3 分钟用完 Codex 5 小时额度");
   assert.equal(topics[0].url, "https://www.v2ex.com/t/1242585");
 });
+
+// --- poisoned list cache: a 200 challenge page must never replay as a valid list ---
+
+// grok-search fetch.js fixture (same pattern as test/grok-cli.test.mjs) so the
+// REAL runFetch runs: cache-first read gated by cachePredicate + live fallback.
+async function fixtureFetchDir(bodyText) {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const root = await fs.mkdtemp(pathMod.join(os.tmpdir(), "dally-community-fixture-"));
+  const scripts = pathMod.join(root, "scripts");
+  await fs.mkdir(scripts, { recursive: true });
+  await fs.writeFile(
+    pathMod.join(scripts, "fetch.js"),
+    `process.stdout.write(JSON.stringify({content:{text:${JSON.stringify(bodyText)},diagnostics:{provider:"direct"}}}));`,
+    "utf8",
+  );
+  return root;
+}
+
+test("fetchNodeSeekAiSources: poisoned list cache (challenge page) is rejected — live fetch wins", async () => {
+  const { default: fs } = await import("node:fs/promises");
+  const { default: os } = await import("node:os");
+  const { default: path } = await import("node:path");
+  const date = "2026-08-06";
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "dally-community-poison-"));
+  const cacheDir = path.join(tmp, "cache");
+  await fs.mkdir(cacheDir, { recursive: true });
+  const cacheFile = path.join(cacheDir, `${date}-nodeseek-list-0.txt`);
+  await fs.writeFile(cacheFile, "<html>Just a moment... (Cloudflare challenge)</html>", "utf8");
+
+  const grokSearchDir = await fixtureFetchDir(NODESEEK_LISTING);
+  const out = await fetchNodeSeekAiSources(
+    {
+      date,
+      cacheDir,
+      grokSearchDir,
+      nodeseekEnabled: true,
+      nodeseekListUrls: ["https://www.nodeseek.com/"],
+      nodeseekDeepFetch: false,
+    },
+    {}, // no deps → real runFetch exercises the cache-read predicate
+  );
+
+  assert.ok(out.length >= 1, "poisoned cache must not become an empty success");
+  assert.ok(out.every((s) => s.provider === "nodeseek"));
+  const nowCached = await fs.readFile(cacheFile, "utf8");
+  assert.ok(parseNodeSeekTopics(nowCached).length >= 1, "live listing overwrote the poison on disk");
+  await fs.rm(tmp, { recursive: true, force: true });
+});

@@ -3,8 +3,8 @@
 cd "/Users/mango/project/claude-project/DallyReport" || exit 1
 # launchd 的 PATH 只有 /usr/bin:/bin，且 brew 升级会更换 Cellar/node/<版本> 目录——
 # 禁止钉死安装时的 node 路径，运行时按候选位解析；全部落空则报错退出（127）进 err.log。
-for NODE_BIN in /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
+for NODE_BIN in /opt/homebrew/bin/node /usr/local/bin/node /opt/homebrew/bin/node /usr/bin/node; do
   [ -x "$NODE_BIN" ] && exec "$NODE_BIN" src/run.mjs
 done
-echo "$(date '+%Y-%m-%d %H:%M:%S') run-daily-wrapper: no usable node found (tried /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node)" >&2
+echo "$(date '+%Y-%m-%d %H:%M:%S') run-daily-wrapper: no usable node found (tried /opt/homebrew/bin/node /usr/local/bin/node /opt/homebrew/bin/node /usr/bin/node)" >&2
 exit 127

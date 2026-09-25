@@ -3,36 +3,14 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { trackChild } from "./child-tracker.mjs";
 
-// Environment variables grok-search reads via its own config.js (process.env only,
-// no .env auto-load). We forward every keys it cares about, sourcing from .env
-// (already loaded into process.env by config.mjs).
+// Forward the FULL parent environment to the grok-search child: it needs PATH/HOME
+// to find node and its own config.js, plus the proxy vars to reach the gateway.
+// This intentionally exposes secrets (API keys) to the child — accepted and
+// documented here, because the child is this repo's own local grok-search scripts
+// and a key whitelist proved to be drift-prone dead code (the spread below already
+// forwarded everything).
 function childEnv() {
-  const fwd = {};
-  for (const k of [
-    "GROK_API_URL",
-    "GROK_API_KEY",
-    "TAVILY_API_KEY",
-    "TAVILY_API_KEYS",
-    "TAVILY_API_URL",
-    "TAVILY_PROXY_URL",
-    "TAVILY_PROXY_KEY",
-    "TAVILY_PROXY_TIMEOUT_MS",
-    "FIRECRAWL_API_KEY",
-    "FIRECRAWL_API_URL",
-    "GROK_OUTPUT_DIR",
-    "GROK_PROXY",
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "ALL_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "all_proxy",
-    "NO_PROXY",
-    "no_proxy",
-  ]) {
-    if (process.env[k] != null) fwd[k] = process.env[k];
-  }
-  return { ...process.env, ...fwd };
+  return { ...process.env };
 }
 
 // Wall-clock budget for a single grok-search child. A wedged upstream (e.g. the
@@ -44,6 +22,24 @@ function childTimeoutMs() {
   if (raw == null || raw === "") return 120000;
   const n = Number.parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : 120000;
+}
+
+// Cap on the stdout a child may contribute to the accumulated buffer. A runaway
+// provider streaming gigabytes through the pipe would otherwise balloon the
+// parent's heap (and the error objects that carry `stdout` with it). Past the cap
+// further chunks are DROPPED and `truncated` is set on the runScript result.
+export const MAX_STDOUT_BYTES = 8 * 1024 * 1024;
+// __parse_error.raw keeps only the head+tail of unparsable stdout: enough to see
+// what the child actually printed, without shipping megabytes inside error objects.
+// Exported for unit tests.
+const PARSE_ERROR_RAW_KEEP = 4096;
+export function truncateRawForParseError(raw) {
+  if (raw.length <= PARSE_ERROR_RAW_KEEP * 2) return raw;
+  return (
+    raw.slice(0, PARSE_ERROR_RAW_KEEP) +
+    "\n...[truncated]...\n" +
+    raw.slice(-PARSE_ERROR_RAW_KEEP)
+  );
 }
 
 function runScript(scriptPath, args) {
@@ -65,13 +61,44 @@ function runScript(scriptPath, args) {
     // Register with the global child tracker so run.mjs reaps this process (SIGKILL)
     // if the main run is interrupted mid-search — otherwise it would orphan.
     trackChild(child);
-    let stdout = "";
+    // stdout is accumulated as Buffers (concatenated once at close — also correct
+    // for multibyte chars split across chunk boundaries) and capped at
+    // MAX_STDOUT_BYTES. stderr stays uncapped: it is the child's small diagnostic
+    // channel, and its tail is what the thrown error messages quote.
+    const stdoutChunks = [];
+    let stdoutBytes = 0;
+    let truncated = false;
     let stderr = "";
-    child.stdout.on("data", (c) => (stdout += c.toString()));
+    child.stdout.on("data", (c) => {
+      const buf = Buffer.isBuffer(c) ? c : Buffer.from(c);
+      if (stdoutBytes >= MAX_STDOUT_BYTES) {
+        truncated = true;
+        return;
+      }
+      const room = MAX_STDOUT_BYTES - stdoutBytes;
+      if (buf.length > room) {
+        stdoutChunks.push(buf.subarray(0, room));
+        stdoutBytes = MAX_STDOUT_BYTES;
+        truncated = true;
+        return;
+      }
+      stdoutChunks.push(buf);
+      stdoutBytes += buf.length;
+    });
     child.stderr.on("data", (c) => (stderr += c.toString()));
-    child.on("error", (err) => finish({ ok: false, err, stdout, stderr, timedOut }));
+    const currentStdout = () => Buffer.concat(stdoutChunks).toString("utf8");
+    child.on("error", (err) =>
+      finish({ ok: false, err, stdout: currentStdout(), stderr, timedOut, truncated }),
+    );
     child.on("close", (code) =>
-      finish({ ok: code === 0 && !timedOut, code, stdout, stderr, timedOut }),
+      finish({
+        ok: code === 0 && !timedOut,
+        code,
+        stdout: currentStdout(),
+        stderr,
+        timedOut,
+        truncated,
+      }),
     );
     const timer = setTimeout(() => {
       timedOut = true;
@@ -93,13 +120,17 @@ function runScript(scriptPath, args) {
   });
 }
 
-function parseJsonOut(stdout, scriptPath, args) {
+function parseJsonOut(stdout, scriptPath, args, truncated = false) {
   const trimmed = stdout.trim();
   if (!trimmed) return null;
   try {
     return JSON.parse(trimmed);
   } catch {
-    return { __parse_error: true, raw: stdout };
+    // Bounded raw: head+tail only, so a huge garbage dump never rides inside the
+    // error object (the full capped stdout stays on err.stdout for debugging).
+    const out = { __parse_error: true, raw: truncateRawForParseError(stdout) };
+    if (truncated) out.truncated = true;
+    return out;
   }
 }
 
@@ -112,7 +143,7 @@ export async function runSearch(query, config, { days, extra } = {}) {
   args.push(query);
 
   const res = await runScript(scriptPath, args);
-  const parsed = parseJsonOut(res.stdout, scriptPath, args);
+  const parsed = parseJsonOut(res.stdout, scriptPath, args, res.truncated);
 
   // grok-search: on failure it still emits JSON to stdout + a short stderr msg + non-zero.
   if (!res.ok || !parsed || parsed.__parse_error) {
@@ -126,6 +157,8 @@ export async function runSearch(query, config, { days, extra } = {}) {
     err.stdout = res.stdout;
     err.stderr = res.stderr;
     err.timedOut = res.timedOut === true;
+    err.truncated = res.truncated === true;
+    if (parsed?.__parse_error) err.parseError = parsed;
     err.parsed = parsed && !parsed.__parse_error ? parsed : null;
     throw err;
   }
@@ -135,10 +168,13 @@ export async function runSearch(query, config, { days, extra } = {}) {
 export async function runFetch(url, config, { maxChars, provider = "auto", cacheFile, cachePredicate } = {}) {
   // Disk cache for fetched pages so reruns don't re-hit the network and the parse
   // step can be iterated on offline. Cache key is an explicit cacheFile path.
+  // When the caller passes a cachePredicate it gates the READ path too: a cached
+  // body that fails it (e.g. a 200 challenge page cached before the gate existed)
+  // is treated as a cache MISS and re-fetched — poison is never replayed all day.
   if (cacheFile) {
     try {
       const cached = await fs.readFile(cacheFile, "utf8");
-      if (cached.trim()) {
+      if (cached.trim() && (!cachePredicate || cachePredicate(cached))) {
         return { text: cached, fromCache: true, provider: "cache", cacheFile };
       }
     } catch {
@@ -152,7 +188,7 @@ export async function runFetch(url, config, { maxChars, provider = "auto", cache
   args.push(url);
 
   const res = await runScript(scriptPath, args);
-  const parsed = parseJsonOut(res.stdout, scriptPath, args);
+  const parsed = parseJsonOut(res.stdout, scriptPath, args, res.truncated);
   if (!res.ok || !parsed || parsed.__parse_error) {
     const err = new Error(
       res.timedOut
@@ -164,6 +200,8 @@ export async function runFetch(url, config, { maxChars, provider = "auto", cache
     err.stdout = res.stdout;
     err.stderr = res.stderr;
     err.timedOut = res.timedOut === true;
+    err.truncated = res.truncated === true;
+    if (parsed?.__parse_error) err.parseError = parsed;
     throw err;
   }
 

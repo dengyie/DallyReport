@@ -6,6 +6,12 @@ import { parseTrending, briefDescription } from "../src/sections/github-trending
 import { renderSources, synthesizeFromSources, SYSTEM_PROMPT } from "../src/llm-synthesize.mjs";
 import { TRENDING_FIXTURE, EXPECTED_FIXTURE_ROWS } from "./fixtures/trending-sample.mjs";
 
+// 行为测试全部注入 stub、从不碰网；凭证门只查环境变量存在性。给无 .env 的机器也
+// 提供一次性凭证，保证套件在所有主机上全绿（node:test 每个测试文件独立进程，env
+// 不跨文件泄漏）。2026-09-25 review：此前无 .env 机器会静默蒸发十余个行为测试。
+if (!process.env.GROK_API_URL) process.env.GROK_API_URL = "https://gateway.test/v1";
+if (!process.env.GROK_API_KEY) process.env.GROK_API_KEY = "test-key";
+
 // Load .env if present so the synthesize network-path tests can run with real creds.
 // A fresh checkout without .env still runs all parseTrending tests (they need no creds)
 // and the no-creds branches; the cred-gated synthesize tests simply skip.
@@ -73,6 +79,33 @@ test("parseTrending: a repo with no description keeps description null (language
   assert.equal(nd.description, null, "language line must not be misread as description");
   assert.equal(nd.starsTotal, 1234, "total stars still parsed from the first bare number");
   assert.equal(nd.starsToday, 89);
+});
+
+test("parseTrending: 3 bare numbers before Built by -> starsTotal/forks null (no wrong attribution)", () => {
+  // A non-canonical block with three bare numbers must not guess: attributing
+  // prevNumbers[0] would publish a made-up star total. Leave null ("—").
+  const rows = parseTrending(TRENDING_FIXTURE);
+  const noisy = rows.find((r) => r.repo === "noisy-num/three-numbers");
+  assert.ok(noisy, "noisy-num/three-numbers parsed");
+  assert.equal(noisy.starsToday, 55);
+  assert.equal(noisy.starsTotal, null, "3-number block must not attribute starsTotal");
+  assert.equal(noisy.forks, null, "3-number block must not attribute forks");
+});
+
+test("parseTrending: canonical 2-number block still parses starsTotal+forks", () => {
+  const rows = parseTrending(TRENDING_FIXTURE);
+  const ok = rows.find((r) => r.repo === "virgiliojr94/book-to-skill");
+  assert.ok(ok);
+  assert.equal(ok.starsTotal, 12709);
+  assert.equal(ok.forks, 1414);
+});
+
+test("parseTrending: starsTotal < starsToday is impossible -> nulled before publishing", () => {
+  const rows = parseTrending(TRENDING_FIXTURE);
+  const bad = rows.find((r) => r.repo === "impossible-num/bad-total");
+  assert.ok(bad, "impossible-num/bad-total parsed");
+  assert.equal(bad.starsTotal, null, "total 40 < today 77 must not be published");
+  assert.equal(bad.forks, 12, "forks attribution is unaffected by the star sanity guard");
 });
 
 // --- briefDescription（详情表「简介」列） ---
@@ -197,9 +230,6 @@ test("SYSTEM_PROMPT: de-polluted — no [N] citation markers or linux.do priorit
 
 // Creds must be present for the network path; set throwaway creds for these tests
 // and rely on the injected fetch stub so no real call is made.
-const HAVE_CREDS = !!process.env.GROK_API_URL && !!process.env.GROK_API_KEY;
-const maybeCreds = HAVE_CREDS ? test : test.skip;
-
 // Build a stub fetch that returns a canned Response-like object.
 function stubFetch(choicesPayload, { status = 200 } = {}) {
   const calls = [];
@@ -221,7 +251,7 @@ function stubFetch(choicesPayload, { status = 200 } = {}) {
   return fn;
 }
 
-maybeCreds("synthesize: success returns trimmed content", async () => {
+test("synthesize: success returns trimmed content", async () => {
   const fetchStub = stubFetch({
     choices: [{ message: { content: "  合成的当日摘要正文\n" }, finish_reason: "stop" }],
   });
@@ -236,7 +266,7 @@ maybeCreds("synthesize: success returns trimmed content", async () => {
   assert.match(fetchStub.calls[0].url, /\/chat\/completions$/);
 });
 
-maybeCreds("synthesize: finish_reason=length with content -> SYNTH_TRUNCATED", async () => {
+test("synthesize: finish_reason=length with content -> SYNTH_TRUNCATED", async () => {
   const fetchStub = stubFetch({
     choices: [{ message: { content: "被截断的半句" }, finish_reason: "length" }],
   });
@@ -252,7 +282,7 @@ maybeCreds("synthesize: finish_reason=length with content -> SYNTH_TRUNCATED", a
   );
 });
 
-maybeCreds("synthesize: finish_reason=length with no content -> SYNTH_TRUNCATED_EMPTY", async () => {
+test("synthesize: finish_reason=length with no content -> SYNTH_TRUNCATED_EMPTY", async () => {
   const fetchStub = stubFetch({
     choices: [{ message: { content: "" }, finish_reason: "length" }],
   });
@@ -268,7 +298,7 @@ maybeCreds("synthesize: finish_reason=length with no content -> SYNTH_TRUNCATED_
   );
 });
 
-maybeCreds("synthesize: empty content, stop -> SYNTH_EMPTY", async () => {
+test("synthesize: empty content, stop -> SYNTH_EMPTY", async () => {
   const fetchStub = stubFetch({
     choices: [{ message: { content: "" }, finish_reason: "stop" }],
   });
@@ -284,7 +314,7 @@ maybeCreds("synthesize: empty content, stop -> SYNTH_EMPTY", async () => {
   );
 });
 
-maybeCreds("synthesize: HTTP error -> SYNTH_HTTP_ERROR", async () => {
+test("synthesize: HTTP error -> SYNTH_HTTP_ERROR", async () => {
   const fetchStub = stubFetch({ error: { message: "rate limited" } }, { status: 429 });
   await assert.rejects(
     () =>
@@ -298,7 +328,7 @@ maybeCreds("synthesize: HTTP error -> SYNTH_HTTP_ERROR", async () => {
   );
 });
 
-maybeCreds("synthesize: fetch throws AbortError -> SYNTH_FETCH_FAILED { aborted }", async () => {
+test("synthesize: fetch throws AbortError -> SYNTH_FETCH_FAILED { aborted }", async () => {
   const fetchStub = async () => {
     const e = new Error("timed out");
     e.name = "TimeoutError";
@@ -317,7 +347,7 @@ maybeCreds("synthesize: fetch throws AbortError -> SYNTH_FETCH_FAILED { aborted 
 });
 
 // NO_SOURCES is checked AFTER creds, so it's only reachable when creds are present.
-maybeCreds("synthesize: no sources -> NO_SOURCES", async () => {
+test("synthesize: no sources -> NO_SOURCES", async () => {
   await assert.rejects(
     () =>
       synthesizeFromSources({

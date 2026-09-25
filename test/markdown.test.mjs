@@ -1,6 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sourceCard, stripMarkdown } from "../src/markdown.mjs";
+import { frontMatter, sourceCard, stripMarkdown } from "../src/markdown.mjs";
+
+test("frontMatter: array items with YAML flow-significant chars round-trip safely", () => {
+  // Tags containing [ ] , " must stay inside the flow sequence: each item is
+  // JSON-quoted, so none of them can terminate the sequence early or inject
+  // extra items when the front-matter is re-parsed.
+  const tags = ['bracket[open', 'bracket]close', 'comma,sep', 'quote"inside'];
+  const rendered = frontMatter({ tags });
+  assert.match(rendered, /^tags: \[.*\]$/m);
+  // Parse the flow sequence back out of the rendered front-matter and compare.
+  const line = rendered.split("\n").find((l) => l.startsWith("tags: ["));
+  const parsed = JSON.parse(`[${line.slice("tags: [".length, -1)}]`);
+  assert.deepEqual(parsed, tags);
+});
 
 test("sourceCard: escapes external markdown and rejects unsafe URLs", () => {
   const rendered = sourceCard({

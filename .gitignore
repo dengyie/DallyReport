@@ -9,6 +9,9 @@ node_modules/
 reports-cache/*
 !reports-cache/.gitkeep
 
+# launchd / daily-run logs
+logs/*.log
+
 # the daily report itself lives in the external Obsidian vault, never here
 archive/
 
