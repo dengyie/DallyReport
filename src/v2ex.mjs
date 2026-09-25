@@ -24,11 +24,16 @@ const EXCLUDE_TITLE_RE =
  */
 export function parseV2exTopics(text) {
   if (!text) return [];
-  // The title capture excludes [ and ] so a greedy match can never span across
-  // adjacent markdown links: a listing row like
-  // `[title](/t/123#reply4) **[u](/member/u)** • 34 mins ago … | [4](/t/123#reply4)`
-  // must yield title="title", not the whole row up to the last ](/t/123.
-  const re = /\[([^\n\[\]]{2,200})\]\(\/t\/(\d+)(?:#\w+)?\)/g;
+  // The title capture must not span across adjacent markdown links (a listing
+  // row like `[title](/t/123#reply4) **[u](/member/u)** … | [4](/t/123#reply4)`
+  // must yield title="title"). Brackets ARE allowed inside the title itself —
+  // V2EX titles often carry prefixes like `[求助] Claude…` — so instead of
+  // excluding [ and ] outright, a `]` is only a terminator when it is
+  // immediately followed by `(/t/`. Non-greedy matching stops at the first
+  // such anchor, so metadata links after the title are never consumed, and a
+  // `](` that doesn't lead to /t/ (e.g. `[u](/member/u)`) can't be crossed
+  // (2026-09-25 Copilot review).
+  const re = /\[((?:[^\n\]]|\][^\n(])*?)\]\(\/t\/(\d+)(?:#\w+)?\)/g;
   const seen = new Map();
   let m;
   while ((m = re.exec(text)) !== null) {

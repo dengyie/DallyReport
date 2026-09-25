@@ -161,20 +161,9 @@ async function run() {
     if (altChannel) names.splice(1, 0, "ai-alt");
   }
 
-  // Dual-channel cross-link map: section key -> the OTHER channel's file name
-  // (without .md). Built here because only run() knows both channels ran.
-  const crossRefs = {};
-  if (altChannel && names.includes("ai") && names.includes("ai-alt")) {
-    crossRefs["ai"] = altChannel.name;
-    crossRefs["ai-alt"] = "AI";
-  }
-
   const results = await Promise.allSettled(
     names.map(async (n) => {
       const res = await builders[n]();
-      // Dual-channel cross-link: when both AI channels ran, each note points
-      // at the other model's take under its H1 (Obsidian wikilink, same folder).
-      if (crossRefs[n]) res.markdown = injectCrossRef(res.markdown, crossRefs[n]);
       // writeSection returns { file, error } and never throws: a vault write
       // failure (iCloud mid-sync, vault moved, disk full) is rescued to a
       // fallback cache file so the built markdown isn't lost.
@@ -207,6 +196,36 @@ async function run() {
       return res;
     }),
   );
+
+  // Dual-channel cross-link, phase 2: each AI note points at the other model's
+  // take under its H1 (Obsidian wikilink, same folder). This MUST happen after
+  // allSettled: injecting inside the per-section callback linked to a sibling
+  // whose build/write might still fail, leaving a dangling [[...]] in a
+  // successful note (2026-09-25 Copilot review). Only fulfilled sections whose
+  // vault write succeeded participate, on both sides.
+  if (altChannel && names.includes("ai") && names.includes("ai-alt")) {
+    const byKey = new Map();
+    results.forEach((r, i) => {
+      if (r.status === "fulfilled") byKey.set(names[i], r.value);
+    });
+    const ai = byKey.get("ai");
+    const alt = byKey.get("ai-alt");
+    const writtenOk = (v) => v && !v.writeError;
+    if (writtenOk(ai) && writtenOk(alt)) {
+      for (const [v, otherName] of [
+        [ai, alt.name],
+        [alt, ai.name],
+      ]) {
+        v.markdown = injectCrossRef(v.markdown, otherName);
+        const rewrote = await writeSection(config, v.name, v.markdown);
+        if (rewrote.error) {
+          // The pre-link version is already on disk; don't pretend otherwise.
+          v.writeError = rewrote.error;
+          v.ok = false;
+        }
+      }
+    }
+  }
 
   // Poster step: only relevant after the GitHub section, only when enabled, and
   // isolated so a poster failure never downgrades the already-written GitHub.md.

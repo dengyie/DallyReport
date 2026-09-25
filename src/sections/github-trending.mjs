@@ -43,8 +43,24 @@ const STARS_TODAY_RE = /^([\d,]+)\s+stars?\s+today$/i;
 const BUILT_BY_RE = /^Built by\s*$/;
 const NUM_RE = /^([\d,]{1,15})$/;
 // The <language> line sits right after the description (or right after the
-// name when there's no description): a single token like "Python" / "C++".
+// name when there's no description). Usually a single token like "Python" /
+// "C++", but a few real GitHub labels contain spaces ("Jupyter Notebook",
+// "Visual Basic"). Those go in an explicit allowlist rather than a
+// space-allowing pattern: a loose multi-word pattern would also match short
+// two-word descriptions and steal them out of the description slot
+// (descriptions are detected by the presence of whitespace, 2026-09-25
+// Copilot review).
 const LANGUAGE_RE = /^[A-Za-z][A-Za-z0-9+#.+-]{0,29}$/;
+const MULTIWORD_LANGUAGES = new Set([
+  "Jupyter Notebook",
+  "Visual Basic",
+  "Common Lisp",
+  "Emacs Lisp",
+  "AGS Script",
+]);
+export function isLanguageLabel(s) {
+  return LANGUAGE_RE.test(s) || MULTIWORD_LANGUAGES.has(s);
+}
 
 export function parseTrending(text) {
   if (!text) return [];
@@ -70,7 +86,7 @@ export function parseTrending(text) {
       const name = lines[i + 1];
       const key = `${owner}/${name}`;
       if (!rows.some((r) => r.repo === key)) {
-        rec = { repo: key, owner, name, starsToday: null, starsTotal: null, description: null, language: null };
+        rec = { repo: key, owner, name, starsToday: null, starsTotal: null, forks: null, description: null, language: null };
         rows.push(rec);
       } else {
         rec = rows.find((r) => r.repo === key);
@@ -89,6 +105,7 @@ export function parseTrending(text) {
         if (
           cand &&
           /\s/.test(cand) &&
+          !isLanguageLabel(cand) &&
           !NUM_RE.test(cand) &&
           !BUILT_BY_RE.test(cand) &&
           !STARS_TODAY_RE.test(cand) &&
@@ -109,7 +126,7 @@ export function parseTrending(text) {
           const cand = lines[langIdx];
           if (
             cand &&
-            LANGUAGE_RE.test(cand) &&
+            isLanguageLabel(cand) &&
             !NUM_RE.test(cand) &&
             !BUILT_BY_RE.test(cand) &&
             !STARS_TODAY_RE.test(cand) &&
@@ -141,10 +158,16 @@ export function parseTrending(text) {
     }
 
     if (BUILT_BY_RE.test(line) && rec) {
-      // total stars = first of the last two bare numbers (the older one).
+      // total stars = first of the last two bare numbers (the older one),
+      // forks = the second. The poster prompt asserts Star/Fork figures, so
+      // both must come from parsed data, never invented (2026-09-25 Copilot
+      // review).
       if (rec.starsTotal == null && prevNumbers.length) {
         const cand = prevNumbers[0];
         rec.starsTotal = Number(cand.replace(/,/g, ""));
+      }
+      if (rec.forks == null && prevNumbers.length > 1) {
+        rec.forks = Number(prevNumbers[1].replace(/,/g, ""));
       }
       prevNumbers = [];
       i++;

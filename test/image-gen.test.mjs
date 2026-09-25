@@ -201,15 +201,29 @@ test("buildContextualPrompt: injects raw description + Chinese-render instructio
   });
   assert.ok(!out.includes("{date}"), "date placeholder replaced");
   // One-sentence truncation: only the first sentence of the raw desc is passed.
-  assert.match(out, /a\/b — 今日 Star \+5，总 Star 10（原始简介：First sentence\.）/);
-  assert.match(out, /c\/d — 今日 Star \+1，总 Star 2（原始简介：中文单句介绍。）/);
+  assert.match(out, /a\/b — 今日 Star \+5，总 Star 10，Fork —（原始简介：First sentence\.）/);
+  assert.match(out, /c\/d — 今日 Star \+1，总 Star 2，Fork —（原始简介：中文单句介绍。）/);
   // A repo with no description renders the data head with no 原始简介 suffix.
-  assert.match(out, /e\/f — 今日 Star \+0，总 Star —/);
+  assert.match(out, /e\/f — 今日 Star \+0，总 Star —，Fork —/);
   assert.doesNotMatch(out, /e\/f[^\n]*原始简介/);
   // The prompt must instruct the model to render descriptions in Chinese.
   assert.match(out, /翻译成\*\*中文\*\*/);
   // And keep the project name in its original (English owner/repo) form.
   assert.match(out, /项目名用上面给出的原始 owner\/repo（英文，保持原样，不要翻译）/);
+});
+
+test("buildContextualPrompt: fork counts are injected when parsed", () => {
+  // 2026-09-25 Copilot review: the prompt asserts Fork figures, so they must
+  // come from parsed data (never invented); missing forks render as —.
+  const out = buildContextualPrompt("base {date}", {
+    date: "2026-07-31",
+    repos: [
+      { repo: "a/b", starsToday: 5, starsTotal: 1000, forks: 3903, description: null },
+      { repo: "c/d", starsToday: 1, starsTotal: 2, forks: null, description: null },
+    ],
+  });
+  assert.match(out, /a\/b — 今日 Star \+5，总 Star 1,000，Fork 3,903/);
+  assert.match(out, /c\/d — 今日 Star \+1，总 Star 2，Fork —/);
 });
 
 test("buildContextualPrompt: description without a terminator is kept whole (raw)", () => {
@@ -712,4 +726,12 @@ test("checkPosterTemplate: missing marker or stale version fail loudly", () => {
   assert.match(checkPosterTemplate("正文，无标记"), /缺少版本标记/);
   assert.match(checkPosterTemplate("<!-- 海报模板版本：v1 -->\n"), /不一致/);
   assert.match(checkPosterTemplate(""), /为空/);
+});
+
+test("checkPosterTemplate: bare marker text without comment delimiters fails", () => {
+  // 2026-09-25 Copilot review: the contract is the full HTML comment. A plain
+  // "海报模板版本：v2" line must not satisfy the check.
+  assert.match(checkPosterTemplate("海报模板版本：v2\n正文\n"), /缺少版本标记/);
+  // No inner spaces is still a valid HTML comment marker.
+  assert.equal(checkPosterTemplate("<!--海报模板版本：v2-->\n正文\n"), null);
 });

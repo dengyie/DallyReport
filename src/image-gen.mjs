@@ -184,7 +184,11 @@ export const POSTER_TEMPLATE_VERSION = "v2";
 export function checkPosterTemplate(promptMd) {
   const md = String(promptMd || "");
   if (!md.trim()) return "提示词文件为空";
-  const m = /海报模板版本[:：]\s*(v\d+)/.exec(md);
+  // The marker contract is the full HTML comment, delimiters included: a bare
+  // "海报模板版本：v2" line elsewhere in the note must NOT satisfy the check,
+  // otherwise a prompt can render without the pinned marker (2026-09-25
+  // Copilot review).
+  const m = /<!--\s*海报模板版本[:：]\s*(v\d+)\s*-->/.exec(md);
   if (!m)
     return `缺少版本标记（请在提示词笔记中加入 <!-- 海报模板版本：${POSTER_TEMPLATE_VERSION} -->）`;
   if (m[1] !== POSTER_TEMPLATE_VERSION)
@@ -244,7 +248,8 @@ export function buildContextualPrompt(basePrompt, { date, repos }) {
   const list = top
     .map((r, i) => {
       const desc = oneSentence(r.description);
-      const head = `${i + 1}. ${r.repo} — 今日 Star +${r.starsToday}，总 Star ${r.starsTotal != null ? r.starsTotal.toLocaleString() : "—"}`;
+      const forks = r.forks != null ? r.forks.toLocaleString() : "—";
+      const head = `${i + 1}. ${r.repo} — 今日 Star +${r.starsToday}，总 Star ${r.starsTotal != null ? r.starsTotal.toLocaleString() : "—"}，Fork ${forks}`;
       return desc ? `${head}（原始简介：${desc}）` : head;
     })
     .join("\n");
