@@ -57,11 +57,15 @@ const INJECTION_RE = new RegExp(
 );
 
 // A second, deliberately conservative detector catches paraphrases that avoid the
-// fixed denylist: an imperative aimed at instructions/rules/system prompts. It is
-// intentionally bounded so ordinary prose about following product instructions is
-// less likely to be removed unless it also targets a control channel.
+// fixed denylist: an imperative aimed at instructions/rules/system prompts. The
+// window between verb and control-noun is tight (≤24 chars) so legitimate news
+// sentences like "OpenAI 发布了新的使用规则" or "the model better follows rules"
+// survive — a real injection puts the control noun right next to the verb
+// ("ignore all previous system prompts"). Bare 发布/告诉 are excluded: they are
+// ordinary news verbs ("发布规则", "告诉用户规则") and only matched here when
+// part of a fixed denylist pattern above.
 const HIGH_RISK_IMPERATIVE_RE =
-  /(?:\b(?:ignore|disregard|override|replace|follow|obey|reveal|publish|output|tell)\b|(?:忽略|无视|覆盖|改为输出|不要遵守|发布|告诉))[\s\S]{0,120}(?:\bsystem(?:\s+prompt)?\b|\binstructions?\b|\brules?\b|\bprompts?\b|系统(?:提示)?|指令|规则|提示)/iu;
+  /(?:\b(?:ignore|disregard|override|replace|follow|obey|reveal|publish|output|tell)\b|(?:忽略|无视|覆盖|改为输出|不要遵守))[\s\S]{0,24}(?:\bsystem(?:\s+prompt)?\b|\binstructions?\b|\brules?\b|\bprompts?\b|系统(?:提示)?|指令|规则|提示)/iu;
 
 // Does a single paragraph look like injected-instruction text?
 function looksInjected(para) {

@@ -68,8 +68,9 @@ export function parseTrending(text) {
   const rows = [];
   let i = 0;
   let rec = null;
-  // Among the two bare numbers in a block (totalStars, forks), totalStars is the
-  // first. Track the last two bare numbers so "Built by" can attribute the first.
+  // In a canonical block the two bare numbers are (totalStars, forks) in that
+  // order. Track the recent bare numbers so "Built by" can attribute them — and
+  // so a block with the WRONG count of numbers can be refused (see BUILT_BY).
   let prevNumbers = [];
 
   while (i < lines.length) {
@@ -152,21 +153,23 @@ export function parseTrending(text) {
 
     if (NUM_RE.test(line) && rec) {
       prevNumbers.push(line);
-      if (prevNumbers.length > 2) prevNumbers.shift(); // keep last two
+      // Keep the last three: a block can carry stray page numbers, and the
+      // "Built by" branch needs to see 3+ buffered numbers to refuse a guess.
+      if (prevNumbers.length > 3) prevNumbers.shift();
       i++;
       continue;
     }
 
     if (BUILT_BY_RE.test(line) && rec) {
-      // total stars = first of the last two bare numbers (the older one),
-      // forks = the second. The poster prompt asserts Star/Fork figures, so
-      // both must come from parsed data, never invented (2026-09-25 Copilot
-      // review).
-      if (rec.starsTotal == null && prevNumbers.length) {
-        const cand = prevNumbers[0];
-        rec.starsTotal = Number(cand.replace(/,/g, ""));
-      }
-      if (rec.forks == null && prevNumbers.length > 1) {
+      // total stars = first of EXACTLY two bare numbers (the older one), forks
+      // = the second. Any other count — one stray number, or 3+ numbers from a
+      // noisy page fragment — means the layout is not the canonical block, so
+      // attributing prevNumbers[0] would guess; leave starsTotal/forks null
+      // instead (the table renders "—"). The poster prompt asserts Star/Fork
+      // figures, so both must come from parsed data, never invented
+      // (2026-09-25 Copilot review).
+      if (rec.starsTotal == null && rec.forks == null && prevNumbers.length === 2) {
+        rec.starsTotal = Number(prevNumbers[0].replace(/,/g, ""));
         rec.forks = Number(prevNumbers[1].replace(/,/g, ""));
       }
       prevNumbers = [];
@@ -175,6 +178,17 @@ export function parseTrending(text) {
     }
 
     i++;
+  }
+
+  // Sanity guard: total stars can never be lower than the same-day delta. If
+  // the parse produced that impossible combination, the attribution is wrong —
+  // publish null (the table renders "—") instead of a bogus number. Runs after
+  // the scan because starsToday is only known at the "N stars today" line,
+  // which closes the block after "Built by".
+  for (const r of rows) {
+    if (r.starsTotal != null && r.starsToday != null && r.starsTotal < r.starsToday) {
+      r.starsTotal = null;
+    }
   }
 
   const filtered = rows.filter((o) => o.starsToday != null);

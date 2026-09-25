@@ -203,7 +203,20 @@ export function extractJsonApiTopics(text) {
 // valid logged-in cookie. The reliable client is the user's real Chrome (same
 // fingerprint as the login). So fetchLinuxDoJsonPageWithBrowser drives that via the
 // DevTools protocol, and fetchLinuxDoJsonPageWithCookie retries undici as a result.
-async function fetchLinuxDoJsonPageWithBrowser(url, cookie, cdpHost) {
+// Total wall-clock budget for one browser fetch (tab open + WebSocket + polling).
+// 2026-09-25 review P1: this path was the ONLY network path with no deadline —
+// ws.onopen never settled on a clean close (no onclose handler) and in-flight
+// CDP calls resolved only via onmessage, so a Chrome that closed/slept mid-run
+// left the whole daily report hung forever (then the 30min lock age-takeover let
+// a second run in). Every await below is now bounded: the tab-open fetch keeps
+// its 15s AbortSignal, each send() gets a 10s per-call timeout capped by the
+// overall deadline, socket death rejects all pending calls, and the JSON poll
+// loop inherits the deadline.
+const BROWSER_FETCH_DEADLINE_MS = 45_000;
+const CDP_CALL_TIMEOUT_MS = 10_000;
+
+export async function fetchLinuxDoJsonPageWithBrowser(url, cookie, cdpHost) {
+  const deadline = Date.now() + BROWSER_FETCH_DEADLINE_MS;
   let target;
   try {
     const res = await fetch(`http://${cdpHost}/json/new?${encodeURIComponent(url)}`, {
@@ -218,15 +231,56 @@ async function fetchLinuxDoJsonPageWithBrowser(url, cookie, cdpHost) {
   let ws;
   try {
     ws = new WebSocket(target.webSocketDebuggerUrl);
-    await new Promise((ok, no) => { ws.onopen = ok; ws.onerror = no; });
+    await new Promise((ok, no) => {
+      ws.onopen = ok;
+      ws.onerror = () => no(new Error("CDP WebSocket 连接失败"));
+      ws.onclose = () => no(new Error("CDP WebSocket 在握手前关闭"));
+    });
     let n = 0;
     const pend = new Map();
-    ws.onmessage = (e) => {
-      const m = JSON.parse(e.data);
-      if (m.id && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); }
+    ws.onclose = () => {
+      // Socket death must fail every in-flight call — without this the caller
+      // awaited a never-settling promise (the P1 hang above).
+      for (const entry of pend.values()) {
+        clearTimeout(entry.timer);
+        entry.rej(new Error("CDP WebSocket 已关闭"));
+      }
+      pend.clear();
     };
-    const send = (method, params = {}) => new Promise((res) => {
-      const id = ++n; pend.set(id, res); ws.send(JSON.stringify({ id, method, params }));
+    ws.onmessage = (e) => {
+      let m;
+      try {
+        m = JSON.parse(e.data);
+      } catch {
+        return; // malformed frame — ignore, the send timeout bounds the wait
+      }
+      if (m.id && pend.has(m.id)) {
+        const entry = pend.get(m.id);
+        pend.delete(m.id);
+        clearTimeout(entry.timer);
+        entry.res(m);
+      }
+    };
+    const send = (method, params = {}) => new Promise((res, rej) => {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        rej(new Error("CDP 浏览器抓取总预算已耗尽"));
+        return;
+      }
+      const id = ++n;
+      const entry = { res, rej, timer: null };
+      entry.timer = setTimeout(() => {
+        if (pend.delete(id)) rej(new Error(`CDP 调用超时：${method}`));
+      }, Math.min(remaining, CDP_CALL_TIMEOUT_MS));
+      entry.timer.unref?.();
+      pend.set(id, entry);
+      try {
+        ws.send(JSON.stringify({ id, method, params }));
+      } catch (e) {
+        clearTimeout(entry.timer);
+        pend.delete(id);
+        rej(e);
+      }
     });
     await send("Runtime.enable");
     // Wait for the JSON to render as the tab's body text (Chrome displays a .json
@@ -287,9 +341,17 @@ export async function fetchNews34ViaJsonApi(config, deps = {}) {
   const doFetch = deps.runFetch || runFetch;
   const { startLocal, endLocal } = beijingDayRange(config.date);
   const allTopics = [];
+  // One entry per failed page, so the historical silent `break` (a challenge page
+  // or provider hiccup quietly ended the scan as an empty day) is at least
+  // observable after the fact. Attached non-enumerably to the returned cards.
+  const jsonApiFailures = [];
+  let pagesSucceeded = 0;
 
   for (let page = 1; page <= JSON_API_MAX_PAGES; page++) {
-    const url = `https://linux.do/c/news/34.json?page=${page}`;
+    // order=created pins the server-side sort to created_at desc — the early-stop
+    // check below assumes it. Without the param Discourse defaults to activity
+    // order, where a bumped old topic shadows same-day posts mid-list.
+    const url = `https://linux.do/c/news/34.json?page=${page}&order=created`;
     let topics;
     try {
       // Cookie path first: a login cookie lets us read deeper pages verbatim.
@@ -311,15 +373,40 @@ export async function fetchNews34ViaJsonApi(config, deps = {}) {
           maxChars: JSON_API_MAX_CHARS,
           provider: "auto",
           cacheFile,
+          // Cache gate (runFetch applies it to the cached body on READ and the
+          // live body on WRITE): a 200 challenge page is not news34 JSON, so it
+          // must never be cached nor replayed as a "successful" empty day.
+          cachePredicate: (raw) => {
+            const parsed = extractJsonApiTopics(raw);
+            return !!parsed && parsed.length > 0;
+          },
         });
         text = res?.text ?? null;
+        if (text == null) {
+          jsonApiFailures.push({
+            page,
+            url,
+            reason: config.linuxdoCookie
+              ? "no content: cookie/CDP 与 provider 均为空"
+              : "no content: cookie-missing 且 provider 为空",
+          });
+          break;
+        }
       }
-      if (text == null) break;
       topics = extractJsonApiTopics(text);
-    } catch {
+    } catch (error) {
+      jsonApiFailures.push({ page, url, reason: `provider error: ${error?.message || error}` });
       break;
     }
-    if (!topics || !topics.length) break;
+    if (!topics) {
+      jsonApiFailures.push({ page, url, reason: "parse-failed: 响应非 JSON（疑似 challenge 页）" });
+      break;
+    }
+    if (!topics.length) {
+      jsonApiFailures.push({ page, url, reason: "empty-list" });
+      break;
+    }
+    pagesSucceeded++;
 
     const lastTopic = topics[topics.length - 1];
     const lastMs = new Date(lastTopic.created_at).getTime();
@@ -333,12 +420,13 @@ export async function fetchNews34ViaJsonApi(config, deps = {}) {
       }
     }
 
-    // Stop when the entire page is older than the target day (created_at desc)
+    // Stop when the entire page is older than the target day
+    // (server contract: order=created → created_at desc, see URL above).
     if (lastMs < startLocal) break;
   }
 
   // Convert to source cards with excerpt as snippet
-  return allTopics.map((t) => ({
+  const cards = allTopics.map((t) => ({
     url: `https://linux.do/t/topic/${t.id}`,
     title: sanitizeSnippet(t.title, { maxChars: 200 }),
     snippet: t.excerpt
@@ -349,6 +437,18 @@ export async function fetchNews34ViaJsonApi(config, deps = {}) {
     id: t.id,
     created_at: t.created_at,
   }));
+
+  // One concise warn only when EVERY attempted page failed (the whole scan is
+  // dead); a partial success stays quiet — its failures ride the non-enumerable
+  // diagnostics attached below.
+  if (pagesSucceeded === 0 && jsonApiFailures.length) {
+    console.warn(
+      `linux.do news/34 JSON API ${jsonApiFailures.length} 页失败: ` +
+        jsonApiFailures.map((f) => `page ${f.page}: ${f.reason}`).join("; "),
+    );
+  }
+  attachDiagnostics(cards, { jsonApiFailures });
+  return cards;
 }
 
 /**
@@ -392,6 +492,10 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
           maxChars,
           provider: "auto",
           cacheFile,
+          // Cache gate (READ + WRITE via runFetch): a 200 challenge/error page
+          // parses to zero topics, so it must neither be written as a "valid"
+          // day cache nor replayed from a poisoned one as an empty listing.
+          cachePredicate: (text) => parseLinuxDoTopics(text).length > 0,
         });
         if (res?.text) listTexts.push(res.text);
         if (res?.cacheWriteError) {
@@ -570,12 +674,13 @@ function attachRawJsonCards(sources, rawCards, deepMap) {
 
 function attachDiagnostics(
   sources,
-  { listingFailures = [], deepFetchFailures = [], cacheWriteFailures = [] } = {},
+  { listingFailures = [], deepFetchFailures = [], cacheWriteFailures = [], jsonApiFailures = [] } = {},
 ) {
   const diagnostics = {};
   if (listingFailures.length) diagnostics.listingFailures = [...listingFailures];
   if (deepFetchFailures.length) diagnostics.deepFetchFailures = [...deepFetchFailures];
   if (cacheWriteFailures.length) diagnostics.cacheWriteFailures = [...cacheWriteFailures];
+  if (jsonApiFailures.length) diagnostics.jsonApiFailures = [...jsonApiFailures];
   if (!Object.keys(diagnostics).length) return;
   Object.defineProperty(sources, "linuxdoDiagnostics", {
     value: diagnostics,
@@ -760,6 +865,19 @@ export function cookedToMarkdown(html, { rewrite } = {}) {
 // order. Host-gated: only linux.do / *.ldstatic.com URLs are ever treated as
 // downloadable attachments (see ASSET_URL_RE) so a hostile thread can't make the
 // crawler pull arbitrary third-party files into the vault.
+// decodeURIComponent throws URIError on a bare `%` (e.g. a filename like
+// "100%off.png" pasted into a thread). The old unguarded call escaped
+// extractAttachments / the rewrite callback and made mapLimit drop the WHOLE
+// post archive. Fall back to the raw (undecoded) name — it is still a usable,
+// unique basename, and both call sites then agree on the same lookup key.
+function safeDecodeBasename(raw) {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
 export function extractAttachments(html) {
   const found = new Map(); // normalized url -> { url, kind, basename, original: bool }
   const consider = (url, kind) => {
@@ -776,7 +894,7 @@ export function extractAttachments(html) {
     found.set(clean, {
       url: clean,
       kind,
-      basename: decodeURIComponent(clean.split("/").pop() || "attachment"),
+      basename: safeDecodeBasename(clean.split("/").pop() || "attachment"),
       original: isOrig,
     });
   };
@@ -1012,7 +1130,7 @@ export async function enrichLinuxdoPosts(cards, config, deps = {}) {
         const clean = u.split(/[?#]/)[0];
         return (
           localByUrl.get(clean)
-          || byStem.get(attachmentKey(decodeURIComponent(clean.split("/").pop() || "")))
+          || byStem.get(attachmentKey(safeDecodeBasename(clean.split("/").pop() || "")))
           || localByUrl.get(u)
           || null
         );

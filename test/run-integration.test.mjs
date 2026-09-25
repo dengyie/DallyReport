@@ -1,7 +1,8 @@
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,13 +25,22 @@ import { fileURLToPath } from "node:url";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RUN_ENTRY = path.join(PROJECT_ROOT, "src", "run.mjs");
-const LOCK_PATH = path.join(PROJECT_ROOT, "reports-cache", "run.lock");
+
+// Isolation (2026-09-25 review root fix): the child previously used the PRODUCTION
+// reports-cache/run.lock — the fake-lock test's `rmSync` could delete a live
+// scheduled run's lock (admitting a second concurrent writer), and a live 09:00
+// run holding the lock made these tests fail the other way. config.mjs honors
+// CACHE_DIR, so point the child at a per-file temp cache dir instead.
+const CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "dally-integration-cache-"));
+after(() => fs.rmSync(CACHE_DIR, { recursive: true, force: true }));
+const LOCK_PATH = path.join(CACHE_DIR, "run.lock");
 
 function runCli(args) {
   return spawnSync(process.execPath, [RUN_ENTRY, ...args], {
     cwd: PROJECT_ROOT,
     encoding: "utf8",
     timeout: 30_000,
+    env: { ...process.env, CACHE_DIR },
   });
 }
 

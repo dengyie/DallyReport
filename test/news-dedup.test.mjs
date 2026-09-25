@@ -143,3 +143,18 @@ test("dedupeAndNormalizeSources: does not mutate the input array", () => {
   dedupeAndNormalizeSources(sources);
   assert.deepEqual(sources.map((s) => s.title), before, "input untouched");
 });
+
+test("dedupeAndNormalizeSources: unrelated reset stories keep their own titles (no fabricated headline)", () => {
+  // 2026-09-25 review: the bare /重置|reset/i cluster used to REPLACE a
+  // self-contained title with the fixed "ChatGPT/Codex 额度重置" — deterministic
+  // fake news. Titles whose reset object is a different artifact must pass
+  // through with their own headline, folded or not.
+  const sources = [
+    card("OpenAI 重置了 GPT-5 系统提示词", "官方把默认系统提示词替换为新版本"),
+    card("Git reset 使用教程", "详解 reset 的三种模式与区别"),
+  ];
+  const out = dedupeAndNormalizeSources(sources);
+  assert.equal(out.length, 2, "different reset events must not fold together");
+  assert.equal(out[0].title, "OpenAI 重置了 GPT-5 系统提示词", "self-contained title is never replaced");
+  assert.equal(out[1].title, "Git reset 使用教程");
+});

@@ -1,8 +1,18 @@
-import "dotenv/config";
+import dotenv from "dotenv";
 import path from "node:path";
 import os from "node:os";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+
+// project dir regardless of cwd (running from elsewhere wouldn't re-hit the net or
+// split caches across directories).
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// .env 与代码同根：显式按 PROJECT_ROOT 解析，而不是 dotenv 默认的 process.cwd()。
+// launchd wrapper 有 cd 所以定时路径安全；手动/其它调度器在项目目录外运行时，
+// 按 cwd 找 .env 会静默丢掉全部配置（OBSIDIAN_DIR 落回默认 vault、cookie 丢失、
+// MISSING_GROK_CREDS），全程无提示——2026-09-25 review 根因修复。
+dotenv.config({ path: path.join(PROJECT_ROOT, ".env") });
 
 const HOME = os.homedir();
 const DEFAULT_GROK_SEARCH_DIR = path.join(HOME, ".claude", "skills", "grok-search");
@@ -176,11 +186,6 @@ export function assertGrokCreds() {
   return null;
 }
 
-// Project root = this file's dir's parent. Used so reports-cache resolves to the
-// project dir regardless of cwd (running from elsewhere wouldn't re-hit the net or
-// split caches across directories).
-const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-
 export function loadConfig({ date = null } = {}) {
   const imageEnabled = (() => {
     const raw = val("IMAGE_ENABLED");
@@ -212,14 +217,11 @@ export function loadConfig({ date = null } = {}) {
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
     hnDailyLimit: int("HN_DAILY_LIMIT", 12),
-    kr36DailyEnabled: (() => {
-      // 2026-08-11: 默认关闭。36kr 通过 Firecrawl 拿到的 URL 被重写为 feed 首页,
-      // 所有条目 URL 相同导致去重合并。待找到稳定 provider 或 raw RSS 绕过 WAF 后再启用。
-      if (true) return false; // TEMP: disabled pending URL stability
-      const raw = val("KR36_DAILY_ENABLED");
-      if (raw == null) return true;
-      return raw === "1" || raw.toLowerCase() === "true";
-    })(),
+    // 2026-08-11 硬关：36kr 经 Firecrawl 的 URL 被重写为 feed 首页，所有条目 URL
+    // 相同导致去重合并。待稳定 provider 或 raw RSS 绕过 WAF 后再恢复。
+    // （原 KR36_DAILY_ENABLED 环境变量分支位于 `if (true)` 之后，永不可达——
+    // 假开关已于 2026-09-25 review 删除，避免误导。）
+    kr36DailyEnabled: false,
     kr36DailyLimit: int("KR36_DAILY_LIMIT", 5),
     arxivDailyEnabled: (() => {
       const raw = val("ARXIV_DAILY_ENABLED");
@@ -397,7 +399,9 @@ export function loadConfig({ date = null } = {}) {
     // after this many rounds the loop drops the tool and forces a final answer.
     aiAltGeminiMaxRounds: int("AI_ALT_GEMINI_MAX_ROUNDS", 2),
     // cwd-independent cache dir, so reruns always read the same on-disk cache.
-    cacheDir: path.join(PROJECT_ROOT, "reports-cache"),
+    // CACHE_DIR overrides for test isolation (run-integration spawns real run.mjs
+    // and must never touch the production lock/cache dir).
+    cacheDir: val("CACHE_DIR") || path.join(PROJECT_ROOT, "reports-cache"),
     // GitHub poster image generation (image-gen.mjs). The prompt file + reference
     // image live in the vault; creds are read via assertImageCreds()/imageApi*(),
     // not threaded through here (kept out of the returned config like grok creds).

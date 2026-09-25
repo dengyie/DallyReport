@@ -23,23 +23,65 @@ function defaultIsAlive(pid) {
 
 export { defaultIsAlive as isPidAlive };
 
-// Age ceiling for a lock — a lock older than this is judged stale even if its PID
-// still resolves, guarding against PID reuse after a crash/reboot (the OS may hand
-// the dead run's PID to an unrelated process that process.kill(pid,0) reports as
-// "alive"). The default 30min must exceed the WHOLE run (image-gen + enrichment +
-// a slow-search day can together exceed 10min), not just any single step: a lock
-// younger than this with a live PID is genuinely in-flight and must be refused.
+// Silence ceiling for a lock — how long since the holder's last heartbeat (or,
+// for legacy 2-line files, since acquisition) before the lock is judged stale
+// even if its PID still resolves. The holder refreshes the file every
+// HEARTBEAT_INTERVAL_MS, so a LIVE run is always refused no matter how long the
+// whole run legitimately takes (serial poster retries + synthesis + enrichment
+// can reach ~38min); a crashed run's heart stops and its lock goes stale after
+// this window, which also covers the PID-reuse trap after a crash/reboot (the
+// OS may hand the dead run's PID to an unrelated process that
+// process.kill(pid,0) reports as "alive").
+// 2026-09-25 review root fix: the previous pure wall-age rule (30min, required
+// to exceed the whole run) could steal the lock from a live run whenever the
+// run outlasted the ceiling — two processes then wrote the same date dir.
 // Override via LOCK_MAX_AGE_MS.
+// Per-acquire so tests can shorten it via LOCK_HEARTBEAT_INTERVAL_MS without
+// module-load-order games (env is read at call time, not import time).
+function heartbeatIntervalMs() {
+  const raw = process.env.LOCK_HEARTBEAT_INTERVAL_MS;
+  const n = Number.parseInt(raw ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : 30 * 1000;
+}
 const MAX_LOCK_AGE_MS = (() => {
   const raw = process.env.LOCK_MAX_AGE_MS;
-  if (raw == null || raw === "") return 30 * 60 * 1000;
+  if (raw == null || raw === "") return 5 * 60 * 1000;
   const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : 30 * 60 * 1000;
+  return Number.isFinite(n) && n > 0 ? n : 5 * 60 * 1000;
 })();
 
 // Acquire an exclusive lock at lockPath. Returns { release } on success, or
 // { error } when another *live* instance holds it. isAlive is injectable so tests
 // can simulate a dead holder without a real PID.
+// Keep the lock file's heartbeat line fresh while we hold the lock. Ownership is
+// re-checked before every write: after another launcher has taken the lock over,
+// blindly rewriting would clobber THEIR lock and let a third process in — in
+// that case the interval stops itself. Returns a release() that also stops the
+// heartbeat (idempotent).
+function startHeartbeat(lockPath, release) {
+  const timer = setInterval(() => {
+    try {
+      const raw = String(fs.readFileSync(lockPath, "utf8"));
+      const lines = raw.split("\n");
+      if (lines[0] !== String(process.pid)) {
+        clearInterval(timer);
+        return;
+      }
+      fs.writeFileSync(lockPath, `${lines[0]}\n${lines[1]}\n${new Date().toISOString()}\n`);
+    } catch {
+      /* transient fs hiccup (iCloud/AV scan): next tick retries */
+    }
+  }, heartbeatIntervalMs());
+  timer.unref?.();
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    clearInterval(timer);
+    release();
+  };
+}
+
 export function acquireSingletonLock(lockPath, { isAlive = defaultIsAlive } = {}) {
   // Remove the lock only if it still belongs to US. If another process age-took
   // over our lock while we were still running (a slow run past MAX_LOCK_AGE_MS),
@@ -61,13 +103,14 @@ export function acquireSingletonLock(lockPath, { isAlive = defaultIsAlive } = {}
   let madeDir = false; // only auto-create the lock's parent once
   for (;;) {
     try {
+      const now = new Date().toISOString();
       const fd = fs.openSync(lockPath, "wx");
       try {
-        fs.writeSync(fd, `${process.pid}\n${new Date().toISOString()}\n`);
+        fs.writeSync(fd, `${process.pid}\n${now}\n${now}\n`);
       } finally {
         fs.closeSync(fd);
       }
-      return { release };
+      return { release: startHeartbeat(lockPath, release) };
     } catch (e) {
       if (e && e.code === "ENOENT" && !madeDir) {
         // Parent dir missing (cache dir was deleted). Create it once, then retry —
@@ -89,20 +132,28 @@ export function acquireSingletonLock(lockPath, { isAlive = defaultIsAlive } = {}
     // another launcher installed between our read and our unlink.
     let observed = null;
     let heldBy = NaN;
-    let heldAt = null;
+    let lastKnownAliveAt = null;
     try {
       const raw = String(fs.readFileSync(lockPath, "utf8"));
       observed = raw;
-      const [p, ts] = raw.split("\n");
+      const [p, ts, beat] = raw.split("\n");
       heldBy = Number(p);
-      if (ts) {
-        const t = new Date(ts).getTime();
-        if (Number.isFinite(t)) heldAt = t;
+      // The heartbeat line is fresher evidence that the holder lived, so it wins
+      // over the acquisition timestamp; legacy 2-line files fall back to ts.
+      for (const cand of [beat, ts]) {
+        if (cand) {
+          const t = new Date(cand).getTime();
+          if (Number.isFinite(t)) {
+            lastKnownAliveAt = t;
+            break;
+          }
+        }
       }
     } catch {
       /* unreadable lock counts as stale (observed stays null -> guarded below) */
     }
-    const tooOld = heldAt != null && Date.now() - heldAt > MAX_LOCK_AGE_MS;
+    const tooOld =
+      lastKnownAliveAt != null && Date.now() - lastKnownAliveAt > MAX_LOCK_AGE_MS;
     const isStale =
       !Number.isInteger(heldBy) ||
       heldBy <= 0 || // empty/garbage lock file -> no real holder; NB Number('')===0

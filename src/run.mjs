@@ -320,7 +320,21 @@ async function run() {
   let posts = [];
   if (cardSections.length) {
     try {
-      posts = await enrichLinuxdoPosts(cardSections[0].linuxdoRaw, config);
+      // The two channels fetch news/34 independently (different timing, different
+      // pagination outcomes), so their card sets can differ. Enrich the UNION
+      // keyed by url/id — enriching only cardSections[0] left the other channel's
+      // unique posts without full bodies/attachments forever (2026-09-25 review).
+      const seen = new Set();
+      const unionRaw = [];
+      for (const v of cardSections) {
+        for (const card of v.linuxdoRaw) {
+          const key = card?.url ?? card?.id;
+          if (key == null || seen.has(key)) continue;
+          seen.add(key);
+          unionRaw.push(card);
+        }
+      }
+      posts = await enrichLinuxdoPosts(unionRaw, config);
     } catch (e) {
       // Enrichment is additive; the base aux (and the report) already went out.
       console.warn(`⚠ 完整帖补全跳过：${e?.message || String(e)}`);

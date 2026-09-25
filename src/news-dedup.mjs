@@ -30,12 +30,20 @@ import { sanitizeSnippet } from "./snippet-hygiene.mjs";
 const CLUSTERS = [
   {
     // The recurring ChatGPT/Codex free-quota reset (Tibo/OpenAI resets balances).
-    // Matches any title whose core event is a quota/balance reset. The
-    // reverse-proxy post ("反代Codex，结果Claude账号被封") mentions Codex but its
-    // event is a ban, not a reset — it does not match and stays separate.
+    // 2026-09-25 review root fix: the bare /重置|reset/i match hijacked unrelated
+    // "reset" stories — worst case a self-contained title like "OpenAI 重置了
+    // GPT-5 系统提示词" got REPLACED with the fixed "ChatGPT/Codex 额度重置",
+    // fabricating a headline deterministically. The exclude now names the
+    // realistic reset-with-a-different-object titles (system prompts, tutorials,
+    // routers, sessions, settings…). Residual limitation, accepted: a reset
+    // story whose object shares none of these markers can still fold — a
+    // deterministic regex cannot fully disambiguate semantics, and requiring
+    // quota vocabulary in title/snippet was rejected because real reset posts
+    // ("重置了重置了！" plus a garbage/short snippet) carry none either, which
+    // would break the very fold this module exists for.
     key: "quota-reset",
     match: /重置|reset/i,
-    exclude: /密码|password/i,
+    exclude: /密码|password|系统提示|提示词|教程|路由器|固件|factory|会话|session|配置|settings/i,
     rewrite: () => "ChatGPT/Codex 额度重置",
   },
   {

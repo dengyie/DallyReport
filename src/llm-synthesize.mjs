@@ -354,6 +354,40 @@ async function postChatComplete(doFetch, endpoint, apiKey, body, deadline) {
  * @throws {Error} MISSING_GROK_CREDS / NO_SOURCES / SYNTH_NO_SEARCH_IMPL /
  *   SYNTH_FETCH_FAILED / SYNTH_HTTP_ERROR / SYNTH_BAD_JSON / SYNTH_EMPTY / SYNTH_TRUNCATED.
  */
+// Run one web_search under the loop's remaining wall-clock budget. The deadline
+// previously only bounded the HTTP calls: the grok-search child has its own
+// ~120s timeout, so a slow search day could stretch the "budgeted" loop by
+// minutes per tool call (2026-09-25 review). On expiry the search is abandoned;
+// its eventual result/rejection is swallowed — the caller records a 检索失败 tool
+// message and postChatComplete's own deadline check converges the loop.
+async function searchWithBudget(searchImpl, query, deadline) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    const err = new Error("综合墙钟预算已耗尽，跳过本次 web_search");
+    err.code = "SYNTH_TIMEOUT";
+    throw err;
+  }
+  let timer;
+  const budgetExceeded = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(`单次 web_search 超出综合墙钟预算（查询：${query}）`);
+      err.code = "SYNTH_TIMEOUT";
+      err.query = query;
+      reject(err);
+    }, remaining);
+  });
+  timer.unref?.();
+  const search = searchImpl(query);
+  // A late rejection after the budget race already surfaced must not become an
+  // unhandled rejection — attach a swallow handler to the original promise.
+  search.catch(() => {});
+  try {
+    return await Promise.race([search, budgetExceeded]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function synthesizeWithWebSearch({
   query,
   date,
@@ -423,30 +457,34 @@ export async function synthesizeWithWebSearch({
   while (roundsUsed < maxSearchRounds) {
     const round = await postChatComplete(doFetch, endpoint, apiKey, baseBody(true), deadline);
     const text = round.text?.trim?.() || "";
-    if (text) {
-      if (round.finish === "length" && round.tool_calls?.length) {
-        const err = new Error("工具轮已产生正文但被截断（finish_reason=length）");
-        err.code = "SYNTH_TRUNCATED";
-        err.finishReason = round.finish;
-        throw err;
-      }
-      return text;
+    const toolCalls = round.tool_calls?.length ? round.tool_calls : null;
+    if (round.finish === "length" && (text || toolCalls)) {
+      const err = new Error("工具轮已产生正文但被截断（finish_reason=length）");
+      err.code = "SYNTH_TRUNCATED";
+      err.finishReason = round.finish;
+      throw err;
     }
-    if (!round.tool_calls?.length) {
+    if (!toolCalls) {
+      // A reply WITHOUT tool calls is the final body.
+      if (text) return text;
       const err = new Error("综合返回空内容且无工具调用");
       err.code = "SYNTH_EMPTY";
       err.finishReason = round.finish;
       throw err;
     }
-    // Execute each emitted web_search tool call and feed the cleaned result back.
-    messages.push({ role: "assistant", content: null, tool_calls: round.tool_calls });
-    for (const tc of round.tool_calls) {
+    // The model may narrate before searching ("我先检索一下最新动态…"). A
+    // non-empty text WITH tool_calls is a transition turn, never the final
+    // report — the old code returned it as the whole daily report while the
+    // declared searches never ran (2026-09-25 review). Feed the text back as the
+    // assistant turn and execute the tools.
+    messages.push({ role: "assistant", content: text || null, tool_calls: toolCalls });
+    for (const tc of toolCalls) {
       if (tc.type === "function" && tc.function?.name === "web_search") {
         const q = parseToolQuery(tc.function.arguments);
         let content;
         if (q) {
           try {
-            content = await searchImpl(q);
+            content = await searchWithBudget(searchImpl, q, deadline);
           } catch (e) {
             content = `检索（${q}）失败：${e?.message || String(e)}`;
           }

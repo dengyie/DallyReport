@@ -125,6 +125,79 @@ test("acquireSingletonLock: no timestamp + live PID -> refused (conservative)", 
   assert.equal(fs.existsSync(lp), true, "lock preserved on refusal");
 });
 
+test("acquireSingletonLock: live PID + fresh heartbeat -> refused (never steal from a live run)", () => {
+  // 2026-09-25 review root fix: the old pure wall-age rule let a second launcher
+  // take over a LIVE run once the run outlasted the ceiling. A fresh heartbeat
+  // proves the holder is alive and working — refusal is unconditional while the
+  // beat is fresh, regardless of how long the run has been going.
+  const dir = tmpDir();
+  const lp = path.join(dir, "run.lock");
+  const now = new Date().toISOString();
+  fs.writeFileSync(lp, `424242\n${now}\n${now}\n`);
+  const lock = acquireSingletonLock(lp, { isAlive: () => true });
+  assert.ok(lock.error, "fresh heartbeat + live PID must be refused");
+  assert.equal(fs.existsSync(lp), true, "lock preserved on refusal");
+});
+
+test("acquireSingletonLock: live PID + stale heartbeat -> taken over (crashed run, PID reused)", () => {
+  // The heartbeat is the freshest evidence the holder lived. 10 minutes of
+  // silence (> the 5min default ceiling) means the holder's heart stopped —
+  // a crash leftover whose PID may now belong to an unrelated process.
+  const dir = tmpDir();
+  const lp = path.join(dir, "run.lock");
+  fs.writeFileSync(
+    lp,
+    `424242\n${new Date(Date.now() - 11 * 60 * 1000).toISOString()}\n${new Date(Date.now() - 10 * 60 * 1000).toISOString()}\n`,
+  );
+  const lock = acquireSingletonLock(lp, { isAlive: () => true });
+  assert.equal(lock.error, undefined, "stale heartbeat is a crash leftover even with a live PID");
+  lock.release();
+});
+
+test("acquireSingletonLock: heartbeat refreshes the lock file while held", async () => {
+  const dir = tmpDir();
+  const lp = path.join(dir, "run.lock");
+  const prev = process.env.LOCK_HEARTBEAT_INTERVAL_MS;
+  process.env.LOCK_HEARTBEAT_INTERVAL_MS = "20";
+  try {
+    const lock = acquireSingletonLock(lp);
+    assert.equal(lock.error, undefined);
+    const first = fs.readFileSync(lp, "utf8");
+    await new Promise((r) => setTimeout(r, 90)); // ~4 beats at 20ms
+    const refreshed = fs.readFileSync(lp, "utf8");
+    assert.notEqual(refreshed, first, "heartbeat rewrote the lock file");
+    assert.equal(refreshed.split("\n")[0], String(process.pid), "still our lock");
+    lock.release();
+  } finally {
+    if (prev == null) delete process.env.LOCK_HEARTBEAT_INTERVAL_MS;
+    else process.env.LOCK_HEARTBEAT_INTERVAL_MS = prev;
+  }
+});
+
+test("acquireSingletonLock: heartbeat stops itself once the lock no longer holds our PID", async () => {
+  // After another launcher takes the lock over, our interval must not clobber
+  // THEIR lock file with our PID — the ownership re-check stops the interval.
+  const dir = tmpDir();
+  const lp = path.join(dir, "run.lock");
+  const prev = process.env.LOCK_HEARTBEAT_INTERVAL_MS;
+  process.env.LOCK_HEARTBEAT_INTERVAL_MS = "20";
+  try {
+    const lock = acquireSingletonLock(lp);
+    assert.equal(lock.error, undefined);
+    // Simulate an age/heartbeat takeover by another process.
+    const theirs = `999999\n${new Date().toISOString()}\n${new Date().toISOString()}\n`;
+    fs.writeFileSync(lp, theirs);
+    await new Promise((r) => setTimeout(r, 80)); // ~4 ticks at 20ms
+    assert.equal(fs.readFileSync(lp, "utf8"), theirs, "another holder's lock was not clobbered");
+    lock.release();
+    lock.release(); // idempotent — must not throw or delete their lock
+    assert.equal(fs.readFileSync(lp, "utf8"), theirs, "release did not remove the new holder's lock");
+  } finally {
+    if (prev == null) delete process.env.LOCK_HEARTBEAT_INTERVAL_MS;
+    else process.env.LOCK_HEARTBEAT_INTERVAL_MS = prev;
+  }
+});
+
 test("isPidAlive: returns true for our own process", () => {
   assert.ok(isPidAlive(process.pid), "our PID is alive");
 });
