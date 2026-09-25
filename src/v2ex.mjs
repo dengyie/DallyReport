@@ -24,7 +24,11 @@ const EXCLUDE_TITLE_RE =
  */
 export function parseV2exTopics(text) {
   if (!text) return [];
-  const re = /\[([^\n]{2,300})\]\(\/t\/(\d+)(?:#\w+)?\)/g;
+  // The title capture excludes [ and ] so a greedy match can never span across
+  // adjacent markdown links: a listing row like
+  // `[title](/t/123#reply4) **[u](/member/u)** • 34 mins ago … | [4](/t/123#reply4)`
+  // must yield title="title", not the whole row up to the last ](/t/123.
+  const re = /\[([^\n\[\]]{2,200})\]\(\/t\/(\d+)(?:#\w+)?\)/g;
   const seen = new Map();
   let m;
   while ((m = re.exec(text)) !== null) {

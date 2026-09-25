@@ -161,9 +161,20 @@ async function run() {
     if (altChannel) names.splice(1, 0, "ai-alt");
   }
 
+  // Dual-channel cross-link map: section key -> the OTHER channel's file name
+  // (without .md). Built here because only run() knows both channels ran.
+  const crossRefs = {};
+  if (altChannel && names.includes("ai") && names.includes("ai-alt")) {
+    crossRefs["ai"] = altChannel.name;
+    crossRefs["ai-alt"] = "AI";
+  }
+
   const results = await Promise.allSettled(
     names.map(async (n) => {
       const res = await builders[n]();
+      // Dual-channel cross-link: when both AI channels ran, each note points
+      // at the other model's take under its H1 (Obsidian wikilink, same folder).
+      if (crossRefs[n]) res.markdown = injectCrossRef(res.markdown, crossRefs[n]);
       // writeSection returns { file, error } and never throws: a vault write
       // failure (iCloud mid-sync, vault moved, disk full) is rescued to a
       // fallback cache file so the built markdown isn't lost.
@@ -244,9 +255,12 @@ async function run() {
     const aiIndex = names.indexOf("ai");
     const ar = results[aiIndex];
     const av = ar.status === "fulfilled" ? ar.value : null;
-    if (av && av.ok && hasAiPosterHeadlines(av.sources)) {
+    // Poster/alignment: render the sources the article actually cited so the
+    // poster visualizes the article instead of a different source set.
+    const posterSources = av?.posterSources?.length ? av.posterSources : av?.sources;
+    if (av && av.ok && hasAiPosterHeadlines(posterSources)) {
       try {
-        const poster = await generateAiPoster(config, av.sources, {});
+        const poster = await generateAiPoster(config, posterSources, {});
         if (poster.ok && poster.file) {
           const embedded = embedPosterInMarkdown(av.markdown, "AI.png");
           const written2 = await writeSection(config, av.name, embedded);
@@ -329,6 +343,25 @@ async function run() {
   // report is already written. The 'exit' handler reaps any in-flight children and
   // drops the lock. Writing through the callback first avoids truncating the summary.
   process.stdout.write(text, (err) => process.exit(err ? 1 : 0));
+}
+
+// Insert a cross-reference line under the H1 so the dual AI channels point at
+// each other (AI.md <-> AI-Gemini.md). Obsidian wikilink, same folder.
+function injectCrossRef(markdown, otherFile) {
+  const line = `> 🔀 另一模型视角：[[${otherFile}]]`;
+  const lines = String(markdown).split("\n");
+  const out = [];
+  let done = false;
+  for (const l of lines) {
+    out.push(l);
+    if (!done && /^#\s/.test(l)) {
+      out.push("");
+      out.push(line);
+      out.push("");
+      done = true;
+    }
+  }
+  return done ? out.join("\n") : `${line}\n\n${markdown}`;
 }
 
 // Insert a poster embed into the GitHub section markdown. Placed right under the

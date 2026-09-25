@@ -1,5 +1,5 @@
 import { runSearch } from "../grok-cli.mjs";
-import { frontMatter } from "../markdown.mjs";
+import { frontMatter, stripMarkdown } from "../markdown.mjs";
 import { assertGrokCreds } from "../config.mjs";
 import { synthesizeFromSources, synthesizeWithWebSearch, renderSources } from "../llm-synthesize.mjs";
 import { fetchLinuxDoAiSources, mergeSourcesPreferLinuxDo } from "../linuxdo.mjs";
@@ -318,10 +318,13 @@ export async function aiNewsSection(
     ? [...citedIndices].sort((a, b) => a - b).map((i) => sources[i])
     : sources;
   const refLines = citedSources.slice(0, 30).map((s) => {
-    // Escape markdown special chars in title so parens don't break the
-    // markdown link syntax: `[title (with parens)](<url>)`.
-    const title = (s.title || s.url || "来源")
-      .replace(/[\[\]()]/g, (c) => "\\" + c);
+    // Strip markdown fragments from scraped titles first (v2ex/linuxdo titles
+    // can carry `[...](...)` residue and reply metadata), THEN escape what
+    // remains so parens can't break the markdown link syntax.
+    const title = stripMarkdown(s.title || s.url || "来源").replace(
+      /[\[\]()]/g,
+      (c) => "\\" + c,
+    );
     const url = s.url || "";
     return url ? `- [${title}](<${url}>)` : `- ${title}`;
   });
@@ -381,6 +384,11 @@ export async function aiNewsSection(
     v2exCount,
     // Reuse the sanitized source set for the AI poster headlines.
     sources,
+    // Poster/mirror alignment: the poster renders the sources the article
+    // actually cited, so the poster is a visualization of the article rather
+    // than a different (forum-first) source set. Falls back to all sources
+    // when the body carried no [N] citations (fallback/degraded path).
+    posterSources: citedSources.length ? citedSources : sources,
     // Raw linuxdo news/34 cards for auxiliary materials (all today's posts, no
     // AI filter, no cap). Written to a separate file by run.mjs.
     linuxdoRaw: linuxdoSources?.linuxdoRaw || [],

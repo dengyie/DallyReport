@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sourceCard } from "../src/markdown.mjs";
+import { sourceCard, stripMarkdown } from "../src/markdown.mjs";
 
 test("sourceCard: escapes external markdown and rejects unsafe URLs", () => {
   const rendered = sourceCard({
@@ -26,4 +26,16 @@ test("sourceCard: uses an angle-bracket destination for safe HTTP URLs", () => {
     snippet: "safe",
   });
   assert.equal(rendered, "- [Example](<https://example.com/a_(b)?q=1>)\n  > safe");
+});
+
+test("stripMarkdown: removes inline links, orphan tails, and emphasis", () => {
+  assert.equal(
+    stripMarkdown("3 分钟用完 Codex 5 小时额度](/t/1242585#reply21) **[CyanHaze](/member/CyanHaze)** • 34 mins ago"),
+    "3 分钟用完 Codex 5 小时额度 CyanHaze • 34 mins ago",
+  );
+  assert.equal(stripMarkdown("[纯文本标题](/t/123)"), "纯文本标题");
+  assert.equal(stripMarkdown("__加粗__ 与 **重点**"), "加粗 与 重点");
+  assert.equal(stripMarkdown("普通标题，无格式"), "普通标题，无格式");
+  assert.equal(stripMarkdown(""), "");
+  assert.equal(stripMarkdown(null), "");
 });

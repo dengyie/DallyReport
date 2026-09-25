@@ -396,3 +396,15 @@ test("mergeSourcesPreferLinuxDo: drops injection-only community card, keeps real
   );
   assert.match(merged[0].title, /Gemini 3.5 Pro/);
 });
+
+test("parseV2exTopics: greedy title must not span across adjacent markdown links", () => {
+  // Real-world listing row: the title link is followed by reply metadata that
+  // itself contains [...](...) links. The old greedy [^\n]{2,300} capture
+  // swallowed everything up to the LAST ](/t/<id>, producing a junk title.
+  const row = `[3 分钟用完 Codex 5 小时额度](/t/1242585#reply21) **[CyanHaze](/member/CyanHaze)** • 34 mins ago • Lastly replied by **[Clannad0708](/member/Clannad0708)** | [21](/t/1242585#reply21)`;
+  const topics = parseV2exTopics(row);
+  assert.equal(topics.length, 1);
+  assert.equal(topics[0].id, 1242585);
+  assert.equal(topics[0].title, "3 分钟用完 Codex 5 小时额度");
+  assert.equal(topics[0].url, "https://www.v2ex.com/t/1242585");
+});
