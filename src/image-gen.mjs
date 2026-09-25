@@ -420,6 +420,24 @@ function isRetryable(err) {
 
 // Shared poster pipeline. The transport, fallback, validation, and atomic-write
 // behavior is identical for each poster; only the prompt/data/output spec differs.
+// iCloud 同步盘上的 vault 文件偶发瞬时读失败（同步窗口/数据态导致的 EIO 类错误，
+// 2026-09-25 两张海报因提示词文件一次 readFileSync 抖动双双 IMG_BAD_PROMPT）。
+// poster 路径的 vault 侧读取做小退避重试；重试耗尽抛最后一次错误，成功路径行为不变。
+const syncSleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+function readVaultFileRetry(filePath, options, { attempts = 3, delayMs = 1500 } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return readFileSync(filePath, options);
+    } catch (e) {
+      lastErr = e;
+      if (attempt < attempts - 1) syncSleep(delayMs);
+    }
+  }
+  throw lastErr;
+}
+
 async function generatePosterCore(config, spec, deps = {}) {
   const fetchImpl = deps.fetch || globalThis.fetch;
   const timeoutMs = config.imageTimeoutMs || DEFAULT_TIMEOUT_MS;
@@ -438,7 +456,7 @@ async function generatePosterCore(config, spec, deps = {}) {
 
   let promptMd;
   try {
-    promptMd = readFileSync(spec.promptFile, "utf8");
+    promptMd = readVaultFileRetry(spec.promptFile, "utf8");
   } catch (e) {
     const err = imgErr("IMG_BAD_PROMPT", `读提示词文件失败：${spec.promptFile}：${e.message}`);
     return { ok: false, name: spec.name, summary: "failed (提示词文件)", error: err, usedFallback };
@@ -455,7 +473,7 @@ async function generatePosterCore(config, spec, deps = {}) {
   let refError = null;
   let refDownscaleTimedOut = false;
   try {
-    const raw = readFileSync(spec.refImage);
+    const raw = readVaultFileRetry(spec.refImage);
     const refIsPng = isPng(raw);
     // Sniff the real format instead of claiming image/png for every input: a JPEG
     // reference image uploaded as image/png + filename ref.png can be rejected by
