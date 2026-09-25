@@ -55,11 +55,16 @@ npm run            # = node src/run.mjs，输出 AI.md + GitHub.md
 npm run ai
 npm run github
 
+# 生成博客草稿（不发布）
+npm run blog:draft -- --date 2026-08-13
+
 # 4. 测试
 npm test           # = node --test，跑 test/ 下的单测
 ```
 
 跑完会在 Obsidian vault 的 `DallyReport/<今天>/` 下生成 `AI.md`、`GitHub.md`，以及启用生图时对应的 `AI.png`、`GitHub.png`。同一天重跑会刷新这些文件，不产生重复。
+
+博客草稿导出到 `reports-cache/blog-drafts/YYYY-MM-DD/`，包含 `AI.md` 和 `assets/AI.png`。草稿带有 `draft: true` 与 `publish_review: pending`，当前不会连接任何博客平台，也不会公开发布。可用 `BLOG_DRAFT_DIR` 覆盖输出目录。
 
 ## 配置（.env）
 
@@ -67,12 +72,12 @@ npm test           # = node --test，跑 test/ 下的单测
 |---|---|---|
 | `GROK_API_URL` | ✅ | Responses 兼容端点，如 `https://api.x.ai/v1` |
 | `GROK_API_KEY` | ✅ | 上面端点的 key |
-| `GROK_MODEL` |  | 同时用于 grok-search 搜索调用与 llm-synthesize 综合调用，默认 `grok-4.5` |
+| `GROK_MODEL` |  | 同时用于 grok-search 搜索调用与 llm-synthesize 综合调用，默认 `gpt-5.6-luna`（`grok-4.5` 仅为综合失败时的回退模型） |
 | `TAVILY_API_KEY` |  | 给 AI 板块补来源、给 GitHub 板块做 Extract，强烈建议填 |
 | `FIRECRAWL_API_URL` |  | 可选，备用抓取 provider |
 | `GROK_SEARCH_DIR` |  | grok-search skill 路径，默认基于当前用户 home 的 `~/.claude/skills/grok-search`；换机、CI、生产建议显式配置 |
 | `OBSIDIAN_DIR` |  | Obsidian vault 输出目录，默认基于当前用户 home 推导 `Note/AI/DallyReport`；换机、CI、生产建议显式配置 |
-| `GROK_DAYS` |  | AI 板块 `--days`（只取近 N 天来源），默认 `2` |
+| `GROK_DAYS` |  | AI 板块 `--days`（只取近 N 天来源），默认 `1` |
 | `GROK_EXTRA` |  | AI 板块 `--extra`（外部来源数量），默认 `10` |
 | `GROK_FETCH_MAX_CHARS` |  | GitHub trending 抓取上限字符，默认 `80000` |
 | `GROK_SYNTH_MAX_TOKENS` |  | 综合调用 completion token 上限，默认 `4000`（截断由 `finish_reason` 探测） |
@@ -84,7 +89,7 @@ npm test           # = node --test，跑 test/ 下的单测
 | `LINUXDO_TOPIC_LIMIT` |  | 最多纳入多少条 AI 相关帖，默认 `8` |
 | `LINUXDO_DEEP_FETCH` |  | 是否深抓帖子正文做 snippet，默认开 |
 | `LINUXDO_DEEP_FETCH_LIMIT` |  | 深抓帖子数量上限，默认 `5` |
-| `AI_SOURCE_MAX_TOTAL` |  | 综合时总来源上限（linux.do 优先占位），默认 `16` |
+| `AI_SOURCE_MAX_TOTAL` |  | 综合时总来源上限（linux.do 优先占位），默认 `18` |
 | `IMAGE_API_URL` |  | 生图网关 base，留空复用 `GROK_API_URL`（CPA 同一个 `/v1` 暴露 `gpt-image-2`） |
 | `IMAGE_API_KEY` |  | 生图网关 key，留空复用 `GROK_API_KEY` |
 | `IMAGE_MODEL` |  | 生图模型，默认 `gpt-image-2`（CPA 拒 `gpt-image-1`） |
