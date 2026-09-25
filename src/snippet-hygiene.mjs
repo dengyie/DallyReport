@@ -90,9 +90,28 @@ function sanitizeParagraph(para) {
   return segments.join(" ");
 }
 
+// ---- Brand-name spelling normalization ----
+// Scraped titles occasionally carry the source's own typo (2026-09-24 review:
+// a linux.do OP titled "Anthoropic…" rendered verbatim on the 09-18 AI poster).
+// Normalize a small set of CONFIRMED typos here, inside sanitizeSnippet, so
+// poster titles, reference-source cards, and the synthesis prompt all get the
+// same spelling. Deliberately conservative: whole-word, case-insensitive
+// matches from this list only — no fuzzy correction, no new auto-guessed typos.
+const BRAND_TYPO_FIXES = [
+  [/\bAnthoropic\b/gi, "Anthropic"],
+];
+
+// Correct known source typos in brand names. Pure, unit-testable.
+export function fixBrandSpelling(text) {
+  if (!text) return text;
+  let out = String(text);
+  for (const [re, replacement] of BRAND_TYPO_FIXES) out = out.replace(re, replacement);
+  return out;
+}
+
 export function sanitizeSnippet(snippet, { maxChars = 1000 } = {}) {
   if (!snippet) return "";
-  const text = String(snippet).replace(/\r/g, "");
+  const text = fixBrandSpelling(String(snippet).replace(/\r/g, ""));
   // Also treat common markdown bullet/quote chrome as paragraph breaks.
   const paras = text
     .split(/\n{1,}/)

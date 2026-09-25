@@ -197,6 +197,36 @@ async function run() {
     }),
   );
 
+  // Dual-channel cross-link, phase 2: each AI note points at the other model's
+  // take under its H1 (Obsidian wikilink, same folder). This MUST happen after
+  // allSettled: injecting inside the per-section callback linked to a sibling
+  // whose build/write might still fail, leaving a dangling [[...]] in a
+  // successful note (2026-09-25 Copilot review). Only fulfilled sections whose
+  // vault write succeeded participate, on both sides.
+  if (altChannel && names.includes("ai") && names.includes("ai-alt")) {
+    const byKey = new Map();
+    results.forEach((r, i) => {
+      if (r.status === "fulfilled") byKey.set(names[i], r.value);
+    });
+    const ai = byKey.get("ai");
+    const alt = byKey.get("ai-alt");
+    const writtenOk = (v) => v && !v.writeError;
+    if (writtenOk(ai) && writtenOk(alt)) {
+      for (const [v, otherName] of [
+        [ai, alt.name],
+        [alt, ai.name],
+      ]) {
+        v.markdown = injectCrossRef(v.markdown, otherName);
+        const rewrote = await writeSection(config, v.name, v.markdown);
+        if (rewrote.error) {
+          // The pre-link version is already on disk; don't pretend otherwise.
+          v.writeError = rewrote.error;
+          v.ok = false;
+        }
+      }
+    }
+  }
+
   // Poster step: only relevant after the GitHub section, only when enabled, and
   // isolated so a poster failure never downgrades the already-written GitHub.md.
   // We rewrite GitHub.md with the embed only on success; on failure we leave the
@@ -244,9 +274,12 @@ async function run() {
     const aiIndex = names.indexOf("ai");
     const ar = results[aiIndex];
     const av = ar.status === "fulfilled" ? ar.value : null;
-    if (av && av.ok && hasAiPosterHeadlines(av.sources)) {
+    // Poster/alignment: render the sources the article actually cited so the
+    // poster visualizes the article instead of a different source set.
+    const posterSources = av?.posterSources?.length ? av.posterSources : av?.sources;
+    if (av && av.ok && hasAiPosterHeadlines(posterSources)) {
       try {
-        const poster = await generateAiPoster(config, av.sources, {});
+        const poster = await generateAiPoster(config, posterSources, {});
         if (poster.ok && poster.file) {
           const embedded = embedPosterInMarkdown(av.markdown, "AI.png");
           const written2 = await writeSection(config, av.name, embedded);
@@ -329,6 +362,25 @@ async function run() {
   // report is already written. The 'exit' handler reaps any in-flight children and
   // drops the lock. Writing through the callback first avoids truncating the summary.
   process.stdout.write(text, (err) => process.exit(err ? 1 : 0));
+}
+
+// Insert a cross-reference line under the H1 so the dual AI channels point at
+// each other (AI.md <-> AI-Gemini.md). Obsidian wikilink, same folder.
+function injectCrossRef(markdown, otherFile) {
+  const line = `> 🔀 另一模型视角：[[${otherFile}]]`;
+  const lines = String(markdown).split("\n");
+  const out = [];
+  let done = false;
+  for (const l of lines) {
+    out.push(l);
+    if (!done && /^#\s/.test(l)) {
+      out.push("");
+      out.push(line);
+      out.push("");
+      done = true;
+    }
+  }
+  return done ? out.join("\n") : `${line}\n\n${markdown}`;
 }
 
 // Insert a poster embed into the GitHub section markdown. Placed right under the

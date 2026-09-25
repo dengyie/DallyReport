@@ -27,7 +27,9 @@ test("parseTrending: parses, sorts desc by starsToday, drops no-today repos", ()
     assert.equal(rows[i].repo, EXPECTED_FIXTURE_ROWS[i].repo, `repo #${i}`);
     assert.equal(rows[i].starsToday, EXPECTED_FIXTURE_ROWS[i].starsToday, `starsToday #${i}`);
     assert.equal(rows[i].starsTotal, EXPECTED_FIXTURE_ROWS[i].starsTotal, `starsTotal #${i}`);
+    assert.equal(rows[i].forks, EXPECTED_FIXTURE_ROWS[i].forks, `forks #${i}`);
     assert.equal(rows[i].description, EXPECTED_FIXTURE_ROWS[i].description, `description #${i}`);
+    assert.equal(rows[i].language, EXPECTED_FIXTURE_ROWS[i].language, `language #${i}`);
   }
   // Explicitly sorted descending by starsToday.
   for (let i = 1; i < rows.length; i++) {

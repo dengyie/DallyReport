@@ -42,6 +42,25 @@ const NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
 const STARS_TODAY_RE = /^([\d,]+)\s+stars?\s+today$/i;
 const BUILT_BY_RE = /^Built by\s*$/;
 const NUM_RE = /^([\d,]{1,15})$/;
+// The <language> line sits right after the description (or right after the
+// name when there's no description). Usually a single token like "Python" /
+// "C++", but a few real GitHub labels contain spaces ("Jupyter Notebook",
+// "Visual Basic"). Those go in an explicit allowlist rather than a
+// space-allowing pattern: a loose multi-word pattern would also match short
+// two-word descriptions and steal them out of the description slot
+// (descriptions are detected by the presence of whitespace, 2026-09-25
+// Copilot review).
+const LANGUAGE_RE = /^[A-Za-z][A-Za-z0-9+#.+-]{0,29}$/;
+const MULTIWORD_LANGUAGES = new Set([
+  "Jupyter Notebook",
+  "Visual Basic",
+  "Common Lisp",
+  "Emacs Lisp",
+  "AGS Script",
+]);
+export function isLanguageLabel(s) {
+  return LANGUAGE_RE.test(s) || MULTIWORD_LANGUAGES.has(s);
+}
 
 export function parseTrending(text) {
   if (!text) return [];
@@ -67,7 +86,7 @@ export function parseTrending(text) {
       const name = lines[i + 1];
       const key = `${owner}/${name}`;
       if (!rows.some((r) => r.repo === key)) {
-        rec = { repo: key, owner, name, starsToday: null, starsTotal: null, description: null };
+        rec = { repo: key, owner, name, starsToday: null, starsTotal: null, forks: null, description: null, language: null };
         rows.push(rec);
       } else {
         rec = rows.find((r) => r.repo === key);
@@ -80,17 +99,41 @@ export function parseTrending(text) {
       // name; a real description is a sentence. Requiring /\s/ keeps the language
       // from being mislabeled as the project's tagline on the poster. A repo with
       // no description simply has no such line; rec stays description: null.
+      let descHere = false;
       if (rec.description == null && i + 2 < lines.length) {
         const cand = lines[i + 2];
         if (
           cand &&
           /\s/.test(cand) &&
+          !isLanguageLabel(cand) &&
           !NUM_RE.test(cand) &&
           !BUILT_BY_RE.test(cand) &&
           !STARS_TODAY_RE.test(cand) &&
           !OWNER_LINE_RE.test(cand)
         ) {
           rec.description = cand;
+          descHere = true;
+        }
+      }
+      // Capture the <language> line: the single-token line right after the
+      // description captured above (or right after the name when this block
+      // has no description line). descHere (not rec.description) decides the
+      // offset, because a reused rec may carry a description from an earlier
+      // duplicate block.
+      if (rec.language == null) {
+        const langIdx = descHere ? i + 3 : i + 2;
+        if (langIdx < lines.length) {
+          const cand = lines[langIdx];
+          if (
+            cand &&
+            isLanguageLabel(cand) &&
+            !NUM_RE.test(cand) &&
+            !BUILT_BY_RE.test(cand) &&
+            !STARS_TODAY_RE.test(cand) &&
+            !OWNER_LINE_RE.test(cand)
+          ) {
+            rec.language = cand;
+          }
         }
       }
       prevNumbers = [];
@@ -115,10 +158,16 @@ export function parseTrending(text) {
     }
 
     if (BUILT_BY_RE.test(line) && rec) {
-      // total stars = first of the last two bare numbers (the older one).
+      // total stars = first of the last two bare numbers (the older one),
+      // forks = the second. The poster prompt asserts Star/Fork figures, so
+      // both must come from parsed data, never invented (2026-09-25 Copilot
+      // review).
       if (rec.starsTotal == null && prevNumbers.length) {
         const cand = prevNumbers[0];
         rec.starsTotal = Number(cand.replace(/,/g, ""));
+      }
+      if (rec.forks == null && prevNumbers.length > 1) {
+        rec.forks = Number(prevNumbers[1].replace(/,/g, ""));
       }
       prevNumbers = [];
       i++;
@@ -192,11 +241,12 @@ export async function githubTrendingSection(config) {
       : "> 未能从抓取结果解析出 star 增量数据，可能页面结构变化或抓取为空。";
   } else {
     mdTable = table(
-      ["排名", "仓库（地址）", "简介", "今日新增", "总 star"],
+      ["排名", "仓库（地址）", "简介", "语言", "今日新增", "总 star"],
       top.map((r, i) => [
         i + 1,
         `[github.com/${r.repo}](https://github.com/${r.repo})`,
         briefDescription(r.description) || "—",
+        r.language || "—",
         `+${r.starsToday}`,
         r.starsTotal != null ? r.starsTotal.toLocaleString() : "—",
       ]),

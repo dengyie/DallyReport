@@ -64,6 +64,16 @@ test("resolveAltChannel: defaults to Gemini writer + shared AI_QUERY", () => {
   assert.equal(ch.title, "# AI 热点（Gemini）· 2026-08-06");
 });
 
+test("resolveAltChannel: strips a user-supplied .md from AI_ALT_FILE", () => {
+  // 2026-09-25 Copilot review: writeSection appends ".md" itself, so
+  // AI_ALT_FILE="AI-Grok.md" would write "AI-Grok.md.md" while the wikilink
+  // pointed at "AI-Grok.md".
+  const ch = resolveAltChannel({ aiAltChannel: true, date: "2026-08-06", aiAltFile: "AI-Grok.md" });
+  assert.equal(ch.name, "AI-Grok");
+  const bare = resolveAltChannel({ aiAltChannel: true, date: "2026-08-06", aiAltFile: "AI-Grok" });
+  assert.equal(bare.name, "AI-Grok");
+});
+
 test("resolveAltChannel: carries the alt synthesis timeout budget", () => {
   const ch = resolveAltChannel({
     aiAltChannel: true,
@@ -90,7 +100,7 @@ test("resolveAltChannel: aiAltQuery overrides, aiAltFile overrides name, model s
     aiAltQueryTemplate: "格罗克视角{date}",
     aiAltFile: "AI-Grok.md",
   });
-  assert.equal(ch.name, "AI-Grok.md");
+  assert.equal(ch.name, "AI-Grok"); // ".md" stripped: writeSection appends it
   assert.equal(ch.model, "grok-4.5");
   assert.equal(ch.queryTemplate, "格罗克视角{date}");
   assert.equal(ch.title, `# AI 热点（Grok）· 2026-08-06`);

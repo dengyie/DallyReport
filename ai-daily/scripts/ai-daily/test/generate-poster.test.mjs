@@ -85,7 +85,8 @@ test('loadEnvFile: 只补缺键不覆盖、跳过注释/空行、剥引号；文
 test('resolveDallyReportRoot: obsidian 布局解析到真实 DallyReport 仓根；探测不到 → null', () => {
   const root = resolveDallyReportRoot()
   assert.ok(root, 'obsidian 布局下应探测到 DallyReport 根')
-  assert.equal(path.basename(root), 'DallyReport')
+  // 检出目录名在不同机器上可能是 DallyReport / dallyreport，不区分大小写。
+  assert.equal(path.basename(root).toLowerCase(), 'dallyreport')
   assert.equal(fs.existsSync(path.join(root, 'src', 'image-gen.mjs')), true, 'image-gen 可从该根解析')
   // 探测不到的假 fs → null（镜像布局探测分支由 resolve 顺序保证）
   const fakeFs = { existsSync: () => false }

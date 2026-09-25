@@ -61,6 +61,22 @@ test("parseV2exTopics: empty / null -> []", () => {
   assert.deepEqual(parseV2exTopics(null), []);
 });
 
+test("parseV2exTopics: bracketed title prefixes are kept, links still don't span", () => {
+  // 2026-09-25 Copilot review: titles like "[求助] Claude…" must parse, while
+  // a row of adjacent links must not merge into one title.
+  const text = [
+    "[[求助] Claude Code 闪退怎么解](/t/1232200#reply12)",
+    "[普通标题](/t/1232199) **[u](/member/u)** • 34 mins ago | [4](/t/1232199#reply4)",
+  ].join("\n");
+  const topics = parseV2exTopics(text);
+  const help = topics.find((t) => t.id === 1232200);
+  assert.ok(help, "bracketed title parsed");
+  assert.equal(help.title, "[求助] Claude Code 闪退怎么解");
+  const plain = topics.find((t) => t.id === 1232199);
+  assert.ok(plain, "adjacent-link row parsed");
+  assert.equal(plain.title, "普通标题");
+});
+
 test("isAiRelatedTopic: shared gate keeps model news, drops site noise via exclude", () => {
   assert.equal(isAiRelatedTopic("DeepSeek V4 Flash 正式版发布"), true);
   assert.equal(isAiRelatedTopic("Gemini 3.5 Pro 要来了"), true);
@@ -395,4 +411,16 @@ test("mergeSourcesPreferLinuxDo: drops injection-only community card, keeps real
     ["nodeseek"],
   );
   assert.match(merged[0].title, /Gemini 3.5 Pro/);
+});
+
+test("parseV2exTopics: greedy title must not span across adjacent markdown links", () => {
+  // Real-world listing row: the title link is followed by reply metadata that
+  // itself contains [...](...) links. The old greedy [^\n]{2,300} capture
+  // swallowed everything up to the LAST ](/t/<id>, producing a junk title.
+  const row = `[3 分钟用完 Codex 5 小时额度](/t/1242585#reply21) **[CyanHaze](/member/CyanHaze)** • 34 mins ago • Lastly replied by **[Clannad0708](/member/Clannad0708)** | [21](/t/1242585#reply21)`;
+  const topics = parseV2exTopics(row);
+  assert.equal(topics.length, 1);
+  assert.equal(topics[0].id, 1242585);
+  assert.equal(topics[0].title, "3 分钟用完 Codex 5 小时额度");
+  assert.equal(topics[0].url, "https://www.v2ex.com/t/1242585");
 });
