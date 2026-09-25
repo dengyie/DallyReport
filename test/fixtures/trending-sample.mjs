@@ -59,6 +59,16 @@ export const TRENDING_FIXTURE = [
   "Built by",
   "857 stars today",
   "",
+  "notebook-org /",
+  "nb-demo",
+  "Interactive notebook demos for data science.",
+  "Jupyter Notebook",
+  "5,432",
+  "321",
+  "Built by",
+  "700 stars today",
+  "Star",
+  "",
   "ghostowner /",
   "no-today",
   "This repo has no 'stars today' line, so it should be filtered out.",
@@ -91,12 +101,16 @@ export const TRENDING_FIXTURE = [
 // filtered out (no stars today). starsTotal must NOT pick up "2026" or "2" from
 // numsy-pkg's description. lone-repo/no-desc has NO description line, so its
 // <language> line ("Python") must stay out of description (null) — the P2 fix.
-// Order by starsToday desc: 1421, 1022, 945, 857, 555, 89.
+// affaan-m/ECC has no language line (a bare number follows the description).
+// notebook-org/nb-demo exercises a multi-word language label ("Jupyter
+// Notebook") plus forks parsing (2026-09-25 Copilot review).
+// Order by starsToday desc: 1421, 1022, 945, 857, 700, 555, 89.
 export const EXPECTED_FIXTURE_ROWS = [
-  { repo: "virgiliojr94/book-to-skill", starsToday: 1421, starsTotal: 12709, description: "Turn any technical book PDF into a Claude Code skill." },
-  { repo: "pascalorg/editor", starsToday: 1022, starsTotal: 19553, description: "Create and share 3D architectural projects." },
-  { repo: "paperswithbacktest/awesome-systematic-trading", starsToday: 945, starsTotal: 10379, description: "Open-source systematic trading backtest library." },
-  { repo: "affaan-m/ECC", starsToday: 857, starsTotal: 235547, description: "Some repo with no language line below" },
-  { repo: "numsy-pkg/release-notes", starsToday: 555, starsTotal: 8401, description: "Changelog for the 2026 release of numsy, version 2." },
-  { repo: "lone-repo/no-desc", starsToday: 89, starsTotal: 1234, description: null },
+  { repo: "virgiliojr94/book-to-skill", starsToday: 1421, starsTotal: 12709, forks: 1414, description: "Turn any technical book PDF into a Claude Code skill.", language: "Python" },
+  { repo: "pascalorg/editor", starsToday: 1022, starsTotal: 19553, forks: 2591, description: "Create and share 3D architectural projects.", language: "TypeScript" },
+  { repo: "paperswithbacktest/awesome-systematic-trading", starsToday: 945, starsTotal: 10379, forks: 1201, description: "Open-source systematic trading backtest library.", language: "Python" },
+  { repo: "affaan-m/ECC", starsToday: 857, starsTotal: 235547, forks: 9012, description: "Some repo with no language line below", language: null },
+  { repo: "notebook-org/nb-demo", starsToday: 700, starsTotal: 5432, forks: 321, description: "Interactive notebook demos for data science.", language: "Jupyter Notebook" },
+  { repo: "numsy-pkg/release-notes", starsToday: 555, starsTotal: 8401, forks: 612, description: "Changelog for the 2026 release of numsy, version 2.", language: "Go" },
+  { repo: "lone-repo/no-desc", starsToday: 89, starsTotal: 1234, forks: 567, description: null, language: "Python" },
 ];

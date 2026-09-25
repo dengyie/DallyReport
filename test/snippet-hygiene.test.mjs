@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sanitizeSnippet, clarifySnippet, NEGATIVE_COMMUNITY_RE, extractOutlinks, HIGH_VALUE_OUTLINK_RE } from "../src/snippet-hygiene.mjs";
+import { sanitizeSnippet, clarifySnippet, NEGATIVE_COMMUNITY_RE, extractOutlinks, HIGH_VALUE_OUTLINK_RE, fixBrandSpelling } from "../src/snippet-hygiene.mjs";
 
 // 修复 sanitizeSnippet 测试（输入是干净的 prose，不是空字符串）
 test("sanitizeSnippet: strips 'As an AI language model' disclaimers", () => {
@@ -166,4 +166,20 @@ test("HIGH_VALUE_OUTLINK_RE: 仓库子路径/版本号/官网文章可完整匹�
   assert.match("https://arxiv.org/pdf/2608.11274v2", HIGH_VALUE_OUTLINK_RE);
   assert.match("https://www.anthropic.com/news/claude", HIGH_VALUE_OUTLINK_RE);
   assert.doesNotMatch("https://linux.do/t/2830124", HIGH_VALUE_OUTLINK_RE);
+});
+
+// 2026-09-24 review：linux.do 原帖标题 "Anthoropic" typo 曾原样渲染到 AI 海报。
+test("fixBrandSpelling: corrects confirmed brand typos (Anthoropic -> Anthropic)", () => {
+  assert.equal(fixBrandSpelling("Anthoropic 宣布推出 LSVP"), "Anthropic 宣布推出 LSVP");
+  assert.equal(fixBrandSpelling("anthoropic 发布新模型"), "Anthropic 发布新模型");
+  // 未在修复表里的词不动。
+  assert.equal(fixBrandSpelling("Anthropic 正常标题"), "Anthropic 正常标题");
+  assert.equal(fixBrandSpelling(""), "");
+  assert.equal(fixBrandSpelling(null), null);
+});
+
+test("sanitizeSnippet: brand typos fixed at the ingest choke point", () => {
+  // The poster path (collectAiHeadlines), the source cards, and the synthesis
+  // prompt all sanitize titles here, so one fix covers all three surfaces.
+  assert.equal(sanitizeSnippet("Anthoropic 宣布推出 LSVP", { maxChars: 200 }), "Anthropic 宣布推出 LSVP");
 });

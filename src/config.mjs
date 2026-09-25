@@ -447,8 +447,14 @@ export function resolveAltChannel(config) {
   if (!config.aiAltChannel) return null;
   const model = config.aiAltModel || "gemini-3.6-flash";
   const slug = modelSlug(model);
+  // The name is a bare note name: writeSection appends ".md" itself and the
+  // cross-link wikilink uses the same name. Strip a user-supplied ".md"
+  // (the .env.example even shows "AI-Luna.md") so we don't write
+  // "AI-Luna.md.md" while linking to "[[AI-Luna.md]]" (2026-09-25 Copilot
+  // review).
+  const raw = config.aiAltFile || `AI-${slug}`;
   return {
-    name: config.aiAltFile || `AI-${slug}`,
+    name: raw.replace(/\.md$/i, ""),
     model,
     queryTemplate: config.aiAltQueryTemplate || config.aiQueryTemplate,
     // Alt writers are slower than grok-4.5 on /chat/completions, so they get a

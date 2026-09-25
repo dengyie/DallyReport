@@ -1,5 +1,20 @@
 // Pure Markdown rendering helpers. No I/O, easy to unit test.
 
+// Strip markdown formatting down to plain text. Scraped titles (notably v2ex
+// listing extracts) sometimes arrive carrying markdown fragments — e.g.
+// `标题](/t/123) **[user](/member/u)** • 34 mins ago` — which then leak into
+// rendered link text as escaped `\]\(...\)` noise. Run titles through this
+// BEFORE any markdown-escaping step.
+export function stripMarkdown(s) {
+  if (!s) return "";
+  return String(s)
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // [text](url) -> text
+    .replace(/\]\([^)]*\)/g, "") // orphan ](url) tails -> ""
+    .replace(/(\*\*|__)(.*?)\1/g, "$2") // **bold** / __bold__ -> bold
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 export function frontMatter(fields) {
   const lines = ["---"];
   for (const [k, v] of Object.entries(fields)) {
