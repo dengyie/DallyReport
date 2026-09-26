@@ -247,7 +247,14 @@ export function buildContextualPrompt(basePrompt, { date, repos }) {
   const top = repos.slice(0, 10);
   const list = top
     .map((r, i) => {
-      const desc = oneSentence(r.description);
+      // Third-party text: the trending `description` is authored verbatim by
+      // whoever owns the repo, and it lands in an IMAGE prompt — image models
+      // are less steerable than chat models, so a hostile description is a
+      // direct channel for painted-on text. Run it through exactly the same
+      // hygiene the AI-poster path applies to titles/snippets
+      // (collectAiHeadlines) before the one-sentence collapse. maxChars bounds
+      // the prompt payload, matching the 200-char title bound there.
+      const desc = oneSentence(sanitizeSnippet(stripMarkdown(r.description), { maxChars: 200 }));
       const forks = r.forks != null ? r.forks.toLocaleString() : "—";
       const head = `${i + 1}. ${r.repo} — 今日 Star +${r.starsToday}，总 Star ${r.starsTotal != null ? r.starsTotal.toLocaleString() : "—"}，Fork ${forks}`;
       return desc ? `${head}（原始简介：${desc}）` : head;
@@ -318,13 +325,22 @@ export async function decodeImageBuffer(json, { fetchImpl = globalThis.fetch, ti
   const d0 = json?.data?.[0];
   if (!d0) throw imgErr("IMG_EMPTY", "生图响应 data 为空");
   if (d0.b64_json) {
-    const encoded = String(d0.b64_json).trim();
-    const validBase64 =
-      encoded.length > 0 &&
-      encoded.length % 4 === 0 &&
-      /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded);
-    if (!validBase64) {
-      throw imgErr("IMG_NO_IMAGE_BYTES", "b64_json 不是合法的 base64 图片数据");
+    // Normalize the shapes a real gateway emits BEFORE decoding. The previous
+    // strict pre-check demanded `length % 4 === 0` and zero whitespace, so a
+    // line-wrapped (RFC 2045 / PEM-style) payload, an unpadded one, or a
+    // `data:image/png;base64,` URL all failed with IMG_NO_IMAGE_BYTES — burning
+    // a full retry cycle plus the generations fallback for a payload that was a
+    // perfectly good PNG. The decoded bytes are validated with isPng below,
+    // which is the real correctness check: Buffer.from(s, "base64") silently
+    // ignores stray characters, so any garbage still fails on signature. That
+    // keeps IMG_NO_IMAGE_BYTES meaning "the gateway gave us non-PNG bytes"
+    // rather than "the gateway formatted its base64 unusually".
+    const encoded = String(d0.b64_json)
+      .trim()
+      .replace(/^data:[^;,]*;base64,/i, "") // data URL wrapper
+      .replace(/\s+/g, ""); // line-wrapped / padded-with-spaces payloads
+    if (!encoded) {
+      throw imgErr("IMG_NO_IMAGE_BYTES", "b64_json 为空");
     }
     const buf = Buffer.from(encoded, "base64");
     if (!isPng(buf)) {

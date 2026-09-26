@@ -86,6 +86,15 @@ function startHeartbeat(lockPath, release) {
   };
 }
 
+// A stale lock we cannot remove (unreadable file, permissions, run.lock created
+// as a directory) must NOT spin forever. The whole acquire loop is synchronous, so
+// nothing yields the event loop: an unbounded retry here pegs a core at 100% and
+// hangs the 09:00 launchd run with no log line and no release(). Bound the
+// no-progress retries and surface a real error that run.mjs can report instead.
+// A few attempts also absorb the legit races (a competing launcher's unlink, an
+// iCloud placeholder materialising) without treating them as failures.
+const MAX_UNRESOLVABLE_STALE_RETRIES = 5;
+
 export function acquireSingletonLock(lockPath, { isAlive = defaultIsAlive } = {}) {
   // Remove the lock only if it still belongs to US. If another process age-took
   // over our lock while we were still running (a slow run past MAX_LOCK_AGE_MS),
@@ -105,6 +114,7 @@ export function acquireSingletonLock(lockPath, { isAlive = defaultIsAlive } = {}
   };
 
   let madeDir = false; // only auto-create the lock's parent once
+  let unresolvedStale = 0; // consecutive iterations that neither acquired nor cleared a stale lock
   for (;;) {
     try {
       const now = new Date().toISOString();
@@ -186,9 +196,25 @@ export function acquireSingletonLock(lockPath, { isAlive = defaultIsAlive } = {}
     if (stillStale) {
       try {
         fs.unlinkSync(lockPath);
+        unresolvedStale = 0; // cleared it — real progress
+        continue;
       } catch {
-        /* raced again — loop back */
+        /* raced again — or the lock is unremovable (see below) */
       }
+    } else if (observed !== null) {
+      // The bytes changed under us: another launcher is actively churning the
+      // lock, so the next iteration competes normally. Not a stuck state.
+      unresolvedStale = 0;
+    }
+    // No progress: either the lock is unreadable (read throws, so the guarded
+    // unlink can never match) or it is readable and stale but unlink is denied.
+    // Retrying forever would spin the synchronous loop at 100% CPU.
+    unresolvedStale += 1;
+    if (unresolvedStale >= MAX_UNRESOLVABLE_STALE_RETRIES) {
+      throw new Error(
+        `无法获取锁 ${lockPath}：连续 ${unresolvedStale} 次判定为陈旧但无法读取或删除` +
+          `（可能是权限不足、run.lock 被创建成目录，或文件被同步程序占用）`,
+      );
     }
     // loop back to retry the acquire with the stale lock removed
   }

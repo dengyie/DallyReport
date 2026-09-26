@@ -7,9 +7,24 @@ import {
   fetchArxivDaily,
   beijingMidnightMs,
   fetchAllDailySources,
+  fetchOfficialBlogRss,
+  fetchOpenaiDaily,
+  fetchHfDaily,
+  fetchGoogleAiDaily,
+  fetchGoogleResearchDaily,
 } from "../src/sources-daily.mjs";
 
 const TODAY = "2026-08-10";
+
+// A minimal RSS 2.0 body. The vendor RSS fetchers had ZERO test coverage, which
+// is how a 12-day cache-key collision shipped unnoticed.
+const FEED_XML = `<?xml version="1.0"?><rss version="2.0"><channel>
+  <item>
+    <title>Introducing a new model</title>
+    <link>https://example.com/blog/new-model</link>
+    <pubDate>Mon, 10 Aug 2026 08:00:00 GMT</pubDate>
+  </item>
+</channel></rss>`;
 
 test("beijingMidnightMs: 08-10 Beijing midnight = 08-09T16:00Z", () => {
   assert.equal(beijingMidnightMs(TODAY), Date.UTC(2026, 7, 9, 16, 0, 0));
@@ -213,4 +228,221 @@ test("fetchAllDailySources: combines sources, per-source failure isolated", asyn
   } finally {
     globalThis.fetch = original;
   }
+});
+// ---- 2026-09-26 review: EFFECT-level regressions ----
+// The suite previously asserted the SHAPE of the collectors (returns an array, a
+// source has a url) rather than what actually landed. Four silent production
+// regressions passed it: the vendor cache-key collision, the always-true AI
+// filter, the unwired limits, and the invisible hard-source outage.
+
+// P1: HuggingFace, blog.google and research.google all resolved to ONE
+// `<date>-hf-feed.txt` because the cache key was inferred with
+// `url.includes("openai") ? "openai" : "hf"`. The three run concurrently, so the
+// last writer won and the others were re-read from a cache that no longer held
+// them — 12 consecutive days of -hf-feed.txt on disk contained Google bodies.
+test("fetchOfficialBlogRss: two vendors write DIFFERENT cache files", async () => {
+  const seen = [];
+  const runFetch = async (url, config, opts) => {
+    seen.push(opts.cacheFile);
+    return { text: FEED_XML };
+  };
+  const config = { date: TODAY, cacheDir: "/cache" };
+  await fetchOfficialBlogRss("https://huggingface.co/blog/feed.xml", config, {
+    site: "hf", runFetch,
+  });
+  await fetchOfficialBlogRss("https://blog.google/technology/ai/rss", config, {
+    site: "google-ai", runFetch,
+  });
+  await fetchOfficialBlogRss("https://research.google/blog/rss", config, {
+    site: "google-research", runFetch,
+  });
+  assert.equal(new Set(seen).size, 3, "three sources, three distinct cache files");
+  assert.deepEqual(seen, [
+    "/cache/2026-08-10-hf-feed.txt",
+    "/cache/2026-08-10-google-ai-feed.txt",
+    "/cache/2026-08-10-google-research-feed.txt",
+  ]);
+});
+
+test("fetchOfficialBlogRss: site is required, so the key can never be inferred again", async () => {
+  await assert.rejects(
+    () => fetchOfficialBlogRss("https://huggingface.co/blog/feed.xml", { date: TODAY, cacheDir: "/c" }),
+    /必须显式传入 site/,
+    "a missing site is a loud error, not a silent collision",
+  );
+});
+
+test("fetchOpenaiDaily / fetchHfDaily / Google: provider labels match their own feed", async () => {
+  const runFetch = async () => ({ text: FEED_XML });
+  const config = { date: TODAY, cacheDir: "/cache" };
+  const openai = await fetchOpenaiDaily(config, { runFetch });
+  const hf = await fetchHfDaily(config, { runFetch });
+  const gAi = await fetchGoogleAiDaily(config, { runFetch });
+  const gRes = await fetchGoogleResearchDaily(config, { runFetch });
+  assert.equal(openai[0].provider, "openai-blog");
+  assert.equal(hf[0].provider, "hf-blog");
+  assert.equal(gAi[0].provider, "google-ai-blog");
+  assert.equal(gRes[0].provider, "google-research-blog");
+});
+
+// P1: the AI-relevance filter's first alternative was a bare, unanchored `ai`,
+// which matched inside "email", "maintain", "available", "domain", "Rainbow" —
+// so it was effectively always true and HN contributed its first N stories
+// regardless of subject.
+test("isAiRelevant (via fetchHackerNewsDaily): unrelated HN stories are filtered OUT", async () => {
+  const NON_AI = [
+    "Show HN: A tiny email client",
+    "Kubernetes 1.34 available now",
+    "Domain modeling in Rust",
+    "Understanding the daily newsletter",
+    "The html spec turns 30",
+    "Rainbow table attack explained",
+    "A thread about mainframes",
+  ];
+  const out = await hnHarness(
+    NON_AI.map((title, i) => ({
+      title,
+      url: `https://example.com/${i}`,
+      type: "story",
+      time: Math.floor(Date.now() / 1000),
+    })),
+    { limit: 12 },
+  );
+  assert.equal(out.length, 0, `no non-AI story may pass, got: ${out.map((s) => s.title)}`);
+});
+
+test("isAiRelevant: genuinely AI stories still pass", async () => {
+  const AI = [
+    "OpenAI releases a new model",
+    "Anthropic ships Claude for agents",
+    "大模型推理成本大幅下降",
+    "Show HN: a tiny llm runtime",
+  ];
+  const out = await hnHarness(
+    AI.map((title, i) => ({
+      title,
+      url: `https://example.com/${i}`,
+      type: "story",
+      time: Math.floor(Date.now() / 1000),
+    })),
+    { limit: 12 },
+  );
+  assert.equal(out.length, AI.length, `all AI stories pass, got: ${out.map((s) => s.title)}`);
+});
+
+// P2: the six `*DailyLimit` keys were read and validated but never passed to any
+// fetcher, so every one fell back to its own hardcoded default.
+test("fetchAllDailySources: the config limits actually reach the fetchers", async () => {
+  const titles = Array.from({ length: 10 }, (_, i) => ({
+    title: `OpenAI model update ${i}`,
+    url: `https://example.com/${i}`,
+    type: "story",
+    time: Math.floor(Date.now() / 1000),
+  }));
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (url.includes("topstories")) {
+      return { ok: true, json: async () => titles.map((_, i) => i + 1) };
+    }
+    const id = Number(url.match(/item\/(\d+)\.json/)?.[1] || 0);
+    return { ok: true, json: async () => titles[id - 1] };
+  };
+  try {
+    const out = await fetchAllDailySources({
+      date: TODAY,
+      cacheDir: "/tmp/nonexistent-cache-dir-xyz",
+      hnDailyEnabled: true,
+      hnDailyLimit: 2, // <- the knob under test
+      kr36DailyEnabled: false,
+      arxivDailyEnabled: false,
+      openaiDailyEnabled: false,
+      hfDailyEnabled: false,
+      googleAiDailyEnabled: false,
+      googleResearchDailyEnabled: false,
+    });
+    assert.equal(out.length, 2, `HN_DAILY_LIMIT=2 must yield 2, got ${out.length}`);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("fetchAllDailySources: aggregateDailySourceLimit caps the merged pool", async () => {
+  const titles = Array.from({ length: 10 }, (_, i) => ({
+    title: `OpenAI model update ${i}`,
+    url: `https://example.com/${i}`,
+    type: "story",
+    time: Math.floor(Date.now() / 1000),
+  }));
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (url.includes("topstories")) {
+      return { ok: true, json: async () => titles.map((_, i) => i + 1) };
+    }
+    const id = Number(url.match(/item\/(\d+)\.json/)?.[1] || 0);
+    return { ok: true, json: async () => titles[id - 1] };
+  };
+  try {
+    const out = await fetchAllDailySources({
+      date: TODAY,
+      cacheDir: "/tmp/nonexistent-cache-dir-xyz",
+      hnDailyEnabled: true,
+      hnDailyLimit: 10,
+      aggregateDailySourceLimit: 3,
+      kr36DailyEnabled: false,
+      arxivDailyEnabled: false,
+      openaiDailyEnabled: false,
+      hfDailyEnabled: false,
+      googleAiDailyEnabled: false,
+      googleResearchDailyEnabled: false,
+    });
+    assert.equal(out.length, 3, "the aggregate cap is applied to the merged result");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+// P2: every fetcher swallowed its own error and returned [], so a full outage of
+// the same-day hard sources printed a clean ✅. The diagnostics are non-enumerable
+// so the array still behaves like a plain list.
+test("fetchAllDailySources: a hard-source outage is reported, not silent", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw Object.assign(new Error("network down"), { code: "ECONNRESET" });
+  };
+  try {
+    const out = await fetchAllDailySources({
+      date: TODAY,
+      cacheDir: "/tmp/nonexistent-cache-dir-xyz",
+      hnDailyEnabled: true,
+      hnDailyLimit: 5,
+      kr36DailyEnabled: false,
+      arxivDailyEnabled: false,
+      openaiDailyEnabled: false,
+      hfDailyEnabled: false,
+      googleAiDailyEnabled: false,
+      googleResearchDailyEnabled: false,
+    });
+    assert.equal(out.length, 0, "no sources, as expected during an outage");
+    const diag = out.dailyDiagnostics;
+    assert.ok(diag, "diagnostics are attached to the returned array");
+    assert.ok(diag.hackernews, `the failing provider is named, got ${JSON.stringify(diag)}`);
+    assert.deepEqual(Object.keys(out), [], "diagnostics stay non-enumerable");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("fetchAllDailySources: a healthy run carries no diagnostics", async () => {
+  const out = await fetchAllDailySources({
+    date: TODAY,
+    cacheDir: "/tmp/nonexistent-cache-dir-xyz",
+    hnDailyEnabled: false,
+    kr36DailyEnabled: false,
+    arxivDailyEnabled: false,
+    openaiDailyEnabled: false,
+    hfDailyEnabled: false,
+    googleAiDailyEnabled: false,
+    googleResearchDailyEnabled: false,
+  });
+  assert.equal(out.dailyDiagnostics, undefined, "a clean run reports nothing");
 });

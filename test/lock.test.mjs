@@ -206,3 +206,84 @@ test("isPidAlive: returns false for a nonexistent PID", () => {
   // 999999 is almost certainly unused on any real system.
   assert.equal(isPidAlive(999999), false, "nonexistent PID is not alive");
 });
+// ---- 2026-09-26 review P0: the acquire loop must never spin forever ----
+// The whole acquire loop is synchronous, so a stale lock that can be neither read
+// nor removed used to spin at 100% CPU forever: no yield, no log, and the exit
+// handler never ran so the lock was never released either. Reproduced on a
+// chmod-000 lock, a lock created as a DIRECTORY, and an unlink-denied parent dir.
+// The fix bounds consecutive no-progress retries and throws a diagnostic that
+// run.mjs can report.
+
+test("acquireSingletonLock: a lock created as a DIRECTORY throws instead of spinning", () => {
+  const dir = tmpDir();
+  const lp = path.join(dir, "run.lock");
+  // A directory where the lock file should be: openSync("wx") throws EISDIR, and
+  // readFileSync/unlinkSync on a directory also throw on every iteration.
+  fs.mkdirSync(lp);
+  const t0 = Date.now();
+  assert.throws(
+    () => acquireSingletonLock(lp),
+    (err) => {
+      assert.match(err.message, /无法获取锁/, "diagnostic names the failure");
+      assert.match(err.message, /权限|目录/, "diagnostic lists the likely causes");
+      return true;
+    },
+    "acquire fails loudly rather than hanging",
+  );
+  assert.ok(Date.now() - t0 < 2000, "fails fast (no 100% CPU spin)");
+});
+
+test("acquireSingletonLock: an unremovable stale lock throws after bounded retries", () => {
+  // Readable + stale (dead PID), but the parent directory denies unlink, so the
+  // guarded unlink never takes effect. The loop must give up, not spin.
+  const dir = tmpDir();
+  const lp = path.join(dir, "run.lock");
+  // A PID that cannot be alive, plus an ancient timestamp -> unambiguously stale.
+  fs.writeFileSync(lp, `999999\n2020-01-01T00:00:00.000Z\n2020-01-01T00:00:00.000Z\n`);
+  fs.chmodSync(dir, 0o500); // r-x: readable, but no write bit -> unlink denied
+  try {
+    const t0 = Date.now();
+    assert.throws(() => acquireSingletonLock(lp), /无法获取锁/, "gives up with a diagnostic");
+    assert.ok(Date.now() - t0 < 2000, "gives up fast instead of spinning");
+    assert.equal(fs.existsSync(lp), true, "the undeletable lock was left in place");
+  } finally {
+    fs.chmodSync(dir, 0o700);
+  }
+});
+
+test("acquireSingletonLock: an unreadable lock throws instead of spinning", () => {
+  // chmod 000: readFileSync throws, so `observed` stays null and the guarded
+  // unlink can never match -> previously an infinite loop.
+  const dir = tmpDir();
+  const lp = path.join(dir, "run.lock");
+  fs.writeFileSync(lp, `999999\n2020-01-01T00:00:00.000Z\n2020-01-01T00:00:00.000Z\n`);
+  fs.chmodSync(lp, 0o000);
+  try {
+    const t0 = Date.now();
+    // Root/CAP_DAC_OVERRIDE can bypass mode 000; skip rather than assert a
+    // platform behaviour that isn't the code's fault.
+    let readable = true;
+    try {
+      fs.readFileSync(lp, "utf8");
+    } catch {
+      readable = false;
+    }
+    if (readable) return; // running as root — mode 000 is not enforced
+    assert.throws(() => acquireSingletonLock(lp), /无法获取锁/, "gives up with a diagnostic");
+    assert.ok(Date.now() - t0 < 2000, "gives up fast instead of spinning");
+  } finally {
+    fs.chmodSync(lp, 0o600);
+  }
+});
+
+test("acquireSingletonLock: a stale lock that CAN be removed is still taken over", () => {
+  // The bounded-retry guard must not break the normal crash-leftover takeover.
+  const dir = tmpDir();
+  const lp = path.join(dir, "run.lock");
+  fs.writeFileSync(lp, `999999\n2020-01-01T00:00:00.000Z\n2020-01-01T00:00:00.000Z\n`);
+  const lock = acquireSingletonLock(lp);
+  assert.equal(lock.error, undefined, "stale lock is taken over");
+  assert.equal(fs.readFileSync(lp, "utf8").split("\n")[0], String(process.pid), "we own it now");
+  lock.release();
+  assert.equal(fs.existsSync(lp), false, "released cleanly");
+});

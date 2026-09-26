@@ -9,6 +9,35 @@
 
 import { runFetch } from "./grok-cli.mjs";
 
+// Attach per-source failure diagnostics to a source array WITHOUT making them
+// enumerable, so the array still behaves like a plain list everywhere it is
+// spread/concatenated (spread and JSON.stringify skip non-enumerable props).
+// 2026-09-26 review P2: every fetcher below used to swallow its own errors and
+// return a bare [], so the `dailySourcesError` branch in ai-news.mjs could never
+// fire — a full outage of the same-day hard sources printed a clean success.
+// The diagnostics ride along here so the aggregate can report which source died.
+function attachDailyDiagnostics(sources, provider, failures) {
+  if (!Array.isArray(sources)) return sources;
+  if (!failures || failures.length === 0) return sources;
+  Object.defineProperty(sources, "dailyDiagnostics", {
+    value: { provider, failures: failures.slice(0, 5), failureCount: failures.length },
+    enumerable: false,
+    configurable: true,
+  });
+  return sources;
+}
+
+/** Merge the per-source diagnostics of several collector arrays into one object. */
+function collectDailyDiagnostics(arrays) {
+  const out = {};
+  for (const arr of arrays) {
+    const d = arr && arr.dailyDiagnostics;
+    if (!d) continue;
+    if (d.failureCount > 0) out[d.provider] = { count: d.failureCount, sample: d.failures };
+  }
+  return out;
+}
+
 // --- Hacker News (firebase API, zero-config) ---
 
 const HN_TOP = "https://hacker-news.firebaseio.com/v0/topstories.json";
@@ -18,17 +47,44 @@ const HN_ITEM = (id) => `https://hacker-news.firebaseio.com/v0/item/${id}.json`;
 // HN batch size: how many top + best IDs to fetch details for. Larger = more
 // AI-relevant hits, especially on quiet days. 100 = top 50 + best 50 deduped.
 const HN_BATCH = 100;
+// Every HN fetch needs a deadline. Promise.allSettled waits for ALL of them, so
+// one hung firebase connection used to stall the whole daily run with no bound.
+// 2026-09-26 review P3.
+const HN_FETCH_TIMEOUT_MS = 10_000;
+// Concurrency for the item-detail fan-out. 100 parallel requests to one host is
+// both a rate-limit magnet and a thundering herd; a failing item is simply
+// skipped, so a smaller window loses nothing that was going to succeed.
+const HN_ITEM_CONCURRENCY = 8;
+
+/** Map `items` through `fn` with at most `concurrency` in flight at a time. */
+async function mapWithConcurrency(items, concurrency, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (next < items.length) {
+      const idx = next++;
+      try {
+        results[idx] = { status: "fulfilled", value: await fn(items[idx], idx) };
+      } catch (reason) {
+        results[idx] = { status: "rejected", reason };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 /**
  * Fetch today's top Hacker News stories, filter by AI relevance via keyword,
  * return same-day source cards. Uses firebase REST API — zero config, no auth.
  * Merges topstories + beststories (dedup by id) for broader coverage.
  */
-export async function fetchHackerNewsDaily(config, { limit = 5 } = {}) {
+export async function fetchHackerNewsDaily(config, { limit = 5, fetchImpl = fetch } = {}) {
+  const failures = [];
   try {
     const [topResp, bestResp] = await Promise.all([
-      fetch(HN_TOP),
-      fetch(HN_BEST),
+      fetchImpl(HN_TOP, { signal: AbortSignal.timeout(HN_FETCH_TIMEOUT_MS) }),
+      fetchImpl(HN_BEST, { signal: AbortSignal.timeout(HN_FETCH_TIMEOUT_MS) }),
     ]);
     const ids = [];
     for (const resp of [topResp, bestResp]) {
@@ -49,11 +105,21 @@ export async function fetchHackerNewsDaily(config, { limit = 5 } = {}) {
     // Get today's Beijing start time in epoch ms
     const todayStart = beijingMidnightMs(config.date);
 
-    // Fetch item details in parallel, cap at HN_BATCH (top 50 + best 50 deduped).
+    // Fetch item details with bounded concurrency, cap at HN_BATCH.
     const batch = unique.slice(0, HN_BATCH);
-    const items = await Promise.allSettled(
-      batch.map((id) => fetch(HN_ITEM(id)).then((r) => (r.ok ? r.json() : null)))
-    );
+    const items = await mapWithConcurrency(batch, HN_ITEM_CONCURRENCY, async (id) => {
+      try {
+        const r = await fetchImpl(HN_ITEM(id), {
+          signal: AbortSignal.timeout(HN_FETCH_TIMEOUT_MS),
+        });
+        return r.ok ? r.json() : null;
+      } catch (err) {
+        // A timed-out / throttled item is expected under load; record it so a
+        // fully-degraded HN run is still visible instead of looking like a quiet day.
+        failures.push({ id, reason: err?.code || err?.name || "error" });
+        return null;
+      }
+    });
 
     const sources = [];
     for (const result of items) {
@@ -78,16 +144,25 @@ export async function fetchHackerNewsDaily(config, { limit = 5 } = {}) {
       });
       if (sources.length >= limit) break;
     }
-    return sources;
-  } catch {
-    return [];
+    return attachDailyDiagnostics(sources, "hackernews", failures);
+  } catch (err) {
+    return attachDailyDiagnostics([], "hackernews", [
+      { reason: err?.code || err?.name || "error" },
+    ]);
   }
 }
 
 function isAiRelevant(title, url) {
   const text = `${title} ${url || ""}`.toLowerCase();
-  // Broad AI/tech keyword set
-  return /ai|artificial intelligence|llm|gpt|chatgpt|claude|anthropic|openai|deepseek|gemini|mistral|llama|cohere|perplexity|hugging|langchain|rag|agent|codex|cursor|copilot|model|大模型|machine learning|ml|neural|transformer|diffusion|token|reasoning|fine.?tun|rlhf|dpo|grpo|loRA|quantization|inference|vllm|ollama|opencode|ide.*ai|ai.*coding|agent.*harness|tool.*use|mcp|function.*call/i.test(text);
+  // 2026-09-26 review P1: the alternation's first branch used to be a bare,
+  // unanchored `ai`, which matches inside ordinary English — "email",
+  // "maintain", "available", "domain", "chain", "detail", "Rainbow" — so the
+  // filter was effectively always true and HN contributed its first N stories
+  // regardless of topic. Latin branches are now word-anchored; CJK branches have
+  // no word boundaries to anchor to and stay unanchored.
+  return /\bai\b|artificial intelligence|\bllms?\b|\bgpt\b|chatgpt|claude|anthropic|openai|deepseek|gemini|mistral|llama|cohere|perplexity|hugging ?face|langchain|\brag\b|\bagents?\b|codex|cursor|copilot|\bmodels?\b|大模型|machine learning|\bml\b|neural|transformer|diffusion|\btokens?\b|reasoning|fine.?tun|rlhf|dpo|grpo|\blora\b|quantization|inference|vllm|ollama|opencode|ai.*coding|agent.*harness|tool.*use|\bmcp\b|function.*call/i.test(
+    text,
+  );
 }
 
 // --- 36kr RSS (zero-config, Chinese tech news) ---
@@ -171,8 +246,8 @@ export async function fetch36krDaily(config, { limit = 5, runFetch: doFetch } = 
       if (sources.length >= limit) break;
     }
     return sources;
-  } catch {
-    return [];
+  } catch (err) {
+    return attachDailyDiagnostics([], "36kr", [{ reason: err?.code || err?.name || "error" }]);
   }
 }
 
@@ -226,22 +301,37 @@ function decodeEntities(s) {
 }
 
 /**
- * Fetch an official vendor blog RSS (OpenAI / HF) filtered to same-day (Beijing)
- * and AI-relevant, returned as standard source cards.
+ * Fetch an official vendor blog RSS (OpenAI / HF / Google) filtered to same-day
+ * (Beijing) and AI-relevant, returned as standard source cards.
+ *
+ * `site` identifies the source and MUST be passed explicitly: the cache filename
+ * used to be derived from the URL with `url.includes("openai") ? "openai" : "hf"`,
+ * so HuggingFace, blog.google and research.google all collided on ONE
+ * `<date>-hf-feed.txt`. The three run concurrently in fetchAllDailySources, so
+ * whichever finished last overwrote the others and the other two were re-read
+ * from a cache that no longer contained them — verified on disk: 12 consecutive
+ * days (2026-08-26 … 2026-09-11) of `-hf-feed.txt` held Google bodies, not HF.
+ * Inferred identity is exactly the kind of surface that silently rots.
  */
-export async function fetchOfficialBlogRss(url, config, { limit = 5, runFetch: doFetch } = {}) {
+export async function fetchOfficialBlogRss(
+  url,
+  config,
+  { limit = 5, runFetch: doFetch, site, provider } = {},
+) {
+  if (!site) throw new Error("fetchOfficialBlogRss 必须显式传入 site（用于缓存与来源标识）");
   try {
     const fetch = doFetch || runFetch;
     const res = await fetch(url, config, {
       maxChars: 60000,
       provider: "direct",
-      cacheFile: config.cacheDir
-        ? `${config.cacheDir}/${config.date}-${url.includes("openai") ? "openai" : "hf"}-feed.txt`
-        : undefined,
+      cacheFile: config.cacheDir ? `${config.cacheDir}/${config.date}-${site}-feed.txt` : undefined,
     });
     const text = res?.text || "";
+    if (!text) return attachDailyDiagnostics([], site, [{ reason: "empty-response" }]);
     const items = parseRssItems(text);
-    if (!items.length) return [];
+    if (!items.length) {
+      return attachDailyDiagnostics([], site, [{ reason: "no-rss-items" }]);
+    }
 
     const todayStart = beijingMidnightMs(config.date);
     const sources = [];
@@ -252,7 +342,7 @@ export async function fetchOfficialBlogRss(url, config, { limit = 5, runFetch: d
         url: item.url,
         title: item.title,
         snippet: item.title, // blog RSS has no excerpt; title carries the signal
-        provider: url.includes("openai") ? "openai-blog" : url.includes("huggingface") ? "hf-blog" : url.includes("google") ? "google-blog" : "vendor-blog",
+        provider: provider || site,
         score: 0,
         publishedAt: item.pubDateMs ?? Date.now(),
         // Official blogs don't publish daily; grace 1 day so yesterday's
@@ -261,26 +351,48 @@ export async function fetchOfficialBlogRss(url, config, { limit = 5, runFetch: d
       });
       if (sources.length >= limit) break;
     }
+    // A feed that parsed fine but yielded nothing for today is a normal quiet day
+    // on these blogs — not a failure. Only transport/parse problems are reported.
     return sources;
-  } catch {
-    return [];
+  } catch (err) {
+    return attachDailyDiagnostics([], site, [{ reason: err?.code || err?.name || "error" }]);
   }
 }
 
 export async function fetchOpenaiDaily(config, opts = {}) {
-  return fetchOfficialBlogRss(OPENAI_FEED, config, { limit: opts.limit ?? 5, runFetch: opts.runFetch });
+  return fetchOfficialBlogRss(OPENAI_FEED, config, {
+    limit: opts.limit ?? 5,
+    runFetch: opts.runFetch,
+    site: "openai",
+    provider: "openai-blog",
+  });
 }
 
 export async function fetchHfDaily(config, opts = {}) {
-  return fetchOfficialBlogRss(HF_FEED, config, { limit: opts.limit ?? 5, runFetch: opts.runFetch });
+  return fetchOfficialBlogRss(HF_FEED, config, {
+    limit: opts.limit ?? 5,
+    runFetch: opts.runFetch,
+    site: "hf",
+    provider: "hf-blog",
+  });
 }
 
 export async function fetchGoogleAiDaily(config, opts = {}) {
-  return fetchOfficialBlogRss(GOOGLE_AI_FEED, config, { limit: opts.limit ?? 4, runFetch: opts.runFetch });
+  return fetchOfficialBlogRss(GOOGLE_AI_FEED, config, {
+    limit: opts.limit ?? 4,
+    runFetch: opts.runFetch,
+    site: "google-ai",
+    provider: "google-ai-blog",
+  });
 }
 
 export async function fetchGoogleResearchDaily(config, opts = {}) {
-  return fetchOfficialBlogRss(GOOGLE_RESEARCH_FEED, config, { limit: opts.limit ?? 4, runFetch: opts.runFetch });
+  return fetchOfficialBlogRss(GOOGLE_RESEARCH_FEED, config, {
+    limit: opts.limit ?? 4,
+    runFetch: opts.runFetch,
+    site: "google-research",
+    provider: "google-research-blog",
+  });
 }
 
 // --- arXiv cs.AI API (zero-config, same-day papers) ---
@@ -345,12 +457,10 @@ export async function fetchArxivDaily(config, { limit = 5, runFetch: doFetch } =
       if (sources.length >= limit) break;
     }
     return sources;
-  } catch {
-    return [];
+  } catch (err) {
+    return attachDailyDiagnostics([], "arxiv", [{ reason: err?.code || err?.name || "error" }]);
   }
 }
-
-// --- helpers ---
 
 /**
  * Compute the epoch ms of midnight (Beijing time) for a given date string.
@@ -368,28 +478,52 @@ export function beijingMidnightMs(dateStr) {
  * Merged into ai-news-section's community sources slot.
  */
 export async function fetchAllDailySources(config) {
+  // 2026-09-26 review P2: the six `*DailyLimit` keys were read, validated and
+  // documented in config.mjs but never passed to anything, so every fetcher fell
+  // back to its own hardcoded default and an operator tuning HN_DAILY_LIMIT in
+  // .env saw no effect and no warning. `aggregateDailySourceLimit` had no
+  // consumer at all, leaving the merged pool unbounded.
   const [hn, kr36, arxiv, openai, hf, googleAi, googleResearch] = await Promise.all([
     config.hnDailyEnabled !== false
-      ? fetchHackerNewsDaily(config).catch(() => [])
+      ? fetchHackerNewsDaily(config, { limit: config.hnDailyLimit }).catch(() => [])
       : Promise.resolve([]),
     config.kr36DailyEnabled !== false
-      ? fetch36krDaily(config).catch(() => [])
+      ? fetch36krDaily(config, { limit: config.kr36DailyLimit }).catch(() => [])
       : Promise.resolve([]),
     config.arxivDailyEnabled !== false
-      ? fetchArxivDaily(config).catch(() => [])
+      ? fetchArxivDaily(config, { limit: config.arxivDailyLimit }).catch(() => [])
       : Promise.resolve([]),
     config.openaiDailyEnabled !== false
-      ? fetchOpenaiDaily(config).catch(() => [])
+      ? fetchOpenaiDaily(config, { limit: config.openaiDailyLimit }).catch(() => [])
       : Promise.resolve([]),
     config.hfDailyEnabled !== false
-      ? fetchHfDaily(config).catch(() => [])
+      ? fetchHfDaily(config, { limit: config.hfDailyLimit }).catch(() => [])
       : Promise.resolve([]),
     config.googleAiDailyEnabled !== false
-      ? fetchGoogleAiDaily(config).catch(() => [])
+      ? fetchGoogleAiDaily(config, { limit: config.googleAiDailyLimit }).catch(() => [])
       : Promise.resolve([]),
     config.googleResearchDailyEnabled !== false
-      ? fetchGoogleResearchDaily(config).catch(() => [])
+      ? fetchGoogleResearchDaily(config, { limit: config.googleResearchDailyLimit }).catch(
+          () => [],
+        )
       : Promise.resolve([]),
   ]);
-  return [...hn, ...kr36, ...arxiv, ...openai, ...hf, ...googleAi, ...googleResearch];
+  const parts = [hn, kr36, arxiv, openai, hf, googleAi, googleResearch];
+  const merged = parts.flat();
+  const cap = Number.isFinite(config.aggregateDailySourceLimit)
+    ? config.aggregateDailySourceLimit
+    : null;
+  // The diagnostics must be read BEFORE any slice, and attached to the array that
+  // is actually returned — a caller spreading the result would otherwise drop a
+  // property that was never enumerable in the first place.
+  const diagnostics = collectDailyDiagnostics(parts);
+  const capped = cap != null && cap > 0 ? merged.slice(0, cap) : merged;
+  if (Object.keys(diagnostics).length > 0) {
+    Object.defineProperty(capped, "dailyDiagnostics", {
+      value: diagnostics,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  return capped;
 }

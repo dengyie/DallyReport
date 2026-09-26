@@ -204,3 +204,30 @@ test("computeAiNewsStatus: fallback with identical model is not annotated", () =
   assert.equal(status.ok, true);
   assert.equal(status.summary, "综合成功（grok-4.5，2 来源）");
 });
+
+// ---- 2026-09-26 review P1: the shipped reference list ran unvalidated ----
+// markdown.mjs already owned `sanitizeUrl` (rejects any non-http(s) scheme) and
+// its own `sourceCard` used it — but `sourceCard` has ZERO production callers
+// (`grep -rn "sourceCard" src/` returns only its definition), so the two tests
+// guarding it in markdown.test.mjs protected code that never shipped. The real
+// renderer, ai-news `refLines`, emitted `s.url` verbatim: a scraped post's url is
+// attacker-authored, so `javascript:` became a live clickable link in the vault.
+
+test("sanitizeUrl: non-http(s) schemes are rejected", async () => {
+  const { sanitizeUrl } = await import("../src/markdown.mjs");
+  assert.equal(sanitizeUrl("javascript:alert(1)"), "");
+  assert.equal(sanitizeUrl("data:text/html,<script>x</script>"), "");
+  assert.equal(sanitizeUrl("file:///etc/passwd"), "");
+  assert.equal(sanitizeUrl("vbscript:msgbox"), "");
+  assert.equal(sanitizeUrl(""), "");
+  assert.equal(sanitizeUrl(null), "");
+  assert.equal(sanitizeUrl("https://example.com/a"), "https://example.com/a");
+  assert.equal(sanitizeUrl("http://example.com/a"), "http://example.com/a");
+});
+
+test("sanitizeUrl: whitespace/control-character smuggling is rejected", async () => {
+  const { sanitizeUrl } = await import("../src/markdown.mjs");
+  assert.equal(sanitizeUrl("java\nscript:alert(1)"), "");
+  assert.equal(sanitizeUrl(" javascript:alert(1)"), "");
+  assert.equal(sanitizeUrl("https://exa mple.com"), "");
+});

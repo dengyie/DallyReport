@@ -201,7 +201,16 @@ export async function synthesizeFromSources({
   }
 
   const choice = data?.choices?.[0];
-  const text = choice?.message?.content;
+  // 2026-09-26 review P3: the web-search twin already hardened this with
+  // `round.text?.trim?.()`, but this one-shot path — the PRIMARY production
+  // synthesis path (main writer + fallback model) — used a bare `text.trim()`.
+  // A gateway that returns OpenAI content-blocks
+  // (`content: [{type:"text", text:"…"}]`, used by Anthropic-shaped and several
+  // OpenAI-compatible proxies) made that throw a bare TypeError, which lands
+  // BEFORE the err.code assignments below — so the note carried
+  // "综合失败（unknown）" and the log lost the real cause.
+  const text =
+    typeof choice?.message?.content === "string" ? choice.message.content : "";
   const finishReason = choice?.finish_reason;
 
   // Empty / missing content is a clean failure -> fallback.
@@ -481,6 +490,14 @@ export async function synthesizeWithWebSearch({
     // report — the old code returned it as the whole daily report while the
     // declared searches never ran (2026-09-25 review). Feed the text back as the
     // assistant turn and execute the tools.
+    // 2026-09-26 review P1: the assistant turn was pushed with ALL toolCalls but
+    // only `web_search` ever got a `role: "tool"` reply. Any other function name —
+    // or a type that isn't "function" — left a tool_call_id unanswered, and
+    // OpenAI-compatible gateways reject the NEXT request with 400
+    // ("must be followed by tool messages responding to each tool_call_id").
+    // That turned a recoverable round into a total synthesis failure, falling
+    // back to the raw model answer — exactly the memory-hallucinated body
+    // shouldSynthesize exists to avoid. Every declared call now gets a reply.
     messages.push({ role: "assistant", content: text || null, tool_calls: toolCalls });
     for (const tc of toolCalls) {
       if (tc.type === "function" && tc.function?.name === "web_search") {
@@ -490,7 +507,13 @@ export async function synthesizeWithWebSearch({
           try {
             content = await searchWithBudget(searchImpl, q, deadline);
           } catch (e) {
-            content = `检索（${q}）失败：${e?.message || String(e)}`;
+            // Do NOT forward the raw error message. searchImpl ultimately runs a
+            // child process whose stderr is spliced into that message, and the
+            // child inherits the full parent env — so an auth-failure path that
+            // echoes a key or the linux.do cookie would ship the secret to the
+            // third-party gateway inside a tool message it retains. The full
+            // detail stays in the local log.
+            content = `检索（${q}）失败：${e?.code || e?.name || "unknown"}（详见本机日志）`;
           }
         } else {
           content = "（web_search 未给出有效查询词，本次未检索）";
@@ -499,6 +522,13 @@ export async function synthesizeWithWebSearch({
           role: "tool",
           tool_call_id: tc.id,
           content: String(content).slice(0, 4000),
+        });
+      } else {
+        // Answer the call we cannot execute, so the conversation stays valid.
+        messages.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: "（该工具在本次综合中不可用）",
         });
       }
     }

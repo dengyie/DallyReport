@@ -18,32 +18,54 @@
 import { sanitizeSnippet } from "./snippet-hygiene.mjs";
 
 // --- Event clusters ---------------------------------------------------------
-// Each cluster: { key, match, exclude?, rewrite }.
-//   match:   RegExp tested against the raw title (case-insensitive). A source
-//            whose title matches is folded into this cluster.
-//   exclude: optional RegExp — a title matching BOTH match and exclude is NOT
-//            clustered (guards a broad match against a different event).
-//   rewrite: (title) => clear self-contained news title, or a plain string.
+// Each cluster: { key, match, weakMatch?, exclude?, rewrite }.
+//   match:     RegExp tested against the raw title (case-insensitive). A source
+//              whose title matches carries POSITIVE evidence for this event and
+//              is always folded into the cluster.
+//   weakMatch: optional RegExp for titles that mention the event's action but
+//              carry no evidence of its object ("重置了重置了！"). These fold
+//              ONLY when the same cluster already has a positive-evidence
+//              member — that is what lets the vague real posts collapse into the
+//              event without a vague post ever inventing one.
+//   exclude:   optional RegExp — a title matching it is NOT clustered, whatever
+//              else it says (guards a broad match against a different object).
+//   rewrite:   (title) => clear self-contained news title, or a plain string.
 // The representative of a cluster gets the rewritten title; the other members
 // are dropped. Order is preserved: the representative sits where the first
 // member was.
 const CLUSTERS = [
   {
     // The recurring ChatGPT/Codex free-quota reset (Tibo/OpenAI resets balances).
-    // 2026-09-25 review root fix: the bare /重置|reset/i match hijacked unrelated
-    // "reset" stories — worst case a self-contained title like "OpenAI 重置了
-    // GPT-5 系统提示词" got REPLACED with the fixed "ChatGPT/Codex 额度重置",
-    // fabricating a headline deterministically. The exclude now names the
-    // realistic reset-with-a-different-object titles (system prompts, tutorials,
-    // routers, sessions, settings…). Residual limitation, accepted: a reset
-    // story whose object shares none of these markers can still fold — a
-    // deterministic regex cannot fully disambiguate semantics, and requiring
-    // quota vocabulary in title/snippet was rejected because real reset posts
-    // ("重置了重置了！" plus a garbage/short snippet) carry none either, which
-    // would break the very fold this module exists for.
+    // 2026-09-26 review root fix: the match used to be the bare /重置|reset/i
+    // guarded only by an 8-noun blocklist, which could not bound it. It
+    // deterministically REWROTE unrelated reset stories into a fabricated
+    // OpenAI event — verified folding "Google 账号安全重置新流程上线",
+    // "Redis 连接池 reset 后异常", "Claude 上下文窗口重置策略调整" and
+    // "Mistral API rate limit reset" into "ChatGPT/Codex 额度重置", a different
+    // vendor and a different event, which then reached the model as a source
+    // title. A blocklist cannot constrain a match this broad, so the structure
+    // changed instead of the vocabulary:
+    //   - match     = reset AND a quota object (额度/配额/余额/quota). This is the
+    //     only positive evidence, because it is the only thing that identifies
+    //     THIS event. A vendor name alone is not: "Claude 上下文窗口重置策略调整"
+    //     is a different event that happens to mention a vendor we care about.
+    //     Note `limit` is deliberately NOT a quota object — "Mistral API rate
+    //     limit reset" is a rate-limit reset, not a balance reset.
+    //   - weakMatch = bare reset naming no foreign product. These are the real
+    //     vague posts ("重置了重置了！", "codex 周一还会重置！") and they still
+    //     fold — but only onto a cluster a positive-evidence title established.
+    //     A day of purely vague resets leaves every card untouched.
+    //   - exclude   guards the positive match, where the object can plausibly be
+    //     something other than a balance (keys, prompts, routers, cloud quotas…).
     key: "quota-reset",
-    match: /重置|reset/i,
-    exclude: /密码|password|系统提示|提示词|教程|路由器|固件|factory|会话|session|配置|settings/i,
+    match: /(?:重置|reset).*(?:额度|配额|余额|quota)|(?:额度|配额|余额|quota).*(?:重置|reset)/i,
+    weakMatch: /重置|reset/i,
+    exclude:
+      /密码|password|密钥|\bkeys?\b|系统提示|提示词|教程|路由器|固件|factory|会话|session|配置|settings|上下文窗口|context window|区域|region|\baws\b|\bgcp\b|\bazure\b/i,
+    // Entity tokens that belong to THIS event: their presence in a weak title
+    // does not make it a foreign story, so they are discounted before the
+    // "does it name some other product?" check runs.
+    ownEntities: /chatgpt|codex|\bgpt\b|openai|claude|gemini|奥特曼|tibo|quota|额度|配额|余额/gi,
     rewrite: () => "ChatGPT/Codex 额度重置",
   },
   {
@@ -97,6 +119,57 @@ function pickRepresentative(members) {
   }, members[0]);
 }
 
+// Does this weak title name a product/entity that has nothing to do with the
+// cluster's event? Strips the cluster's own entities first, then looks for any
+// other Latin product token or a known foreign CJK subject. This is what stops a
+// vague "reset" post from joining a quota cluster when it is plainly about
+// something else (Redis, SQLite, AWS regions, password flows…).
+const FOREIGN_ENTITY_RE = /\b[\w-]*(?:redis|sqlite|postgres|mysql|kafka|rabbit|mongo|docker|kube\w*|linux|windows|aws|azure|gcp|nginx|apache|node|npm|react|vue|java|rust|golang|python|django|flask|git|github|gitlab|nginx|systemd|journald|router|firmware|token|session|cookie|password|login|captcha|turnstile|cloudflare)\b/i;
+const FOREIGN_CJK_RE = /路由器|固件|密码|密钥|系统提示|提示词|教程|配置|会话|注册|刷机|越狱|破解/;
+
+function namesForeignEntity(title, cluster) {
+  const stripped = cluster.ownEntities
+    ? title.replace(new RegExp(cluster.ownEntities.source, "gi"), " ")
+    : title;
+  return FOREIGN_ENTITY_RE.test(stripped) || FOREIGN_CJK_RE.test(stripped);
+}
+
+// A title is a positive-evidence cluster member when it states BOTH the action
+// (reset) and the object (a balance/quota) and is not excluded. Weak titles need
+// a positive-evidence sibling before they may fold — see the CLUSTERS comment for
+// why that two-tier rule exists.
+function clusterMatchFor(title, cluster, hasPositiveMember) {
+  if (cluster.exclude && cluster.exclude.test(title)) return null;
+  if (cluster.match.test(title)) return "positive";
+  if (!cluster.weakMatch) return null;
+  if (!cluster.weakMatch.test(title)) return null;
+  if (namesForeignEntity(title, cluster)) return null;
+  return hasPositiveMember ? "weak" : null;
+}
+
+// Pass 1 is run twice on purpose. Whether a title may fold as a weak member
+// depends on whether ANY title in the same cluster carries positive evidence —
+// which is a whole-input question, not a left-to-right one. So pass 1 records
+// every title's tentative strength, and pass 2 resolves the weak ones against
+// the final evidence. A single left-to-right pass would let the last title decide
+// what the first one was allowed to do.
+function scanClusterStrength(sources) {
+  const tentative = new Map(); // cluster key -> { positive: bool, weakIdx: number[] }
+  for (let i = 0; i < sources.length; i++) {
+    const title = String(sources[i]?.title || "");
+    for (const c of CLUSTERS) {
+      const verdict = clusterMatchFor(title, c, true); // pass 1: admit weak tentatively
+      if (!verdict) continue;
+      if (!tentative.has(c.key)) tentative.set(c.key, { positive: false, weakIdx: [] });
+      const entry = tentative.get(c.key);
+      if (verdict === "positive") entry.positive = true;
+      else entry.weakIdx.push(i);
+      break; // first matching cluster claims the title
+    }
+  }
+  return tentative;
+}
+
 /**
  * Fold same-event sources into a single representative card and rewrite its
  * title to a clear, self-contained news headline. Non-cluster sources pass
@@ -108,38 +181,70 @@ function pickRepresentative(members) {
 export function dedupeAndNormalizeSources(sources) {
   if (!Array.isArray(sources) || sources.length === 0) return sources || [];
 
-  const clusters = new Map(); // key -> { members: [], firstIndex }
+  const tentative = scanClusterStrength(sources);
+  const clusters = new Map(); // key -> { members: [], slots: [], positive: bool }
   const out = [];
   for (let i = 0; i < sources.length; i++) {
     const s = sources[i];
     const title = String(s?.title || "");
     let matched = null;
+    let weak = false;
     for (const c of CLUSTERS) {
-      if (c.match.test(title) && !(c.exclude && c.exclude.test(title))) {
-        matched = c;
-        break;
-      }
+      const verdict = clusterMatchFor(title, c, true);
+      if (!verdict) continue;
+      matched = c;
+      weak = verdict === "weak";
+      break;
     }
-    if (matched) {
-      if (!clusters.has(matched.key)) {
-        clusters.set(matched.key, { members: [], firstIndex: out.length });
-        out.push(null); // placeholder for the representative
-      }
-      clusters.get(matched.key).members.push(s);
-    } else {
+    if (!matched) {
       out.push(s);
+      continue;
     }
+    const evidence = tentative.get(matched.key);
+    // Pass 2: a weak title only folds if the cluster survived with positive
+    // evidence. Without it this cluster is discarded entirely below and the card
+    // is restored untouched.
+    if (weak && !evidence?.positive) {
+      out.push(s);
+      continue;
+    }
+    if (!clusters.has(matched.key)) {
+      clusters.set(matched.key, { members: [], slots: [], positive: false });
+    }
+    const entry = clusters.get(matched.key);
+    entry.members.push(s);
+    entry.slots.push(out.length);
+    out.push(null); // placeholder, rewritten below (or restored if discarded)
+    if (!weak) entry.positive = true;
   }
 
-  for (const [key, { members, firstIndex }] of clusters) {
+  for (const [key, { members, slots, positive }] of clusters) {
+    // A cluster that only ever collected weak titles never had evidence for its
+    // own event — restore those cards untouched instead of inventing a headline.
+    if (!positive) {
+      members.forEach((m, idx) => {
+        out[slots[idx]] = m;
+      });
+      continue;
+    }
     const cluster = CLUSTERS.find((c) => c.key === key);
     const rep = pickRepresentative(members);
     const rewritten =
       typeof cluster.rewrite === "function" ? cluster.rewrite(rep?.title) : cluster.rewrite;
-    out[firstIndex] = {
+    // A fold must UNION provenance, not inherit the representative's. The
+    // representative is chosen by snippet richness, which is usually the forum
+    // card — so a same-day hard-source card folded into it silently lost the
+    // `fromDaily` flag and stopped counting toward 当日素材, which could push an
+    // adequately-stocked day under the low-material threshold. The surviving card
+    // still represents the whole cluster, so it counts if ANY member was fromDaily.
+    const fromDaily = members.some((m) => m?.fromDaily === true);
+    out[slots[0]] = {
       ...rep,
+      ...(fromDaily ? { fromDaily: true } : {}),
       title: sanitizeSnippet(rewritten, { maxChars: 200 }),
     };
+    // The representative keeps its own slot; the other members collapse into it.
+    for (let idx = 1; idx < slots.length; idx++) out[slots[idx]] = null;
   }
-  return out;
+  return out.filter((s) => s !== null);
 }

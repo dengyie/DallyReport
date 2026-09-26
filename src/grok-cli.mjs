@@ -102,8 +102,14 @@ function runScript(scriptPath, args) {
     );
     const timer = setTimeout(() => {
       timedOut = true;
-      // SIGTERM first; the close handler resolves with timedOut=true. Force-kill as a
-      // backstop if the child ignores SIGTERM within a short grace window.
+      // SIGTERM first, SIGKILL as a backstop. 2026-09-26 review P1: this
+      // handler used to rely entirely on `close` arriving to settle the promise.
+      // Node emits `close` only once the process has exited AND every stdio pipe
+      // is closed — so a grandchild that inherited stdout (a wedged
+      // grok-search dependency, the exact thing this module exists to contain)
+      // kept the pipe open forever and the promise NEVER settled, hanging the
+      // daily run past its window. `Promise.allSettled` cannot rescue a pending
+      // thunk. Settle here; the `settled` guard makes any later `close` a no-op.
       try {
         child.kill("SIGTERM");
       } catch {
@@ -116,8 +122,53 @@ function runScript(scriptPath, args) {
           /* ignore */
         }
       }, 3000).unref?.();
+      finish({
+        ok: false,
+        code: null,
+        stdout: currentStdout(),
+        stderr,
+        timedOut: true,
+        truncated,
+      });
     }, timeoutMs);
   });
+}
+
+// Extract the last balanced JSON object from noisy stdout. A child that writes a
+// single progress/debug line before its payload used to make the WHOLE fetch
+// fail with __parse_error, discarding a perfectly good result. Latent today (the
+// installed grok-search scripts send diagnostics to stderr, not stdout), but one
+// stray console.log in a dependency update would silently convert every working
+// fetch into a hard failure across all five collectors.
+function extractLastJsonObject(text) {
+  const end = text.lastIndexOf("}");
+  if (end < 0) return null;
+  // Walk backwards to the matching '{', ignoring braces inside strings.
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = end; i >= 0; i--) {
+    const ch = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "}") depth++;
+    else if (ch === "{") {
+      depth--;
+      if (depth === 0) return text.slice(i, end + 1);
+    }
+  }
+  return null;
 }
 
 function parseJsonOut(stdout, scriptPath, args, truncated = false) {
@@ -126,12 +177,45 @@ function parseJsonOut(stdout, scriptPath, args, truncated = false) {
   try {
     return JSON.parse(trimmed);
   } catch {
+    const candidate = extractLastJsonObject(trimmed);
+    if (candidate) {
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        /* fall through to the parse-error result */
+      }
+    }
     // Bounded raw: head+tail only, so a huge garbage dump never rides inside the
     // error object (the full capped stdout stays on err.stdout for debugging).
     const out = { __parse_error: true, raw: truncateRawForParseError(stdout) };
     if (truncated) out.truncated = true;
     return out;
   }
+}
+
+// The child inherits the full parent env, so its stderr can contain a key or the
+// linux.do session cookie (e.g. an auth path that echoes the request). That text
+// is quoted into thrown error messages, which the synthesis tool loop used to
+// forward to the third-party LLM gateway. Redact before interpolation.
+const SECRET_ENV_KEYS = [
+  "GROK_API_KEY",
+  "OPENAI_API_KEY",
+  "TAVILY_API_KEY",
+  "FIRECRAWL_API_KEY",
+  "LINUXDO_COOKIE",
+];
+function redactSecrets(text) {
+  let out = String(text || "");
+  for (const key of SECRET_ENV_KEYS) {
+    const value = process.env[key];
+    if (value && value.length >= 8) out = out.split(value).join(`[${key} 已脱敏]`);
+  }
+  // Also catch the common "key=<value>" / "cookie=<value>" echo shape whatever
+  // the variable is named, so an unknown secret is not spliced through.
+  return out.replace(
+    /((?:api[_-]?key|token|cookie|authorization|bearer|secret)\s*[=:]\s*)(\S{8,})/gi,
+    (m, p1) => `${p1}[已脱敏]`,
+  );
 }
 
 export async function runSearch(query, config, { days, extra } = {}) {
@@ -150,7 +234,7 @@ export async function runSearch(query, config, { days, extra } = {}) {
     const err = new Error(
       res.timedOut
         ? `grok-search search.js 超时（${childTimeoutMs()}ms 无响应）`
-        : `grok-search search.js 退出码 ${res.code ?? "?"}：${(res.err && res.err.message) || res.stderr.trim() || "no stdout"}`,
+        : `grok-search search.js 退出码 ${res.code ?? "?"}：${redactSecrets((res.err && res.err.message) || res.stderr.trim() || "no stdout")}`,
     );
     err.script = "search.js";
     err.args = args;
@@ -193,7 +277,7 @@ export async function runFetch(url, config, { maxChars, provider = "auto", cache
     const err = new Error(
       res.timedOut
         ? `grok-search fetch.js 超时（${childTimeoutMs()}ms 无响应）`
-        : `grok-search fetch.js 退出码 ${res.code ?? "?"}：${(res.err && res.err.message) || res.stderr.trim() || "no stdout"}`,
+        : `grok-search fetch.js 退出码 ${res.code ?? "?"}：${redactSecrets((res.err && res.err.message) || res.stderr.trim() || "no stdout")}`,
     );
     err.script = "fetch.js";
     err.args = args;

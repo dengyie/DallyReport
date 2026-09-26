@@ -329,3 +329,91 @@ test("synthesizeWithWebSearch: a synchronously-throwing searchImpl is contained 
   const toolMsg = secondBody.messages.find((m) => m.role === "tool");
   assert.match(toolMsg.content, /检索（查询甲）失败/, "sync throw becomes a failure tool message");
 });
+
+// ---- 2026-09-26 review P1: the tool loop must keep the conversation VALID ----
+// Every test above emits exactly ONE web_search call. A round that declared a
+// second, unexecutable tool call used to leave that tool_call_id unanswered, and
+// OpenAI-compatible gateways reject the NEXT request with 400 — turning a
+// recoverable round into a total synthesis failure.
+
+const SYNTH_BASE = {
+  query: "q",
+  date: "2026-08-07",
+  sources: [{ url: "https://example.com/a", title: "甲", snippet: "乙" }],
+  model: "gemini-3.6-flash",
+  maxSearchRounds: 2,
+};
+
+test("synthesizeWithWebSearch: a non-web_search tool call still gets a tool reply", async () => {
+  const mixed = {
+    choices: [
+      {
+        message: {
+          content: null,
+          tool_calls: [
+            { id: "c1", type: "function", function: { name: "web_search", arguments: JSON.stringify({ query: "AI" }) } },
+            { id: "c2", type: "function", function: { name: "read_url", arguments: JSON.stringify({ url: "https://x" }) } },
+          ],
+        },
+        finish_reason: "tool_calls",
+      },
+    ],
+  };
+  const fetchStub = seqStubFetch([mixed, textResponse("最终报告")]);
+  const out = await synthesizeWithWebSearch({
+    ...SYNTH_BASE,
+    fetch: fetchStub,
+    searchImpl: async () => "结果",
+  });
+  assert.equal(out, "最终报告");
+  // Every tool_call_id declared in turn 1 must have a matching tool message in turn 2.
+  const secondCall = JSON.parse(fetchStub.calls[1].init.body);
+  const assistantTurn = secondCall.messages.find((m) => m.role === "assistant" && m.tool_calls);
+  const declared = (assistantTurn?.tool_calls || []).map((t) => t.id);
+  const answered = secondCall.messages.filter((m) => m.role === "tool").map((m) => m.tool_call_id);
+  for (const id of declared) {
+    assert.ok(answered.includes(id), `tool_call_id ${id} 必须有应答，否则网关返回 400`);
+  }
+});
+
+test("synthesizeWithWebSearch: a tool call with a null function still gets a reply", async () => {
+  const odd = {
+    choices: [
+      {
+        message: { content: null, tool_calls: [{ id: "z9", type: "function", function: null }] },
+        finish_reason: "tool_calls",
+      },
+    ],
+  };
+  const fetchStub = seqStubFetch([odd, textResponse("报告")]);
+  const out = await synthesizeWithWebSearch({
+    ...SYNTH_BASE,
+    fetch: fetchStub,
+    searchImpl: async () => "结果",
+  });
+  assert.equal(out, "报告");
+  const secondCall = JSON.parse(fetchStub.calls[1].init.body);
+  const answered = secondCall.messages.filter((m) => m.role === "tool").map((m) => m.tool_call_id);
+  assert.ok(answered.includes("z9"), "无法执行的调用同样要有应答");
+});
+
+// P2: the tool message used to splice the search implementation's raw error
+// message in, and that message ultimately carries a child process's stderr. The
+// message is now a code, never a payload.
+test("synthesizeWithWebSearch: a failing search never leaks its message to the gateway", async () => {
+  const fetchStub = seqStubFetch([toolCallResponse("s1", "AI"), textResponse("报告")]);
+  const secret = "sk-live-SECRET-abcdef123456";
+  await synthesizeWithWebSearch({
+    ...SYNTH_BASE,
+    fetch: fetchStub,
+    searchImpl: async () => {
+      throw new Error(`grok-search fetch.js 退出码 1：auth fail api_key=${secret}`);
+    },
+  });
+  const secondCall = JSON.parse(fetchStub.calls[1].init.body);
+  const toolMsg = secondCall.messages.find((m) => m.role === "tool");
+  assert.ok(toolMsg, "存在 tool 消息");
+  assert.doesNotMatch(toolMsg.content, /sk-live/, "密钥不得发往网关");
+  assert.doesNotMatch(toolMsg.content, new RegExp(secret), "不含原始密钥片段");
+  assert.match(toolMsg.content, /失败/, "失败本身仍然上报");
+});

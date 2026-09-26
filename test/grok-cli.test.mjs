@@ -131,3 +131,110 @@ test("runFetch: oversized child stdout is capped at MAX_STDOUT_BYTES, flagged tr
     },
   );
 });
+
+// ---- 2026-09-26 review: the timeout path had NO test at all ----
+// The suite covered cache hits, cache-write failure, the poison-cache gate, the
+// stdout cap and truncation — but never set GROK_CHILD_TIMEOUT_MS, so neither the
+// `timedOut` message branch nor the SIGTERM→SIGKILL escalation was ever exercised.
+// The P1 below (a grandchild holding the stdout pipe kept the promise pending
+// FOREVER) would have shipped green.
+
+async function fixtureScript(root, name, body) {
+  const scripts = path.join(root, "scripts");
+  await fs.mkdir(scripts, { recursive: true });
+  await fs.writeFile(path.join(scripts, name), body, "utf8");
+  return root;
+}
+
+test("runFetch: a hung child is killed at the timeout and the call returns", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-timeout-"));
+  // Ignores SIGTERM, so only the SIGKILL backstop stops it.
+  await fixtureScript(
+    root,
+    "fetch.js",
+    'process.on("SIGTERM",()=>{});setInterval(()=>{},1000);',
+  );
+  const prev = process.env.GROK_CHILD_TIMEOUT_MS;
+  process.env.GROK_CHILD_TIMEOUT_MS = "400";
+  try {
+    const t0 = Date.now();
+    let message = "";
+    let timedOut = false;
+    try {
+      await runFetch("https://example.com", { grokSearchDir: root });
+    } catch (e) {
+      message = e.message;
+      timedOut = e.timedOut === true;
+    }
+    const elapsed = Date.now() - t0;
+    assert.ok(elapsed < 8000, `不能挂死，实际 ${elapsed}ms`);
+    assert.equal(timedOut, true, "标记为超时");
+    assert.match(message, /超时/, "调用方被告知是超时");
+  } finally {
+    if (prev == null) delete process.env.GROK_CHILD_TIMEOUT_MS;
+    else process.env.GROK_CHILD_TIMEOUT_MS = prev;
+  }
+});
+
+test("runFetch: a grandchild holding stdout cannot keep the call pending forever", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-orphan-"));
+  // The child exits immediately but leaves a detached grandchild holding the
+  // inherited stdout pipe open. Node emits `close` only when every stdio pipe is
+  // closed, so a promise settled solely on `close` would never resolve.
+  await fixtureScript(
+    root,
+    "fetch.js",
+    'const {spawn}=require("child_process");' +
+      'spawn(process.execPath,["-e","setTimeout(()=>{},60000)"],{stdio:["ignore",1,2]});' +
+      'process.exit(0);',
+  );
+  const prev = process.env.GROK_CHILD_TIMEOUT_MS;
+  process.env.GROK_CHILD_TIMEOUT_MS = "500";
+  try {
+    const t0 = Date.now();
+    // Either outcome is fine — the point is that it settles at all. Before the
+    // fix the promise stayed pending indefinitely, so the race returned HUNG.
+    const settled = await Promise.race([
+      runFetch("https://example.com", { grokSearchDir: root }).then(
+        () => "settled",
+        () => "settled",
+      ),
+      new Promise((r) => setTimeout(() => r("HUNG"), 8000)),
+    ]);
+    const elapsed = Date.now() - t0;
+    assert.equal(settled, "settled", `the call must settle, not hang (took ${elapsed}ms)`);
+  } finally {
+    if (prev == null) delete process.env.GROK_CHILD_TIMEOUT_MS;
+    else process.env.GROK_CHILD_TIMEOUT_MS = prev;
+  }
+});
+
+test("runFetch: noisy stdout around the JSON payload is tolerated", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-noisy-"));
+  await fixtureScript(
+    root,
+    "fetch.js",
+    'console.log("Fetching https://example.com ...");' +
+      'console.log("done in 2.3s");' +
+      'process.stdout.write(JSON.stringify({content:{text:"REAL BODY"}}));',
+  );
+  const res = await runFetch("https://example.com", { grokSearchDir: root });
+  assert.equal(res.text, "REAL BODY", "真实的 JSON 载荷仍被解析出来");
+});
+
+test("runFetch: a child error message does not carry a secret through", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-secret-"));
+  await fixtureScript(
+    root,
+    "fetch.js",
+    'process.stderr.write("auth failed api_key=sk-live-LEAKME-12345678\\n");process.exit(1);',
+  );
+  let message = "";
+  try {
+    await runFetch("https://example.com", { grokSearchDir: root });
+  } catch (e) {
+    message = e.message;
+  }
+  assert.doesNotMatch(message, /sk-live-LEAKME/, "the secret must be redacted");
+  assert.match(message, /已脱敏/, "the message says it was redacted");
+});

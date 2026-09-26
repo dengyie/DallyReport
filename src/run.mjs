@@ -171,9 +171,13 @@ async function run() {
       if (written.error) {
         const rescued = await rescueMarkdown(config, res.name, res.markdown);
         res.writeError = written.error;
-        res.file = rescued
-          ? `${rescued}（vault 写入失败，已抢救到缓存）`
-          : `${written.file}（写入失败且抢救失败）`;
+        // 2026-09-26 review P3: the rescue path used to overwrite `res.file` with a
+        // string that mixed a path and a parenthetical, making the one field an
+        // operator would copy or script against unparseable — on exactly the days
+        // the fallback file is the only artifact that exists. `file` stays the
+        // intended path; the rescue location gets its own field.
+        res.rescueFile = rescued || null;
+        res.rescueFailed = !rescued;
         // A write failure on an otherwise-ok section is a degradation, not success.
         res.ok = false;
       } else {
@@ -360,6 +364,11 @@ async function run() {
       let line = `${tag} ${v.name}: ${v.summary} → ${v.file}`;
       if (v.writeError) {
         line += `\n    ⚠️ vault 写入失败：${v.writeError.message}`;
+        if (v.rescueFile) {
+          line += `\n    ↩ 已抢救到：${v.rescueFile}`;
+        } else if (v.rescueFailed) {
+          line += `\n    ↩ 抢救失败：内容未能落盘`;
+        }
       }
       if (v.auxFile) {
         line += `\n    ${tag} 辅助资料: → ${v.auxFile}${v.auxPosts ? `（完整帖子 ${v.auxPosts}）` : ""}`;

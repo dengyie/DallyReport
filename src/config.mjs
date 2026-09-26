@@ -216,7 +216,10 @@ export function loadConfig({ date = null } = {}) {
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    hnDailyLimit: int("HN_DAILY_LIMIT", 12),
+    // Default 5, not 12: the declared 12 never reached the fetcher, so 5 is what
+    // production has actually been producing. Wiring the knob must not silently
+    // change the report — an operator who wants 12 sets HN_DAILY_LIMIT=12.
+    hnDailyLimit: int("HN_DAILY_LIMIT", 5),
     // 2026-08-11 硬关：36kr 经 Firecrawl 的 URL 被重写为 feed 首页，所有条目 URL
     // 相同导致去重合并。待稳定 provider 或 raw RSS 绕过 WAF 后再恢复。
     // （原 KR36_DAILY_ENABLED 环境变量分支位于 `if (true)` 之后，永不可达——
@@ -242,6 +245,23 @@ export function loadConfig({ date = null } = {}) {
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
     hfDailyLimit: int("HF_DAILY_LIMIT", 4),
+    // 2026-09-26 review: the two Google feeds were gated on
+    // `config.googleAiDailyEnabled !== false` against keys that did not exist in
+    // this object, so they were permanently on with no kill switch (undefined !==
+    // false is always true) — and .env.example documented them as placeholders
+    // that "配置它们暂不生效". The keys exist now, so the switches are real.
+    googleAiDailyEnabled: (() => {
+      const raw = val("GOOGLE_AI_DAILY_ENABLED");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    googleAiDailyLimit: int("GOOGLE_AI_DAILY_LIMIT", 4),
+    googleResearchDailyEnabled: (() => {
+      const raw = val("GOOGLE_RESEARCH_DAILY_ENABLED");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    googleResearchDailyLimit: int("GOOGLE_RESEARCH_DAILY_LIMIT", 4),
     // -- search model override (default: use GROK_MODEL = synthModel) ---
     // When set, grok-cli.mjs passes this model to grok-search search.js instead
     // of GROK_MODEL, allowing the search step to use a cheaper/faster model while

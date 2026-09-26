@@ -51,7 +51,12 @@ function escapeMarkdownText(value, options) {
   return cleanText(value, options).replace(/[\\`*_[\]<>#+.!|()-]/g, "\\$&");
 }
 
-function sanitizeUrl(value) {
+// Exported because the production reference renderer (ai-news.mjs `refLines`) is
+// the one that actually ships links into the vault, and it was building them by
+// hand with no URL validation at all. A scraped post's `url` is attacker-authored,
+// so a `javascript:` href became a clickable link in the user's note. Keeping the
+// sanitizer here — and routing BOTH renderers through it — is the whole point.
+export function sanitizeUrl(value) {
   const raw = cleanText(value);
   if (!raw || /[\s\u0000-\u001f\u007f]/.test(raw)) return "";
   try {
@@ -63,8 +68,12 @@ function sanitizeUrl(value) {
   }
 }
 
-function escapeUrl(value) {
+export function escapeUrl(value) {
   return String(value).replace(/[\\<>]/g, "\\$&");
+}
+
+export function escapeMdText(value, options) {
+  return escapeMarkdownText(value, options);
 }
 
 export function sourceList(sources) {

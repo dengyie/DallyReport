@@ -1,5 +1,5 @@
 import { runSearch } from "../grok-cli.mjs";
-import { frontMatter, stripMarkdown } from "../markdown.mjs";
+import { frontMatter, stripMarkdown, sanitizeUrl } from "../markdown.mjs";
 import { assertGrokCreds } from "../config.mjs";
 import { synthesizeFromSources, synthesizeWithWebSearch, renderSources } from "../llm-synthesize.mjs";
 import { fetchLinuxDoAiSources, mergeSourcesPreferLinuxDo } from "../linuxdo.mjs";
@@ -183,6 +183,20 @@ export async function aiNewsSection(
       : 0;
     if (failureCount) {
       degradedSources.push(`${label}（${failureCount} 项采集失败）`);
+      continue;
+    }
+    // Same-day hard sources, per-provider shape: { hackernews: {count, sample},
+    // arxiv: {...}, "google-ai": {...} }. These fetchers swallow their own
+    // transport errors and return [], which is exactly why this shape exists —
+    // without it a full outage of the daily hard sources printed a clean ✅
+    // while the report quietly rested on forum posts alone.
+    const dailyDiag = arr?.dailyDiagnostics;
+    if (dailyDiag && typeof dailyDiag === "object") {
+      for (const [provider, info] of Object.entries(dailyDiag)) {
+        if (info?.count > 0) {
+          degradedSources.push(`${label}/${provider}（${info.count} 项采集失败）`);
+        }
+      }
     }
   }
 
@@ -196,9 +210,17 @@ export async function aiNewsSection(
   const generalSources = result?.sources?.extra?.length
     ? result.sources.extra
     : result?.sources?.merged || [];
-  // Primary hard sources (daily HN/36kr/arXiv + general search results) get the bulk of the budget.
-  // Community sources (linux.do, nodeseek, v2ex) provide bounded forum signals (strictly capped & denoised).
-  const primarySources = [...(dailySources || []), ...(generalSources || [])];
+  // 2026-09-26 review P2: tag provenance BEFORE dedup instead of back-matching by
+  // URL afterwards. dedupeAndNormalizeSources keeps the cluster member with the
+  // richest snippet, which is often a linux.do card rather than the daily one — so
+  // a URL-set intersection silently stopped counting that day's material and could
+  // push an adequately-stocked day under the 低素材 threshold, making the report
+  // describe itself as stale when it wasn't. The representative's spread
+  // ({ ...rep }) carries the flag, so a fold unions provenance correctly.
+  const primarySources = [
+    ...(dailySources || []).map((s) => ({ ...s, fromDaily: true })),
+    ...(generalSources || []),
+  ];
   const communitySources = [...(nodeseekSources || []), ...(v2exSources || [])];
   const merged = mergeSourcesPreferLinuxDo(linuxdoSources, primarySources, {
     maxTotal: config.sourceMaxTotal ?? 18,
@@ -330,10 +352,11 @@ export async function aiNewsSection(
   // Material-window counts must reflect what the model ACTUALLY received: merge
   // (URL-dedup + caps), event-cluster folding and the recency gate all shrink the
   // raw fetch — counting the raw fetch overstated "当日素材" and could suppress
-  // the low-material warning (2026-09-25 review). Match survivors back to the
-  // daily fetch by URL.
-  const dailyUrlSet = new Set((dailySources || []).map((s) => s?.url).filter(Boolean));
-  const dailyCount = sources.filter((s) => dailyUrlSet.has(s?.url)).length;
+  // the low-material warning (2026-09-25 review). Count the survivors that carry
+  // the provenance flag stamped on them before the fold (see primarySources),
+  // not a URL back-match: a cluster's representative can be a forum card, which
+  // made the daily card silently stop counting (2026-09-26 review).
+  const dailyCount = sources.filter((s) => s?.fromDaily).length;
   const genericCount = Math.max(0, sources.length - dailyCount);
   let header = "";
   if (config.reportStrictDaily !== false) {
@@ -367,7 +390,14 @@ export async function aiNewsSection(
       /[\[\]()]/g,
       (c) => "\\" + c,
     );
-    const url = s.url || "";
+    // 2026-09-26 review P1: this renderer used to emit `s.url` verbatim, so an
+    // attacker-authored `javascript:` href from a scraped post became a live
+    // clickable link in the user's note. markdown.mjs already owned the correct
+    // defense (sanitizeUrl rejects any non-http(s) scheme) and its own
+    // sourceCard used it — but sourceCard has zero production callers, so the
+    // two tests guarding it protected code that never shipped while this path
+    // ran unvalidated. Degrade to a plain title when the URL is not http(s).
+    const url = sanitizeUrl(s.url);
     return url ? `- [${title}](<${url}>)` : `- ${title}`;
   });
   const refSection = refLines.length
