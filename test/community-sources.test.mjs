@@ -474,3 +474,100 @@ test("fetchNodeSeekAiSources: poisoned list cache (challenge page) is rejected �
   assert.ok(parseNodeSeekTopics(nowCached).length >= 1, "live listing overwrote the poison on disk");
   await fs.rm(tmp, { recursive: true, force: true });
 });
+
+// ---------------------------------------------------------------------------
+// 2026-09-26 deep review — community/AI-gate batch.
+// ---------------------------------------------------------------------------
+
+test("isAiRelatedTopic: an English word that merely contains a-i does not pass the AI gate", () => {
+  // 2026-09-26 review P1. The shared gate started with a bare, unanchored `ai`,
+  // so it matched the letters a-i-a inside ordinary words. All six of these are
+  // real forum-title shapes and every one of them passed "is this AI news?":
+  // the report was filling up with maintenance notices and support questions.
+  for (const title of [
+    "Daily maintenance window 这个公告",
+    "Repair chain 讨论",
+    "请问 Email 收不到验证码",
+    "Air conditioning 闲聊",
+    "求推荐 training 用的笔记本",
+    "Failed to load 报错",
+  ]) {
+    assert.equal(
+      isAiRelatedTopic(title),
+      false,
+      `must not treat "${title}" as AI news`,
+    );
+  }
+});
+
+test("isAiRelatedTopic: anchoring does not lose real AI titles", () => {
+  // The other half of the same fix: \bai\b must still match a standalone "ai",
+  // and every real model/tooling title must keep passing.
+  for (const title of [
+    "AI 编程助手新版本发布",
+    "讨论一下 ai 在推理上的进展",
+    "Claude Code 2.0 正式版发布",
+    "DeepSeek V4 Flash 开放 API",
+    "OpenAI 发布新的 agent 能力",
+    "Gemini 3.5 Pro 要来了？",
+    "新模型 benchmark 对比",
+    "提示词工程实践总结",
+    "Qwen3 的 token 消耗实测",
+  ]) {
+    assert.equal(
+      isAiRelatedTopic(title),
+      true,
+      `must still treat "${title}" as AI news`,
+    );
+  }
+});
+
+test("isAiRelatedTopic: a bare model name with no keyword still needs its own token", () => {
+  // "sora"/"cursor"/"grok"/"xai" were unanchored, so they matched "sorption",
+  // "cursored", "grokery" and (via bare `ai`) half the alphabet. Now they need
+  // word boundaries.
+  assert.equal(isAiRelatedTopic("Cursor 使用体验"), true);
+  assert.equal(isAiRelatedTopic("cursored 是什么意思"), false);
+  assert.equal(isAiRelatedTopic("Grok 4 发布了"), true);
+  assert.equal(isAiRelatedTopic("grokery 闲聊帖"), false);
+  assert.equal(isAiRelatedTopic("Sora 2 视频生成实测"), true);
+});
+
+test("quota-reset reports survive the negative filter (the dedup root cause)", () => {
+  // 2026-09-26 review P1. NEGATIVE_COMMUNITY_RE listed `额度重置` and a bare
+  // `余额`, so every real report about a vendor resetting its balance was dropped
+  // UPSTREAM — before dedup ever saw it. That is why the quota-reset cluster had
+  // to invent a headline: the descriptive posts were already gone and only the
+  // vague noise ("重置了重置了！") remained.
+  for (const title of [
+    "Codex余额已重置，Tibo回应称明天周运会再次重置",
+    "Claude 额度重置 + 上下文窗口调整",
+    "剩余额度查询方法",
+    "余额怎么查",
+  ]) {
+    assert.equal(
+      isAiRelatedTopic(title),
+      true,
+      `a real quota/reset report must not be filtered out: "${title}"`,
+    );
+  }
+});
+
+test("quota trading and account-selling are still filtered out", () => {
+  // The point of the negative filter is the seller, not the word "额度". These
+  // must still drop — otherwise the fix above would re-open the spam flood.
+  for (const title of [
+    "剩余额度怎么卖 求购",
+    "低价余额出售",
+    "代充 余额 有意私聊",
+    "出ChatGPT Plus 账号",
+    "收Google账号 高价",
+    "求个车 一起上车",
+  ]) {
+    assert.equal(
+      isAiRelatedTopic(title),
+      false,
+      `selling/spam must stay filtered: "${title}"`,
+    );
+  }
+});

@@ -18,8 +18,24 @@ import { sanitizeSnippet, isInjectionOnlySource, NEGATIVE_COMMUNITY_RE } from ".
 
 // Shared AI-keyword gate for the community collectors. Kept broad enough for
 // Chinese + English model names and tooling chatter across L 站 / NodeSeek / V2EX.
+//
+// 2026-09-26 review: this alternation started with a bare `ai`, unanchored, so it
+// matched the letters a-i-a inside ordinary English words. Verified false
+// positives on real forum-title shapes: "Daily maintenance window 这个公告",
+// "Repair chain 讨论", "请问 Email 收不到验证码", "Air conditioning 闲聊",
+// "求推荐 training 用的笔记本", "Failed to load 报错" — all six passed the
+// "is this AI news?" gate. It also over-matched on bare `api`, `grok`, `sora`,
+// `cursor`, `token` and `xai`. Word-boundary the Latin tokens (`\bai\b` not
+// `ai`); the CJK alternatives have no word boundaries to anchor to and stay as-is.
+// The genuinely-broad ones that also cover non-AI usage ("maintain", "email",
+// "daily", "said", "trained") were only ever true by accident of the bare `ai`,
+// so anchoring removes them without losing real AI posts.
 export const AI_TITLE_RE =
-  /ai|人工智能|大模型|大 模型|gpt|chatgpt|claude|openai|anthropic|deepseek|gemini|llm|qwen|kimi|glm|智谱|混元|豆包|通义|月之暗面|机器人|agent|opencode|midjourney|sora|cursor|codex|ollama|vllm|huggingface|nvidia|推理|蒸馏|榜单|模型|token|grok|xai|perplexity|cohere|mistral|llama|falcon|生图|文生|数字人|短剧|seedance|mimo|longcat|pangu|openpangu|nanobanana|veo|yiapi|中转站|api/i;
+  // 额度/配额/余额 with an explicit how-to verb: these are usage questions about
+  // a model account ("剩余额度查询方法", "余额怎么查"), which the bare `额度重置`
+  // entry used to drop. They only reach this gate once the negative filter has
+  // let them through, so naming the verb keeps the spam filter in charge.
+  /\bai\b|artificial intelligence|人工智能|大模型|大 模型|\bgpt\b|\bgpt-?4o?\b|chatgpt|claude|openai|anthropic|deepseek|gemini|\bllms?\b|\bqwen\b|\bkimi\b|\bglm\b|智谱|混元|豆包|通义|月之暗面|机器人|\bagents?\b|opencode|midjourney|\bsora\b|\bcursor\b|codex|ollama|\bvllm\b|huggingface|\bnvidia\b|推理|蒸馏|榜单|模型|\btokens?\b|\bgrok\b|\bxai\b|perplexity|cohere|mistral|\bllama\b|falcon|生图|文生|数字人|短剧|seedance|\bmimo\b|longcat|pangu|openpangu|nanobanana|\bveo\b|yiapi|中转站|\bapis?\b|\bcoding agents?\b|编程助手|提示词|词元|(?:剩余|可用|查询|查看|重置|恢复)?\s*(?:额度|配额|余额)\s*(?:查询|查看|怎么|如何|重置|恢复|刷新|到账|用完|上限)/i;
 
 // Promo/ads that should sink to the bottom even when keyword-adjacent.
 const PROMO_TITLE_RE =

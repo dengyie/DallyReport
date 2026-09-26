@@ -310,8 +310,20 @@ export function filterByRecency(sources, dateStr) {
 // Negative filter for community forums (drops account trading, carpooling, quota complaints, payment tricks)
 // 账号交易形态：动词（出/收/买/卖/求购/出售/转让）后可隔 0-10 字再接「号/账号」——
 // 「收Google账号」「出ChatGPT Plus 账号」「卖号」等真实标题隔字/带英文也不漏。
+//
+// 2026-09-26 review: `额度重置` and bare `余额` sat in this list, which meant every
+// real report about a vendor resetting its balance quota was dropped UPSTREAM —
+// before dedup ever saw it. That is the actual cause of the quota-reset cluster
+// having to invent a headline: the descriptive posts were already gone, leaving
+// only the vague noise ("重置了重置了！"). The suppression was the bug, not the fold.
+//  - both entries now REQUIRE a seller/transfer context on either side of the
+//    balance word (剩余/额度/配额/余额/quota), so 「Claude 额度重置了 喜报」 and
+//    「余额怎么查」 are real AI news that survives, while 「剩余额度低价出售」,
+//    「额度重置了 出个车」 and 「3出 中转站 余额」 stay filtered.
+// news-dedup.mjs now folds the genuinely duplicated announcements instead of
+// papering over the loss.
 export const NEGATIVE_COMMUNITY_RE =
-  /(?:出|收|买|卖|求购|出售|转让).{0,14}(?:号|账号)|(?:号|账号).{0,4}(?:出|收|买|卖)|\b\d+出\b|求车|人找车|车找人|车位|拼车|合租|代充|余额|挂号|抽奖|降智|封号|被封|土区|日区|美区|里拉|阿根廷|美运|低价订阅|怎么买|接码|退款|额度重置|鉴别渠道|收鸡|出鸡|溢价|邀请码|纯手工|黑五|秒杀|中转站|注册送|求个.*车|本质是个快捷方式|勇闯/i;
+  /(?:出|收|买|卖|求购|出售|转让|低价).{0,14}(?:号|账号)|(?:号|账号).{0,4}(?:出|收|买|卖)|\b\d+出\b|求车|人找车|车找人|车位|拼车|合租|代充|挂号|抽奖|降智|封号|被封|土区|日区|美区|里拉|阿根廷|美运|低价订阅|怎么买|接码|退款|(?:额度|配额|余额|quota).{0,10}(?:出售|出|卖|转让|怎么买|低价|代充|回收|收)|(?:出售|出|卖|转让|收|低价|代充|回收).{0,10}(?:额度|配额|余额|quota)|鉴别渠道|收鸡|出鸡|溢价|邀请码|纯手工|黑五|秒杀|中转站|注册送|求个.*车|本质是个快捷方式|勇闯/i;
 
 // High-value technical and authoritative outlink domains worthy of unfurling/preservation.
 export const HIGH_VALUE_OUTLINK_RE =

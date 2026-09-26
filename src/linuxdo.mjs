@@ -41,6 +41,63 @@ const EXCLUDE_TITLE_RE =
 const PROMO_TITLE_RE =
   /注册送|送\d+\s*\$|倍率|中转站|合租|拼车|羊毛|充值福利|长期服务|富可敌国/i;
 
+// 2026-09-26 review: deep-fetch spawns one grok-search child process per card,
+// each of which may drive a browser tab and write a cache file. 40 of those at
+// once is the shape that gets an IP rate-limited, so cap it well below the
+// post-enrichment limiter's 3-per-tab needs and stay gentle on the provider.
+const DEEP_FETCH_CONCURRENCY = 4;
+// ...but reserve a per-origin share of the budget for cards the JSON API did not
+// supply, so a day where the HTML fallback is what actually works still gets
+// body context instead of losing the whole quota to the news/34 stream.
+const DEEP_FETCH_FALLBACK_SHARE = 0.25;
+
+/**
+ * Pick which cards get a body crawl, preserving `combined` order and giving the
+ * HTML-fallback cards a reserved slice of the budget.
+ *
+ * 2026-09-26 review: deep-fetch took `combined.slice(0, deepLimit)`, and `combined`
+ * is built JSON-API-cards-first (newest first) with HTML cards appended last. When
+ * the JSON API is healthy it returns every post in news/34 — far more than
+ * `deepLimit` — so the HTML slice could never be reached: its cards shipped with
+ * only the `linux.do 前沿讨论：<title>` placeholder even though they were exactly
+ * the ones whose body we lacked.
+ */
+export function selectDeepFetchTargets(combined, limit) {
+  const all = combined || [];
+  if (limit <= 0 || all.length === 0) return [];
+  const fromJson = all.filter((c) => c?.fromJsonApi === true);
+  const fromHtml = all.filter((c) => c?.fromJsonApi !== true);
+  if (fromHtml.length === 0) return all.slice(0, limit);
+
+  const htmlQuota = Math.max(1, Math.min(fromHtml.length, Math.round(limit * DEEP_FETCH_FALLBACK_SHARE)));
+  // Walk the two streams with a single shared cursor so the budget is always
+  // spent in full. Computing the two quotas independently loses cards whenever
+  // the reserve's rounding under-uses the budget (a limit of 5 with only HTML
+  // cards returned 2 of 5; a limit of 4 with 2 HTML cards returned 3 of 4) —
+  // silent under-crawling on exactly the degraded days this exists to help.
+  // The JSON stream is FIRST so the primary source never loses a slot to a card
+  // that appears earlier in the list.
+  const jsonFirst = [
+    ...fromJson.slice(0, limit - htmlQuota),
+    ...fromHtml.slice(0, htmlQuota),
+  ];
+  if (jsonFirst.length < limit) {
+    // The reserve rounding (or a scarce stream) left budget unspent: give it back
+    // to whichever stream still has unselected cards.
+    const already = new Set(jsonFirst);
+    for (const card of [...fromJson, ...fromHtml]) {
+      if (jsonFirst.length >= limit) break;
+      if (!already.has(card)) {
+        already.add(card);
+        jsonFirst.push(card);
+      }
+    }
+  }
+  // Keep the original ordering so the crawl follows the report's own priority.
+  const wanted = new Set(jsonFirst);
+  return all.filter((c) => wanted.has(c));
+}
+
 /**
  * Parse topic {url, title, id} entries out of a fetched linux.do listing page.
  * The extractors return markdown-ish tables with `[title](https://linux.do/t/topic/ID)`.
@@ -48,7 +105,13 @@ const PROMO_TITLE_RE =
  */
 export function parseLinuxDoTopics(text) {
   if (!text) return [];
-  const re = /\[([^\]]{2,200})\]\((https:\/\/linux\.do\/t\/topic\/(\d+)(?:\/\d+)?)\)/g;
+  // 2026-09-26 review: `[^\]]` forbade ANY "]" in a title, but real linux.do
+  // titles bracket model/vendor names constantly — the production row
+  // `[[Nao榜-logic] ds-v4-flash-0731 真王朝了](…/2684944)` matched NOTHING, so
+  // the post was invisible to the report. Allow a "]" that is not the one opening
+  // the link: the title terminator is `]` immediately followed by `(` + a URL.
+  // This is v2ex.mjs's rule, which the HTML fallback also needs.
+  const re = /\[((?:[^\n\]]|\](?!\()){2,300}?)\]\((https:\/\/linux\.do\/t\/topic\/(\d+)(?:\/\d+)?)\)/g;
   const seen = new Map();
   let m;
   while ((m = re.exec(text)) !== null) {
@@ -215,8 +278,11 @@ export function extractJsonApiTopics(text) {
 const BROWSER_FETCH_DEADLINE_MS = 45_000;
 const CDP_CALL_TIMEOUT_MS = 10_000;
 
-export async function fetchLinuxDoJsonPageWithBrowser(url, cookie, cdpHost) {
-  const deadline = Date.now() + BROWSER_FETCH_DEADLINE_MS;
+export async function fetchLinuxDoJsonPageWithBrowser(url, cookie, cdpHost, deps = {}) {
+  // `deadlineMs` is a seam: the handshake regression test needs to prove the await
+  // is BOUNDED, and it cannot wait out the real 45s production budget. Production
+  // passes nothing, so the real deadline applies.
+  const deadline = Date.now() + (deps.deadlineMs ?? BROWSER_FETCH_DEADLINE_MS);
   let target;
   try {
     const res = await fetch(`http://${cdpHost}/json/new?${encodeURIComponent(url)}`, {
@@ -232,9 +298,26 @@ export async function fetchLinuxDoJsonPageWithBrowser(url, cookie, cdpHost) {
   try {
     ws = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((ok, no) => {
-      ws.onopen = ok;
-      ws.onerror = () => no(new Error("CDP WebSocket 连接失败"));
-      ws.onclose = () => no(new Error("CDP WebSocket 在握手前关闭"));
+      // 2026-09-26 review: the three terminal events below are NOT exhaustive.
+      // A WebSocket whose TCP connect never completes (macOS sleep, a Chrome that
+      // accepted the port but wedged its browser process, a half-open VPN link)
+      // fires NONE of open/error/close — the promise stayed pending forever, and
+      // this await sits BEFORE every other deadline check, so BROWSER_FETCH_DEADLINE_MS
+      // never got a chance to bound it. Arm the deadline here too.
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        no(new Error("CDP 浏览器抓取总预算已耗尽（握手前）"));
+        return;
+      }
+      const timer = setTimeout(() => no(new Error("CDP WebSocket 握手超时")), remaining);
+      timer.unref?.();
+      const settle = (fn, arg) => {
+        clearTimeout(timer);
+        fn(arg);
+      };
+      ws.onopen = () => settle(ok);
+      ws.onerror = () => settle(no, new Error("CDP WebSocket 连接失败"));
+      ws.onclose = () => settle(no, new Error("CDP WebSocket 在握手前关闭"));
     });
     let n = 0;
     const pend = new Map();
@@ -545,7 +628,10 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
   for (const c of sortedJson) {
     if (combinedUrls.has(c.url)) continue;
     combinedUrls.add(c.url);
-    combined.push(c);
+    // Origin marker for selectDeepFetchTargets: a JSON-API card is a verbatim
+    // news/34 post, an HTML card is a listing-page card that may not even be in
+    // news/34. The two deserve different shares of the crawl budget.
+    combined.push({ ...c, fromJsonApi: true });
   }
   for (const t of htmlSelected) {
     if (combinedUrls.has(t.url)) continue;
@@ -557,6 +643,7 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
       provider: "linux.do",
       score: rankLinuxDoTopic(t),
       id: t.id,
+      fromJsonApi: false,
     });
   }
 
@@ -580,19 +667,29 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
 
   // 4) Deep-fetch top-N of combined for enriched snippets (optional).
   //    When the JSON API path is active, deep-fetch up to LINUXDO_NEWS34_DEEP_FETCH_LIMIT
-  //    (default 12) of today's cards — independent of topicLimit so the all-posts
+  //    (default 40) of today's cards — independent of topicLimit so the all-posts
   //    capture actually gets body context. Otherwise fall back to the legacy
   //    min(topicLimit, LINUXDO_DEEP_FETCH_LIMIT).
+  //    2026-09-26 review: the `?? 12` fallback was stale — config.mjs declares 40
+  //    — but it never mattered, because the limit is applied to `combined` whose
+  //    head is always JSON-API cards, so HTML cards were structurally unreachable
+  //    for deep-fetch. Quota per origin group below.
   const deepLimit = jsonApiEnabled
-    ? Math.min(combined.length, config.linuxdoNews34DeepLimit ?? 12)
+    ? Math.min(combined.length, config.linuxdoNews34DeepLimit ?? 40)
     : Math.min(combined.length, topicLimit, config.linuxdoDeepFetchLimit ?? 5);
   const sources = [];
-  const deepTargets = deepFetch ? combined.slice(0, deepLimit) : [];
+  const deepTargets = deepFetch ? selectDeepFetchTargets(combined, deepLimit) : [];
   const deepMap = new Map();
 
   if (deepTargets.length) {
-    await Promise.all(
-      deepTargets.map(async (card) => {
+    // 2026-09-26 review: this was a bare Promise.all over up to 40 cards, i.e. 40
+    // concurrent grok-search child processes, each spawning its own browser/CDP
+    // tab and disk cache write. That is the rate-limit shape, not the throughput
+    // shape. Reuse mapLimit (the same limiter enrichLinuxdoPosts uses) at 4.
+    await mapLimit(
+      deepTargets,
+      DEEP_FETCH_CONCURRENCY,
+      async (card) => {
         try {
           const cacheFile = path.join(
             config.cacheDir,
@@ -624,7 +721,8 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
           });
           /* deep-fetch failure → keep excerpt/title card */
         }
-      }),
+      },
+      0,
     );
   }
 

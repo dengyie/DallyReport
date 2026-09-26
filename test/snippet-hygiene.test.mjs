@@ -184,12 +184,19 @@ test("clarifySnippet: respects a small maxChars cap when rebuilding", () => {
 // ── 9/15 review 补测：负向社区过滤 + 权威出链提取（P1/P2 重构直接锁行为）──
 
 test("NEGATIVE_COMMUNITY_RE: 交易/拼车/代充/区域价噪声命中，正常 AI 新闻零误杀", () => {
+  // 2026-09-26 review P1 changed one row of this list on purpose. `Claude 额度重置了 喜报`
+  // USED TO be noise and was REMOVED from that set: a vendor resetting its balance
+  // is real AI news, and dropping it upstream is what forced news-dedup to
+  // fabricate a headline for the surviving vague noise. The filter now targets the
+  // SELLER ("剩余额度低价出售"), not the word 额度 — see NEGATIVE_COMMUNITY_RE.
+  // Trade-shaped quota posts are still covered, by the two replacement rows below.
   const noise = [
     "出号 ChatGPT Plus 年付 低价",
     "收 Google 账号 有偿",
     "求车 Gemini Advanced 拼车",
     "土耳其 里拉区 订阅攻略",
-    "Claude 额度重置了 喜报",
+    "剩余额度低价出售",
+    "额度重置了 出个车",
     "3出 中转站 余额",
     "代充 API 接码 注册送",
   ];
@@ -199,10 +206,11 @@ test("NEGATIVE_COMMUNITY_RE: 交易/拼车/代充/区域价噪声命中，正常
     "OpenAI 开源新模型，推理成本降一半",
     "vLLM v0.9 支持 FP8 量化推理",
     "DeepSeek 新版 API 降价，开发者欢迎",
+    "Claude 额度重置了 喜报", // 2026-09-26: 真实新闻，不再当噪声（见上）
     "模型评测：拼车功能上线企业版", // 含"拼车"但语境为产品功能——接受保守误杀（论坛信源宁可少收）
   ];
-  // 前四条必须不命中；第五条含噪声词，命中也属设计内（宁误杀不放过论坛交易帖）
-  for (const t of news.slice(0, 4)) assert.ok(!NEGATIVE_COMMUNITY_RE.test(t), `不应误杀: ${t}`);
+  // 前五条必须不命中；第六条含噪声词，命中也属设计内（宁误杀不放过论坛交易帖）
+  for (const t of news.slice(0, 5)) assert.ok(!NEGATIVE_COMMUNITY_RE.test(t), `不应误杀: ${t}`);
 });
 
 test("extractOutlinks: markdown 链接与裸 URL 提取，非权威域名被过滤，去重保序", () => {

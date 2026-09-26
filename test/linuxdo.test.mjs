@@ -17,6 +17,7 @@ import {
   fetchLinuxDoJsonPageWithBrowser,
   extractAttachments,
   enrichLinuxdoPosts,
+  selectDeepFetchTargets,
 } from "../src/linuxdo.mjs";
 
 const LISTING_FIXTURE = `
@@ -900,4 +901,270 @@ test("fetchLinuxDoAiSources: jsonApiFailures survive the repack into the final s
   const failures = out.linuxdoDiagnostics?.jsonApiFailures;
   assert.ok(Array.isArray(failures) && failures.length >= 1, "jsonApiFailures must reach the final sources");
   assert.equal(failures[0].page, 2);
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-26 deep review — linuxdo/community batch. Each test below is the
+// effect-level regression for a finding the review proved on real data.
+// ---------------------------------------------------------------------------
+
+test("parseLinuxDoTopics: titles containing brackets are parsed, not dropped", () => {
+  // 2026-09-26 review P1. The old regex was /\[([^\]]{2,200})\]/ — "no ] allowed
+  // in a title". Real linux.do titles bracket model/vendor names constantly. The
+  // production row below was in the live listing and matched NOTHING, so the post
+  // was invisible to the report. This is the exact row the review cited.
+  const row =
+    "- [[Nao榜-logic] ds-v4-flash-0731 真王朝了](https://linux.do/t/topic/2684944)";
+  const topics = parseLinuxDoTopics(row);
+  assert.equal(topics.length, 1, "a bracketed title must still parse");
+  assert.equal(topics[0].id, 2684944);
+  assert.equal(topics[0].url, "https://linux.do/t/topic/2684944");
+  assert.equal(topics[0].title, "[Nao榜-logic] ds-v4-flash-0731 真王朝了");
+});
+
+test("parseLinuxDoTopics: multiple bracketed groups inside one title", () => {
+  const topics = parseLinuxDoTopics(
+    "- [[DeepSeek] [Claude] 双响对比](https://linux.do/t/topic/2685000)",
+  );
+  assert.equal(topics.length, 1);
+  assert.equal(topics[0].title, "[DeepSeek] [Claude] 双响对比");
+});
+
+test("parseLinuxDoTopics: a close bracket inside a title does not swallow the next link", () => {
+  // "]" is only a title terminator when immediately followed by "(" + a URL, so
+  // "[a] b](url) [c](url2)" must yield the first topic and NOT absorb "c" into it.
+  const topics = parseLinuxDoTopics(
+    "- [[a] b](https://linux.do/t/topic/1) [c](https://linux.do/t/topic/2)",
+  );
+  assert.equal(topics.length, 1);
+  assert.equal(topics[0].id, 1);
+  assert.equal(
+    topics[0].title,
+    "[a] b",
+    "the trailing sibling link must not be absorbed into the title",
+  );
+  assert.ok(
+    !topics[0].title.includes("[c]"),
+    `title absorbed the next link: ${topics[0].title}`,
+  );
+});
+
+test("parseLinuxDoTopics: bracket support does not break plain titles or dedupe", () => {
+  // The pre-existing contract must be unchanged — a broader regex is only a fix
+  // if it still dedupes and still handles the /topic/ID/POST form.
+  const topics = parseLinuxDoTopics(`
+- [DeepSeek-V4-Flash 正式版发布！](https://linux.do/t/topic/2683364)
+- [DeepSeek-V4-Flash 正式版发布！](https://linux.do/t/topic/2683364)
+- [带 post 号的链接](https://linux.do/t/topic/2683364/12)
+`);
+  assert.equal(topics.length, 1, "same topic via two URL shapes dedupes to one");
+  assert.equal(topics[0].title, "DeepSeek-V4-Flash 正式版发布！");
+});
+
+test("fetchLinuxDoJsonPageWithBrowser: a socket that never opens, errors or closes is bounded", async () => {
+  // 2026-09-26 review P1. onopen/onerror/onclose are NOT exhaustive: a WebSocket
+  // whose TCP connect never completes (macOS sleep, a wedged Chrome that accepted
+  // the port) fires NONE of them. The handshake await sat BEFORE every other
+  // deadline check, so BROWSER_FETCH_DEADLINE_MS never bounded it and the whole
+  // daily report hung. This test races a 3s sentinel against a real call.
+  const realFetch = globalThis.fetch;
+  const RealWebSocket = globalThis.WebSocket;
+  try {
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({ id: "T2", webSocketDebuggerUrl: "ws://cdp.test/devtools/page/T2" }),
+    });
+    // A socket that connects to nothing and emits no lifecycle event at all.
+    globalThis.WebSocket = class {
+      constructor() {
+        /* deliberately silent: no onopen, no onerror, no onclose */
+      }
+      send() {}
+      close() {}
+    };
+    const started = Date.now();
+    // deadlineMs: the handshake await is bounded by the SAME deadline as every
+    // other step. Compressed to 300ms so the test does not wait out the real 45s
+    // production budget — what is under test is that the await is bounded AT ALL.
+    const out = await Promise.race([
+      fetchLinuxDoJsonPageWithBrowser("https://linux.do/c/news/34.json", "", "127.0.0.1:9222", {
+        deadlineMs: 300,
+      }),
+      new Promise((r) => setTimeout(() => r("HUNG"), 3000)),
+    ]);
+    assert.notEqual(out, "HUNG", "a silent socket must not keep the call pending");
+    assert.equal(out, null, "a dead handshake falls back to null");
+    assert.ok(
+      Date.now() - started < 2000,
+      "must settle at the handshake deadline, not after the full budget",
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+    globalThis.WebSocket = RealWebSocket;
+  }
+});
+
+test("selectDeepFetchTargets: HTML-fallback cards get a reserved share of the crawl budget", () => {
+  // 2026-09-26 review P1. deep-fetch used combined.slice(0, limit) and `combined`
+  // is built JSON-API-first, so when the JSON API is healthy (it returns every
+  // news/34 post — far more than the limit) the HTML cards were structurally
+  // unreachable and always shipped a title-only placeholder.
+  const combined = [];
+  for (let i = 0; i < 40; i++) {
+    combined.push({ id: i, url: `https://linux.do/t/topic/${i}`, fromJsonApi: true });
+  }
+  for (let i = 100; i < 105; i++) {
+    combined.push({ id: i, url: `https://linux.do/t/topic/${i}`, fromJsonApi: false });
+  }
+  const picked = selectDeepFetchTargets(combined, 40);
+  const fromHtml = picked.filter((c) => c.fromJsonApi !== true);
+  assert.ok(
+    fromHtml.length >= 5,
+    `HTML-fallback cards must reach deep-fetch, got ${fromHtml.length}`,
+  );
+  assert.equal(picked.length, 40, "the total budget is still respected");
+});
+
+test("selectDeepFetchTargets: a pure-JSON day behaves exactly like slice(0, limit)", () => {
+  const combined = Array.from({ length: 20 }, (_, i) => ({
+    id: i,
+    url: `https://linux.do/t/topic/${i}`,
+    fromJsonApi: true,
+  }));
+  const picked = selectDeepFetchTargets(combined, 8);
+  assert.deepEqual(
+    picked.map((c) => c.id),
+    combined.slice(0, 8).map((c) => c.id),
+    "no HTML cards means no reordering and no behavior change",
+  );
+});
+
+test("selectDeepFetchTargets: preserves the original combined order", () => {
+  // 4 cards, budget 4, 2 of them HTML. The HTML reserve is max(1, round(1)) = 1,
+  // so the primary JSON stream takes 3 — and the unspent budget from that
+  // rounding is given back rather than silently shrinking the crawl.
+  const combined = [
+    { id: 1, fromJsonApi: true },
+    { id: 2, fromJsonApi: false },
+    { id: 3, fromJsonApi: true },
+    { id: 4, fromJsonApi: false },
+  ];
+  const picked = selectDeepFetchTargets(combined, 4);
+  assert.deepEqual(
+    picked.map((c) => c.id),
+    [1, 2, 3, 4],
+    "output order follows `combined`, never quota order",
+  );
+  // A budget larger than the input returns everything, in order, untouched.
+  assert.deepEqual(
+    selectDeepFetchTargets(combined, 99).map((c) => c.id),
+    [1, 2, 3, 4],
+  );
+  // Re-emitting in `combined` order must not reorder an interleaved selection:
+  // a budget that picks 1 and 4 but not 2 and 3 still yields ascending ids.
+  const interleaved = selectDeepFetchTargets(combined, 2);
+  assert.deepEqual(
+    interleaved.map((c) => c.id),
+    [1, 2],
+  );
+});
+
+test("selectDeepFetchTargets: zero / negative budget yields nothing", () => {
+  assert.deepEqual(selectDeepFetchTargets([{ id: 1 }], 0), []);
+  assert.deepEqual(selectDeepFetchTargets([], 10), []);
+});
+
+test("selectDeepFetchTargets: the HTML reserve never shrinks the total budget", () => {
+  // Regression for a bug this batch's own test caught. Computing the two quotas
+  // independently let the reserve's rounding under-spend the budget, and on the
+  // degraded days this selector exists for it silently under-crawled:
+  //   limit 5, all-HTML  -> returned 2 of 5
+  //   limit 4, 2 HTML    -> returned 3 of 4
+  // An under-crawl is invisible (it just yields title-only cards), which is
+  // exactly the failure mode the reserve was added to fix.
+  const html = (n) =>
+    Array.from({ length: n }, (_, i) => ({ id: 100 + i, fromJsonApi: false }));
+  const json = (n) =>
+    Array.from({ length: n }, (_, i) => ({ id: i, fromJsonApi: true }));
+  for (const [input, limit] of [
+    [html(10), 5],
+    [json(40).concat(html(5)), 40],
+    [json(2).concat(html(2)), 3],
+    [json(1).concat(html(1)), 1],
+    [json(5).concat(html(5)), 40],
+    [json(1).concat(html(9)), 7],
+  ]) {
+    const picked = selectDeepFetchTargets(input, limit);
+    assert.equal(
+      picked.length,
+      Math.min(input.length, limit),
+      `budget ${limit} over ${input.length} cards returned ${picked.length}`,
+    );
+    // No duplicates: the Set-based dedupe must not drop or repeat a card.
+    assert.equal(new Set(picked).size, picked.length, "selection must be duplicate-free");
+  }
+});
+
+test("fetchLinuxDoAiSources: deep-fetch concurrency is bounded, not one-shot per card", async () => {
+  // 2026-09-26 review P1. This was a bare Promise.all over up to 40 cards = 40
+  // concurrent grok-search child processes, each with its own browser tab and
+  // cache write. That is the rate-limit shape. Assert the real ceiling, and feed
+  // a listing big enough that the old code would have shown peak = N.
+  const N = 24;
+  const LISTING_24 = ["| Topic |", "| --- |"]
+    .concat(
+      Array.from(
+        { length: N },
+        (_, i) => `| [Claude 讨论 ${i} 这个模型很强](https://linux.do/t/topic/${i}) |`,
+      ),
+    )
+    .join("\n");
+
+  let inFlight = 0;
+  let peak = 0;
+  const track = async (ms, value) => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise((r) => setTimeout(r, ms));
+    inFlight--;
+    return value;
+  };
+  const deepUrls = [];
+  const runFetch = async (url) => {
+    if (String(url).includes("/c/news/34")) {
+      return { text: LISTING_24, provider: "stub" };
+    }
+    deepUrls.push(url);
+    return track(10, { text: `这是 ${url} 的正文内容，足够长以便通过实质性检查。`.repeat(6), provider: "stub" });
+  };
+
+  await fetchLinuxDoAiSources(
+    {
+      date: "2026-09-26",
+      cacheDir: os.tmpdir(),
+      linuxdoEnabled: true,
+      linuxdoDeepFetch: true,
+      linuxdoNews34JsonApi: false,
+      linuxdoTopicLimit: N,
+      linuxdoDeepFetchLimit: N,
+      linuxdoListUrls: ["https://linux.do/c/news/34"],
+      fetchMaxChars: 2000,
+    },
+    { runFetch },
+  );
+
+  assert.equal(
+    deepUrls.length,
+    N,
+    "every selected card should be deep-fetched (the budget still covers them all)",
+  );
+  assert.ok(
+    peak <= 4,
+    `deep-fetch must be capped at the 4-wide worker pool, peak was ${peak}`,
+  );
+  assert.ok(peak > 1, `the pool should still overlap requests, peak was ${peak}`);
+  assert.ok(
+    peak < N,
+    `a one-shot Promise.all would reach ${N}; peak was ${peak}`,
+  );
 });
