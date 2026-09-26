@@ -494,13 +494,19 @@ test("image-gen: url branch fetches + PNG signature check", async () => {
   assert.equal(res.usedFallback, true);
 });
 
-test("image-gen: missing prompt file -> IMG_BAD_PROMPT", async () => {
+test("image-gen: missing prompt file -> IMG_BAD_PROMPT (summary carries the errno)", async () => {
   const c = cfg({ imagePromptFile: "/no/such/prompt.md" });
   // Non-empty repos: must pass the IMG_NO_ROWS guard so we actually reach the
-  // prompt-file-existence check this test is exercising.
-  const res = await generateGithubPoster(c, [{ repo: "a/b", starsToday: 5, starsTotal: 10 }], { fetch: () => {}, sips: false });
+  // prompt-file-existence check this test is exercising. sleepImpl is stubbed so
+  // the ENOENT retry window (5×2s) doesn't slow the suite.
+  const res = await generateGithubPoster(
+    c,
+    [{ repo: "a/b", starsToday: 5, starsTotal: 10 }],
+    { fetch: () => {}, sips: false, sleepImpl: async () => {} },
+  );
   assert.equal(res.ok, false);
   assert.equal(res.error.code, "IMG_BAD_PROMPT");
+  assert.match(res.summary, /提示词文件: ENOENT/, "summary surfaces the underlying errno");
 });
 
 test("image-gen: AI poster edits success writes AI.png and injects headlines", async () => {
@@ -767,10 +773,15 @@ test("readVaultFileRetry: transient EIO on first read -> retried and succeeds", 
   assert.equal(calls, 2, "exactly one retry");
 });
 
-test("readVaultFileRetry: ENOENT fails fast (permanent errors burn no retry budget)", async () => {
+test("readVaultFileRetry: ENOENT is transient for iCloud vaults — retried, then fails after exhausting", async () => {
+  // 2026-09-26 09:00: the prompt note read fine minutes after the run failed,
+  // while the same run's vault WRITES succeeded — iCloud dataless state briefly
+  // hides even existing files. ENOENT must not be treated as permanent; a
+  // genuinely deleted file still fails loudly, just after the window.
   let calls = 0;
   await assert.rejects(
     readVaultFileRetry("p", "utf8", {
+      attempts: 5,
       readImpl: () => {
         calls += 1;
         const e = new Error("no such file");
@@ -781,7 +792,25 @@ test("readVaultFileRetry: ENOENT fails fast (permanent errors burn no retry budg
     }),
     /no such file/,
   );
-  assert.equal(calls, 1, "permanent error must fail on the first attempt");
+  assert.equal(calls, 5, "ENOENT burns the full retry window before surfacing");
+});
+
+test("readVaultFileRetry: ENOENT that recovers on a later attempt succeeds (dataless vanish)", async () => {
+  let calls = 0;
+  const out = await readVaultFileRetry("p", "utf8", {
+    readImpl: () => {
+      calls += 1;
+      if (calls <= 2) {
+        const e = new Error("no such file");
+        e.code = "ENOENT";
+        throw e;
+      }
+      return "正文";
+    },
+    sleepImpl: async () => {},
+  });
+  assert.equal(out, "正文");
+  assert.equal(calls, 3);
 });
 
 test("readVaultFileRetry: retries exhausted -> throws the last error", async () => {

@@ -464,16 +464,27 @@ function isRetryable(err) {
 // Shared poster pipeline. The transport, fallback, validation, and atomic-write
 // behavior is identical for each poster; only the prompt/data/output spec differs.
 // iCloud 同步盘上的 vault 文件会瞬时读失败（dataless/同步窗口表现为 EIO 类错误码）：
-// 2026-09-25 一次 readFileSync 抖动让两张海报双双 IMG_BAD_PROMPT。只对瞬时类错误码
-// 重试并以异步退避等待（调用方是 async——不用 Atomics 忙等阻塞事件循环）；
-// ENOENT 等永久错误立即失败，避免真缺失的文件烧光重试预算。
-// readImpl/sleepImpl 可注入供测试（deps.readImpl 从 generateXxxPoster 透传）。
-const TRANSIENT_READ_CODES = new Set(["EIO", "EBUSY", "EDEADLK", "EPERM", "ETIMEDOUT", "EAGAIN"]);
+// 2026-09-25 一次 readFileSync 抖动让两张海报双双 IMG_BAD_PROMPT；2026-09-26 09:00
+// 同样失败再次出现，而同一 run 里 vault 写入（当日 md）全部成功、文件稍后又能正常
+// 读——即 iCloud 把闲置一天的提示词目录置于 dataless/待物化状态。根治三件：
+// ① ENOENT 也按瞬时处理（被置换的文件会在物化视图中短暂消失）；② 窗口加宽为
+// 5 次 × 2s 退避（≈20s）；③ 失败摘要带底层 errno——只打错误码的摘要让 09-26 的
+// 失败事后无法确诊。真被删除的提示词文件在窗口耗尽后仍响亮报 IMG_BAD_PROMPT。
+// readImpl/sleepImpl 可注入供测试（deps.* 从 generateXxxPoster 透传）。
+const TRANSIENT_READ_CODES = new Set([
+  "EIO",
+  "EBUSY",
+  "EDEADLK",
+  "EPERM",
+  "ETIMEDOUT",
+  "EAGAIN",
+  "ENOENT",
+]);
 
 export async function readVaultFileRetry(
   filePath,
   options,
-  { attempts = 3, delayMs = 1500, readImpl = readFileSync, sleepImpl } = {},
+  { attempts = 5, delayMs = 2000, readImpl = readFileSync, sleepImpl } = {},
 ) {
   const sleep =
     sleepImpl || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -513,10 +524,21 @@ async function generatePosterCore(config, spec, deps = {}) {
 
   let promptMd;
   try {
-    promptMd = await readVaultFileRetry(spec.promptFile, "utf8", { readImpl: deps.readImpl });
+    promptMd = await readVaultFileRetry(spec.promptFile, "utf8", {
+      readImpl: deps.readImpl,
+      sleepImpl: deps.sleepImpl,
+    });
   } catch (e) {
     const err = imgErr("IMG_BAD_PROMPT", `读提示词文件失败：${spec.promptFile}：${e.message}`);
-    return { ok: false, name: spec.name, summary: "failed (提示词文件)", error: err, usedFallback };
+    // Surface the underlying errno in the summary — a code-only summary left the
+    // 2026-09-26 09:00 failure undiagnosable from the launchd log alone.
+    return {
+      ok: false,
+      name: spec.name,
+      summary: `failed (提示词文件${e?.code ? `: ${e.code}` : ""})`,
+      error: err,
+      usedFallback,
+    };
   }
   const basePrompt = extractPrompt(promptMd);
   if (!basePrompt) {
@@ -541,7 +563,10 @@ async function generatePosterCore(config, spec, deps = {}) {
   let refError = null;
   let refDownscaleTimedOut = false;
   try {
-    const raw = await readVaultFileRetry(spec.refImage, undefined, { readImpl: deps.readImpl });
+    const raw = await readVaultFileRetry(spec.refImage, undefined, {
+      readImpl: deps.readImpl,
+      sleepImpl: deps.sleepImpl,
+    });
     const refIsPng = isPng(raw);
     // Sniff the real format instead of claiming image/png for every input: a JPEG
     // reference image uploaded as image/png + filename ref.png can be rejected by
