@@ -299,3 +299,33 @@ test("synthesizeWithWebSearch: a search that outlives the wall-clock budget is a
   );
   assert.equal(searched.length, 1, "the hanging search was attempted once, not retried");
 });
+
+test("synthesizeWithWebSearch: a synchronously-throwing searchImpl is contained (no orphan budget timer)", async () => {
+  // 2026-09-26 fresh-eyes review: searchImpl used to be invoked outside the
+  // try — a synchronous throw skipped the finally, leaving the budget timer
+  // armed; its rejection later landed on a handler-less promise (Node ≥15
+  // default: whole-run crash). Now the throw is contained by the loop's catch
+  // and the timer is always cleared.
+  let attempts = 0;
+  const fetchStub = seqStubFetch([
+    toolCallResponse("call_sync_throw", "查询甲"),
+    textResponse("## 正常日报正文"),
+  ]);
+  const out = await synthesizeWithWebSearch({
+    query: "今天2026-09-26 AI 资讯",
+    date: "2026-09-26",
+    sources: [{ url: "https://example.com/a", title: "甲", snippet: "乙" }],
+    model: "gemini-3.6-flash",
+    maxSearchRounds: 2,
+    fetch: fetchStub,
+    searchImpl: () => {
+      attempts += 1;
+      throw new Error("sync boom"); // 同步 throw，不是 rejected promise
+    },
+  });
+  assert.equal(out, "## 正常日报正文");
+  assert.equal(attempts, 1, "exactly one search attempt");
+  const secondBody = JSON.parse(fetchStub.calls[1].init.body);
+  const toolMsg = secondBody.messages.find((m) => m.role === "tool");
+  assert.match(toolMsg.content, /检索（查询甲）失败/, "sync throw becomes a failure tool message");
+});

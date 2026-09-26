@@ -468,7 +468,7 @@ function isRetryable(err) {
 // 同样失败再次出现，而同一 run 里 vault 写入（当日 md）全部成功、文件稍后又能正常
 // 读——即 iCloud 把闲置一天的提示词目录置于 dataless/待物化状态。根治三件：
 // ① ENOENT 也按瞬时处理（被置换的文件会在物化视图中短暂消失）；② 窗口加宽为
-// 5 次 × 2s 退避（≈20s）；③ 失败摘要带底层 errno——只打错误码的摘要让 09-26 的
+// 5 次 × 2s 退避（4 次 sleep 共 8s，加读取本身 ≈10s+）；③ 失败摘要带底层 errno——只打错误码的摘要让 09-26 的
 // 失败事后无法确诊。真被删除的提示词文件在窗口耗尽后仍响亮报 IMG_BAD_PROMPT。
 // readImpl/sleepImpl 可注入供测试（deps.* 从 generateXxxPoster 透传）。
 const TRANSIENT_READ_CODES = new Set([
@@ -652,7 +652,10 @@ async function generatePosterCore(config, spec, deps = {}) {
     return {
       ok: false,
       name: spec.name,
-      summary: `failed (${err.code})`,
+      // Surface the reference-image errno too: with the generations fallback the
+      // vault-side read error (exactly the 09-26 iCloud dataless case) would
+      // otherwise be invisible in the launchd summary.
+      summary: `failed (${err.code}${refError?.code ? `; ref: ${refError.code}` : ""})`,
       error: err,
       usedFallback: didFallback,
     };

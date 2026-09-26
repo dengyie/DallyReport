@@ -377,11 +377,15 @@ async function searchWithBudget(searchImpl, query, deadline) {
     }, remaining);
   });
   timer.unref?.();
-  const search = searchImpl(query);
-  // A late rejection after the budget race already surfaced must not become an
-  // unhandled rejection — attach a swallow handler to the original promise.
-  search.catch(() => {});
   try {
+    // searchImpl must be invoked INSIDE the try: a synchronously-throwing
+    // implementation would otherwise skip the finally, leaving the budget timer
+    // armed — its rejection lands on a handler-less promise minutes later and
+    // (Node ≥15 default) crashes the whole run (2026-09-26 fresh-eyes review).
+    const search = searchImpl(query);
+    // A late rejection after the budget race already surfaced must not become an
+    // unhandled rejection — attach a swallow handler to the original promise.
+    search.catch(() => {});
     return await Promise.race([search, budgetExceeded]);
   } finally {
     clearTimeout(timer);

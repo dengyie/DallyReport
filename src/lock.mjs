@@ -54,10 +54,14 @@ const MAX_LOCK_AGE_MS = (() => {
 // { error } when another *live* instance holds it. isAlive is injectable so tests
 // can simulate a dead holder without a real PID.
 // Keep the lock file's heartbeat line fresh while we hold the lock. Ownership is
-// re-checked before every write: after another launcher has taken the lock over,
-// blindly rewriting would clobber THEIR lock and let a third process in — in
-// that case the interval stops itself. Returns a release() that also stops the
-// heartbeat (idempotent).
+// re-checked before every write, so once another launcher has taken the lock
+// over, the interval stops instead of rewriting. Residual TOCTOU, accepted and
+// bounded: a stealer completing unlink+recreate inside the read→write window
+// (μs, and it needs our beat to have been silent >5min first) gets clobbered —
+// but a THIRD launcher still sees a live PID + fresh beat and refuses, the
+// stealer's release() read-compare won't delete foreign content, and we remain
+// the eventual cleaner. Closing it fully would need flock-level atomicity —
+// not worth it for this window.
 function startHeartbeat(lockPath, release) {
   const timer = setInterval(() => {
     try {

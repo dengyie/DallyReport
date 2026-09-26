@@ -170,9 +170,19 @@ export async function aiNewsSection(
       degradedSources.push(`${label}（${arr[errKey].failures?.[0]?.message || "采集失败"}）`);
       continue;
     }
+    // Partial-failure shape: { listingFailures, deepFetchFailures,
+    // cacheWriteFailures, jsonApiFailures } — an earlier draft checked a
+    // nonexistent `failures` key, which made this branch dead code (2026-09-26
+    // fresh-eyes review).
     const diag = arr?.communityDiagnostics ?? arr?.linuxdoDiagnostics;
-    if (diag?.failures?.length) {
-      degradedSources.push(`${label}（${diag.failures.length} 项采集失败）`);
+    const failureCount = diag
+      ? (diag.listingFailures?.length || 0) +
+        (diag.deepFetchFailures?.length || 0) +
+        (diag.cacheWriteFailures?.length || 0) +
+        (diag.jsonApiFailures?.length || 0)
+      : 0;
+    if (failureCount) {
+      degradedSources.push(`${label}（${failureCount} 项采集失败）`);
     }
   }
 

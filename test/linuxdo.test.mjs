@@ -865,3 +865,39 @@ test("fetchLinuxDoJsonPageWithBrowser: socket that opens but never answers is bo
     globalThis.WebSocket = RealWebSocket;
   }
 });
+
+test("fetchLinuxDoAiSources: jsonApiFailures survive the repack into the final sources", async () => {
+  // 2026-09-26 fresh-eyes review: jsonApiFailures used to be attached to the
+  // intermediate news/34 array and silently dropped when fetchLinuxDoAiSources
+  // repacked the cards — a mid-pagination challenge page was invisible to every
+  // downstream consumer.
+  const runFetch = async (url) => {
+    if (String(url).includes("/34.json")) {
+      if (String(url).includes("page=1")) {
+        return {
+          text: fence([
+            { id: 11, title: "DeepSeek V4 Flash 发布", created_at: "2026-08-06T00:00:00Z", excerpt: "DeepSeek 发布新版，推理成本大幅下降。" },
+          ]),
+          provider: "stub",
+        };
+      }
+      return { text: "<html>challenge</html>", provider: "stub" };
+    }
+    return { text: LISTING_FIXTURE, provider: "stub" };
+  };
+  const out = await fetchLinuxDoAiSources(
+    {
+      date: "2026-08-06",
+      cacheDir: "/tmp/dally-json-propagate",
+      linuxdoEnabled: true,
+      linuxdoTopicLimit: 2,
+      linuxdoDeepFetch: false,
+      linuxdoNews34JsonApi: true,
+      linuxdoListUrls: ["https://linux.do/c/news/34"],
+    },
+    { runFetch },
+  );
+  const failures = out.linuxdoDiagnostics?.jsonApiFailures;
+  assert.ok(Array.isArray(failures) && failures.length >= 1, "jsonApiFailures must reach the final sources");
+  assert.equal(failures[0].page, 2);
+});

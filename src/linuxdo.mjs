@@ -473,6 +473,11 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
 
   // 1a) Fetch news/34 via Discourse JSON API (all today's posts, no AI filter).
   const jsonApiCards = jsonApiEnabled ? await fetchNews34ViaJsonApi(config, deps) : [];
+  // fetchNews34ViaJsonApi attaches jsonApiFailures to its OWN intermediate array;
+  // repacking into the final sources drops non-enumerable props, so carry the
+  // failures over explicitly — otherwise a mid-pagination challenge page stays
+  // invisible to every downstream consumer (2026-09-26 fresh-eyes review).
+  const jsonApiDiagnostics = jsonApiCards?.linuxdoDiagnostics?.jsonApiFailures || [];
 
   // 1b) HTML listing pages (AI tag page, and news/34 as fallback) — best-effort.
   const listTexts = [];
@@ -564,7 +569,12 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
       });
     }
     attachCacheMetadata(empty, usedCache, cacheFiles);
-    attachDiagnostics(empty, { listingFailures, deepFetchFailures, cacheWriteFailures });
+    attachDiagnostics(empty, {
+      listingFailures,
+      deepFetchFailures,
+      cacheWriteFailures,
+      jsonApiFailures: jsonApiDiagnostics,
+    });
     return empty;
   }
 
@@ -634,7 +644,12 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
   }
   attachCacheMetadata(sources, usedCache, cacheFiles);
   attachRawJsonCards(sources, jsonApiCards, deepMap);
-  attachDiagnostics(sources, { listingFailures, deepFetchFailures, cacheWriteFailures });
+  attachDiagnostics(sources, {
+    listingFailures,
+    deepFetchFailures,
+    cacheWriteFailures,
+    jsonApiFailures: jsonApiDiagnostics,
+  });
   return sources;
 }
 
