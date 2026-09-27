@@ -84,6 +84,61 @@ export function shouldSynthesize({
   );
 }
 
+// The `[N]` markers in the body index the FULL, 1-based source list the model
+// was given. This returns the cited subset as `{n, source}` pairs that keep
+// that original number, so the renderer can never renumber them by position.
+//
+// 2026-09-27 review B1: the selection was a bare array of sources and the
+// reference renderer numbered them 1..N. A body citing [1] and [6] against a
+// 5-entry list therefore produced a two-line reference block whose second line
+// was silently the WRONG source — visible in the shipped 2026-09-27 note, and
+// the same wrong pairing reached the poster via `posterSources`.
+export function selectCitedSources(sources, bodyText) {
+  const list = sources || [];
+  const indices = new Set();
+  const citeRe = /\[(\d+)\]/g;
+  let m;
+  while ((m = citeRe.exec(bodyText || "")) !== null) {
+    const idx = Number.parseInt(m[1], 10) - 1;
+    // Out-of-range markers are ignored rather than clamped: a body that cites
+    // [9] against 8 sources is malformed, and mapping it onto source 8 would
+    // assert a link the model never made.
+    if (Number.isInteger(idx) && idx >= 0 && idx < list.length) indices.add(idx);
+  }
+  if (!indices.size) {
+    return list.map((source, i) => ({ n: i + 1, source }));
+  }
+  return [...indices]
+    .sort((a, b) => a - b)
+    .map((i) => ({ n: i + 1, source: list[i] }));
+}
+
+// Render the reference bullets. `deps` exists so the unit test can drive the
+// pure formatting without the module's own imports.
+export function buildReferenceLines(
+  cited,
+  deps = { stripMarkdown, sanitizeUrl },
+) {
+  return (cited || []).slice(0, 30).map(({ source: s }) => {
+    // Strip markdown fragments from scraped titles first (v2ex/linuxdo titles
+    // can carry `[...](...)` residue and reply metadata), THEN escape what
+    // remains so parens can't break the markdown link syntax.
+    const title = deps.stripMarkdown(s.title || s.url || "来源").replace(
+      /[\[\]()]/g,
+      (c) => "\\" + c,
+    );
+    // 2026-09-26 review P1: this renderer used to emit `s.url` verbatim, so an
+    // attacker-authored `javascript:` href from a scraped post became a live
+    // clickable link in the user's note. markdown.mjs already owned the correct
+    // defense (sanitizeUrl rejects any non-http(s) scheme) and its own
+    // sourceCard used it — but sourceCard has zero production callers, so the
+    // two tests guarding it protected code that never shipped while this path
+    // ran unvalidated. Degrade to a plain title when the URL is not http(s).
+    const url = deps.sanitizeUrl(s.url);
+    return url ? `- [${title}](<${url}>)` : `- ${title}`;
+  });
+}
+
 // The opts object parameterizes the query/model/name/H1 so the SAME pipeline can
 // back both the main channel (defaults) and the alt channel (resolveAltChannel in
 // run.mjs). Defaults match the pre-parameterization behavior exactly, so existing
@@ -368,38 +423,14 @@ export async function aiNewsSection(
     }
   }
 
-  // Append reference sources section at the bottom. Parses [N] markers from the
-  // body text to show only the sources actually cited by the model. When no [N]
-  // markers are found (fallback/degraded path), shows all sources (capped at 30).
+  // Append reference sources section at the bottom. The `[N]` markers in the body
+  // index the FULL source list, so the selection carries each source's own number
+  // (selectCitedSources) and the renderer prints that number rather than its own
+  // position. With no [N] markers (fallback/degraded path) every source is
+  // listed, numbered by position.
   const bodyTextOrDefault = bodyText || "";
-  const citedIndices = new Set();
-  const citeRe = /\[(\d+)\]/g;
-  let citeMatch;
-  while ((citeMatch = citeRe.exec(bodyTextOrDefault)) !== null) {
-    const idx = Number.parseInt(citeMatch[1], 10) - 1; // 1-indexed in text
-    if (idx >= 0 && idx < sources.length) citedIndices.add(idx);
-  }
-  const citedSources = citedIndices.size
-    ? [...citedIndices].sort((a, b) => a - b).map((i) => sources[i])
-    : sources;
-  const refLines = citedSources.slice(0, 30).map((s) => {
-    // Strip markdown fragments from scraped titles first (v2ex/linuxdo titles
-    // can carry `[...](...)` residue and reply metadata), THEN escape what
-    // remains so parens can't break the markdown link syntax.
-    const title = stripMarkdown(s.title || s.url || "来源").replace(
-      /[\[\]()]/g,
-      (c) => "\\" + c,
-    );
-    // 2026-09-26 review P1: this renderer used to emit `s.url` verbatim, so an
-    // attacker-authored `javascript:` href from a scraped post became a live
-    // clickable link in the user's note. markdown.mjs already owned the correct
-    // defense (sanitizeUrl rejects any non-http(s) scheme) and its own
-    // sourceCard used it — but sourceCard has zero production callers, so the
-    // two tests guarding it protected code that never shipped while this path
-    // ran unvalidated. Degrade to a plain title when the URL is not http(s).
-    const url = sanitizeUrl(s.url);
-    return url ? `- [${title}](<${url}>)` : `- ${title}`;
-  });
+  const citedSources = selectCitedSources(sources, bodyTextOrDefault);
+  const refLines = buildReferenceLines(citedSources);
   const refSection = refLines.length
     ? `\n\n---\n\n### 参考来源\n\n${refLines.join("\n")}`
     : "";
@@ -468,7 +499,11 @@ export async function aiNewsSection(
     // actually cited, so the poster is a visualization of the article rather
     // than a different (forum-first) source set. Falls back to all sources
     // when the body carried no [N] citations (fallback/degraded path).
-    posterSources: citedSources.length ? citedSources : sources,
+    // NOTE: plain source objects, not the {n, source} pairs — collectAiHeadlines
+    // in image-gen.mjs reads `source.title` directly, so wrapping them would
+    // silently empty the poster. The poster renders rows positionally and never
+    // prints a [N] of its own, so it does not need the numbers.
+    posterSources: citedSources.length ? citedSources.map((c) => c.source) : sources,
     // Raw linuxdo news/34 cards for auxiliary materials (all today's posts, no
     // AI filter, no cap). Written to a separate file by run.mjs.
     linuxdoRaw: linuxdoSources?.linuxdoRaw || [],
