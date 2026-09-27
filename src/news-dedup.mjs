@@ -86,6 +86,16 @@ const CLUSTERS = [
     // "does it name some other product?" check runs. Deliberately does NOT
     // include 额度/配额/余额/quota — see above.
     ownEntities: /chatgpt|codex|\bgpt\b|openai|gemini|奥特曼|tibo/gi,
+    // 2026-09-27 review E1: the rewrite makes a factual claim about WHO reset,
+    // so it may only fire when a title actually names this event's vendor. The
+    // deny list above fails open on every name it has not met — xAI/Grok, Cursor,
+    // Midjourney and Perplexity were all measured being rewritten into
+    // "ChatGPT/Codex 额度重置", i.e. a different company, handed to the synthesis
+    // model as a source title. An allow-list needs no maintenance when the next
+    // vendor ships: it simply declines to claim a story it cannot attribute.
+    // Applied across the whole cluster (see clusterHasOwnVendor), so a brandless
+    // "额度重置了" folds onto its real sibling instead of being renamed alone.
+    ownVendor: /chatgpt|codex|\bgpt\b|openai|奥特曼|tibo/i,
     rewrite: () => "ChatGPT/Codex 额度重置",
   },
   {
@@ -103,6 +113,17 @@ const CLUSTERS = [
     //合作 news is the opposite event (adding, not removing).
     key: "apple-qwen-removal",
     match: /苹果.*千问.*(?:删除|撤回|下架|移除)|苹果.*(?:删除|撤回|下架|移除).*千问/i,
+    // 2026-09-27 review E2: this cluster had no evidence requirement, and its
+    // match fires on 苹果…千问…删除 — which a DEBUNK also satisfies. Measured:
+    // 「苹果回应：从未移除千问接入」 was rewritten into "苹果中国官网删除 Apple
+    // 智能接入阿里千问使用手册", the exact opposite of the thread, asserted to
+    // the synthesis model as a source title. The cluster's own comment already
+    // warned that the bare pairing 苹果…千问 would catch the opposite event; the
+    // negation slipped through the same way. Requires a SECOND post reporting
+    // the same action (weakMatch) and rejects denials outright.
+    weakMatch: /苹果.*千问.*(?:删除|撤回|下架|移除)|苹果.*(?:删除|撤回|下架|移除).*千问/i,
+    exclude: /从未|未曾|否认|辟谣|没有|不存在|仍可|仍能|可正常|未删除|未撤回|未下架|未移除|依旧|仍然/i,
+    requiresSibling: true,
     rewrite: () => "苹果中国官网删除 Apple 智能接入阿里千问使用手册",
   },
 ];
@@ -169,7 +190,16 @@ function clusterMatchFor(title, cluster, hasPositiveMember) {
   // vendor's announcement can never become positive evidence in the first place
   // — otherwise it would establish the evidence a later vague post folds onto.
   if (cluster.vendorMatch && cluster.vendorMatch.test(title)) return null;
-  if (cluster.match.test(title)) return "positive";
+  if (cluster.match.test(title)) {
+    // 2026-09-27 review E2: a cluster whose rewrite asserts an EVENT happened
+    // (`requiresSibling`) needs a second post reporting it, so one forum claim
+    // is never published as fact on the module's own authority. The verdict stays
+    // "positive" — it is a real report of the action, which is exactly what
+    // sibling evidence is made of; COUNTING the cluster is where the requirement
+    // lives. Demoting it to the weak tier instead would make a two-post fold
+    // impossible: neither member could ever be positive.
+    return "positive";
+  }
   if (!cluster.weakMatch) return null;
   if (!cluster.weakMatch.test(title)) return null;
   // P1-2: co-presence. `exclude` covers the object when a title is read on its
@@ -260,6 +290,26 @@ export function dedupeAndNormalizeSources(sources) {
       continue;
     }
     const cluster = CLUSTERS.find((c) => c.key === key);
+    // 2026-09-27 review E2: some rewrites assert that an EVENT happened, which is
+    // a stronger claim than "these posts are about one topic" and needs a second
+    // post reporting it before the module speaks for the fact. One forum claim —
+    // or a refutation that happens to name the same action — is not enough.
+    if (cluster.requiresSibling && members.length < 2) {
+      members.forEach((m, idx) => {
+        out[slots[idx]] = m;
+      });
+      continue;
+    }
+    // 2026-09-27 review E1: the rewrite is a factual claim about a specific
+    // actor, so it requires that SOME title in the cluster actually names it.
+    // Checked across the whole cluster, not per-title, so the brandless forum
+    // posts ("重置了重置了！") still fold onto their real sibling.
+    if (cluster.ownVendor && !members.some((m) => cluster.ownVendor.test(String(m?.title || "")))) {
+      members.forEach((m, idx) => {
+        out[slots[idx]] = m;
+      });
+      continue;
+    }
     const rep = pickRepresentative(members);
     const rewritten =
       typeof cluster.rewrite === "function" ? cluster.rewrite(rep?.title) : cluster.rewrite;

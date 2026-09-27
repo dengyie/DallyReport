@@ -407,3 +407,98 @@ test("dedupeAndNormalizeSources: vague posts naming a foreign entity still do NO
   const out = dedupeAndNormalizeSources([REAL_RESET_CARD, card("Redis 重置了", "Redis 连接池 reset 后异常")]);
   assert.equal(out.length, 2, "a Redis story named in the TITLE folded in just because it said 重置");
 });
+
+// ---------------------------------------------------------------------------
+// 2026-09-27 review E1/E2.
+//
+// E1: the vendor guard was a DENY list. It named fourteen vendors, so every
+// vendor NOT on it — xAI/Grok, Cursor, Midjourney, Cohere's successors, any
+// company that ships a model in the next two years — was rewritten into
+// "ChatGPT/Codex 额度重置". A deny list has to be re-extended forever and fails
+// open on every name it hasn't met; measured, three of four foreign vendors
+// were fabricated. The rewrite must instead be conditioned on the title actually
+// being about the event's own vendor.
+//
+// E2: apple-qwen-removal carried no evidence requirement. Its match fires on
+// 苹果…千问…删除, so a DEBUNK post — 「苹果回应：从未移除千问接入」 — was
+// rewritten into "苹果中国官网删除 Apple 智能接入阿里千问使用手册": the exact
+// opposite of what the thread says, asserted to the synthesis model as a source
+// title. (Its own comment warned about exactly this for the 苹果…千问 pairing and
+// the negation slipped through anyway.)
+// ---------------------------------------------------------------------------
+
+const reset = (n, title, snippet) => ({ url: `https://linux.do/t/topic/${n}`, title, snippet });
+
+test("dedupeAndNormalizeSources: a foreign vendor's quota reset is never rewritten as OpenAI's", () => {
+  for (const [n, title, snippet] of [
+    [101, "Grok 额度重置了", "xAI 刚刚把 Grok 的月度额度重置了，额度已经恢复正常使用。"],
+    [102, "Cursor 额度重置", "Cursor 的额度重置了，可以继续使用下去。"],
+    [103, "Midjourney 额度重置", "Midjourney 的额度重置通知已经出来了。"],
+    [104, "Perplexity 额度重置", "Perplexity 宣布额度重置，所有套餐都恢复。"],
+  ]) {
+    const out = dedupeAndNormalizeSources([reset(n, title, snippet)]);
+    assert.equal(
+      out[0].title,
+      title,
+      `「${title}」 was rewritten as another company's event`,
+    );
+  }
+});
+
+test("dedupeAndNormalizeSources: a brandless quota reset with no OpenAI evidence is not rewritten", () => {
+  // The rewrite is a factual claim about WHO reset. Without a name tying the
+  // title to OpenAI it cannot be made, whatever the quota vocabulary says.
+  const out = dedupeAndNormalizeSources([reset(105, "额度重置了", "今天额度重置了，很开心。")]);
+  assert.equal(out[0].title, "额度重置了");
+});
+
+test("dedupeAndNormalizeSources: a genuine OpenAI reset still folds (contrast direction)", () => {
+  const out = dedupeAndNormalizeSources([
+    reset(106, "ChatGPT 额度重置了", "ChatGPT Plus 的额度重置，恢复正常使用。"),
+    reset(107, "重置了重置了！", "今天额度重置了，开心。"),
+  ]);
+  assert.equal(out.length, 1, "the fold still happens — the guard is not over-blocking");
+  assert.equal(out[0].title, "ChatGPT/Codex 额度重置");
+});
+
+test("dedupeAndNormalizeSources: a codex-only reset still folds", () => {
+  const out = dedupeAndNormalizeSources([
+    reset(108, "codex 额度重置", "额度重置，今天又能用了。"),
+    reset(109, "codex额度又重置", "又重置了。"),
+  ]);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].title, "ChatGPT/Codex 额度重置");
+});
+
+test("dedupeAndNormalizeSources: a debunk post is not rewritten into a removal announcement", () => {
+  const out = dedupeAndNormalizeSources([
+    reset(
+      110,
+      "苹果回应：从未移除千问接入",
+      "苹果方面回应称从未移除 Apple 智能中的千问接入，相关页面仍然可以正常访问。",
+    ),
+  ]);
+  assert.equal(
+    out[0].title,
+    "苹果回应：从未移除千问接入",
+    "a refutation was rewritten as the event it refutes",
+  );
+});
+
+test("dedupeAndNormalizeSources: the genuine Apple/Qwen removal still folds", () => {
+  const out = dedupeAndNormalizeSources([
+    reset(111, "苹果中国官网删除 Apple 智能接入阿里千问使用手册", "官网页面已经无法访问。"),
+    reset(112, "苹果貌似撤回了有关Apple智能的千问扩展内容", "撤回之后官网找不到入口了。"),
+  ]);
+  assert.equal(out.length, 1, "the two posts are the same event and must still fold");
+  assert.equal(out[0].title, "苹果中国官网删除 Apple 智能接入阿里千问使用手册");
+});
+
+test("dedupeAndNormalizeSources: a single-sided removal report is not rewritten alone", () => {
+  // One post claiming a removal is not evidence the removal happened; the fold
+  // needs a sibling reporting the same action.
+  const out = dedupeAndNormalizeSources([
+    reset(113, "苹果撤回了千问扩展", "撤回之后就找不到了。"),
+  ]);
+  assert.equal(out[0].title, "苹果撤回了千问扩展");
+});
