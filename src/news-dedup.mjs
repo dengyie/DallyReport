@@ -57,15 +57,35 @@ const CLUSTERS = [
     //     A day of purely vague resets leaves every card untouched.
     //   - exclude   guards the positive match, where the object can plausibly be
     //     something other than a balance (keys, prompts, routers, cloud quotas…).
+    //
+    // 2026-09-27 review (round 4) P1-1. "reset AND a quota object" is still not
+    // enough to identify THIS event: it names no VENDOR, so "Gemini 额度重置",
+    // "Claude 额度重置了新周期" and "DeepSeek 余额重置" all matched positively and
+    // were rewritten into "ChatGPT/Codex 额度重置" — a different company,
+    // deterministically fabricated, handed to the synthesis model as a source
+    // title. `ownEntities` listed 额度/配额/余额/quota as "this event's own
+    // entities", which is exactly backwards: those nouns are the *generic* half
+    // of the match and appear in every vendor's announcement. So the quota nouns
+    // move OUT of ownEntities and the positive path gains an explicit vendor
+    // constraint: a title qualifies only if it names no AI vendor OTHER than
+    // the ones this event actually is (OpenAI/Codex/ChatGPT/Gemini). A title
+    // that names no vendor at all is still positive evidence — the real forum
+    // posts ("重置了重置了！"'s siblings with an explicit object) frequently
+    // mention no brand, and excluding them would cost the module its job.
     key: "quota-reset",
-    match: /(?:重置|reset).*(?:额度|配额|余额|quota)|(?:额度|配额|余额|quota).*(?:重置|reset)/i,
+    match:
+      /(?:重置|reset).*(?:额度|配额|余额|quota)|(?:额度|配额|余额|quota).*(?:重置|reset)/i,
+    // Any OTHER AI vendor makes the story that vendor's, not OpenAI's.
+    vendorMatch:
+      /\b(?:gemini|claude|anthropic|deepseek|mistral|qwen|通义|千问|llama|豆包|智谱|混元|文心|ernie|kimi|moonshot|deepmind)\b|gemini|claude|anthropic|deepseek|mistral|qwen|千问|llama|豆包|智谱|混元|文心|ernie|kimi/i,
     weakMatch: /重置|reset/i,
     exclude:
-      /密码|password|密钥|\bkeys?\b|系统提示|提示词|教程|路由器|固件|factory|会话|session|配置|settings|上下文窗口|context window|区域|region|\baws\b|\bgcp\b|\bazure\b/i,
+      /密码|password|密钥|\bkeys?\b|系统提示|提示词|教程|路由器|固件|factory|会话|session|配置|settings|上下文窗口|context window|区域|region|\baws\b|\bgcp\b|\bazure\b|政策|流程|规则|制度|风控|申诉|实名/i,
     // Entity tokens that belong to THIS event: their presence in a weak title
     // does not make it a foreign story, so they are discounted before the
-    // "does it name some other product?" check runs.
-    ownEntities: /chatgpt|codex|\bgpt\b|openai|claude|gemini|奥特曼|tibo|quota|额度|配额|余额/gi,
+    // "does it name some other product?" check runs. Deliberately does NOT
+    // include 额度/配额/余额/quota — see above.
+    ownEntities: /chatgpt|codex|\bgpt\b|openai|gemini|奥特曼|tibo/gi,
     rewrite: () => "ChatGPT/Codex 额度重置",
   },
   {
@@ -124,8 +144,12 @@ function pickRepresentative(members) {
 // other Latin product token or a known foreign CJK subject. This is what stops a
 // vague "reset" post from joining a quota cluster when it is plainly about
 // something else (Redis, SQLite, AWS regions, password flows…).
-const FOREIGN_ENTITY_RE = /\b[\w-]*(?:redis|sqlite|postgres|mysql|kafka|rabbit|mongo|docker|kube\w*|linux|windows|aws|azure|gcp|nginx|apache|node|npm|react|vue|java|rust|golang|python|django|flask|git|github|gitlab|nginx|systemd|journald|router|firmware|token|session|cookie|password|login|captcha|turnstile|cloudflare)\b/i;
-const FOREIGN_CJK_RE = /路由器|固件|密码|密钥|系统提示|提示词|教程|配置|会话|注册|刷机|越狱|破解/;
+const FOREIGN_ENTITY_RE = /\b[\w-]*(?:redis|sqlite|postgres|mysql|kafka|rabbit|mongo|docker|kube\w*|linux|windows|aws|azure|gcp|nginx|apache|node|npm|react|vue|java|rust|golang|python|django|flask|git|github|gitlab|systemd|journald|router|firmware|token|session|cookie|password|login|captcha|turnstile|cloudflare|rate[\s_-]?limit|throttl\w*|quota[\s_-]?policy)\b/i;
+// 2026-09-27 review (round 4) P1-2. Added: mistral and the CJK policy/flow/
+// account vocabulary. This list is the ONLY thing standing between a vague
+// "重置" post about a different subject and the ChatGPT/Codex cluster, and it
+// was missing exactly the subjects that were being folded.
+const FOREIGN_CJK_RE = /路由器|固件|密码|密钥|系统提示|提示词|教程|配置|会话|注册|刷机|越狱|破解|政策|流程|规则|制度|账号|账户|帐号|安全|风控|申诉|实名|认证/;
 
 function namesForeignEntity(title, cluster) {
   const stripped = cluster.ownEntities
@@ -140,9 +164,17 @@ function namesForeignEntity(title, cluster) {
 // why that two-tier rule exists.
 function clusterMatchFor(title, cluster, hasPositiveMember) {
   if (cluster.exclude && cluster.exclude.test(title)) return null;
+  // P1-1: a positive match must not merely state a quota reset, it must not
+  // state ANOTHER VENDOR's quota reset. This runs BEFORE `match` so a foreign
+  // vendor's announcement can never become positive evidence in the first place
+  // — otherwise it would establish the evidence a later vague post folds onto.
+  if (cluster.vendorMatch && cluster.vendorMatch.test(title)) return null;
   if (cluster.match.test(title)) return "positive";
   if (!cluster.weakMatch) return null;
   if (!cluster.weakMatch.test(title)) return null;
+  // P1-2: co-presence. `exclude` covers the object when a title is read on its
+  // own, but this check is the only guard once a real quota card has put the
+  // cluster in play. A foreign story is just as foreign here.
   if (namesForeignEntity(title, cluster)) return null;
   return hasPositiveMember ? "weak" : null;
 }

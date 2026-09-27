@@ -288,3 +288,122 @@ test("dedupeAndNormalizeSources: a pure-forum cluster is NOT marked fromDaily", 
   assert.equal(out.length, 1);
   assert.equal(out[0].fromDaily, undefined, "no member was a hard source");
 });
+
+// ---------------------------------------------------------------------------
+// 2026-09-27 review (round 4) P1-1 / P1-2.
+//
+// The round-3 fix moved `match` off the bare /重置|reset/ onto
+// "reset AND a quota object", and the source comment claims that is what
+// stopped "Google 账号安全重置新流程上线" and "Mistral API rate limit reset"
+// being folded into the ChatGPT/Codex cluster. It did not. Both still fold, and
+// so does a bare-vendor quota story. All five shapes below were verified
+// folding before this test existed.
+//
+// The reason the existing 290 lines missed it: every non-folding case was fed
+// ALONE. `exclude` is the only thing standing between those titles and the
+// fold, and it happens to contain 账号-adjacent and rate-limit-adjacent words.
+// The instant a title is named ALONGSIDE a real quota card it is judged by a
+// different path (the weak-member `namesForeignEntity` check), whose list does
+// not carry those words. So the poison samples are now asserted next to a
+// legitimate quota card, which is the only context where they actually occur.
+// ---------------------------------------------------------------------------
+
+// The positive side, to be paired with each poison sample below.
+const REAL_RESET_CARD = card("Codex额度已重置，Tibo回应称明天再次重置", "openai 官方宣布额度恢复，细节见正文");
+
+test("dedupeAndNormalizeSources: a bare vendor quota reset is that vendor's event, not OpenAI's", () => {
+  // P1-1. `match` requires reset AND a quota object but names NO vendor, so
+  // "Gemini 额度重置" is positive evidence for the ChatGPT/Codex event and was
+  // deterministically REWRITTEN into it — a different company, delivered to the
+  // synthesis model as if it were OpenAI's announcement.
+  for (const title of ["Gemini 额度重置公告", "Claude 额度重置了新周期", "DeepSeek 余额重置"]) {
+    const out = dedupeAndNormalizeSources([card(title, "公告正文")]);
+    assert.equal(out.length, 1, "a lone card must never be rewritten away");
+    assert.equal(
+      out[0].title,
+      title,
+      `${title} was rewritten into the OpenAI/Codex event — a different vendor`,
+    );
+  }
+});
+
+test("dedupeAndNormalizeSources: a foreign vendor's quota reset does not fold onto the OpenAI one", () => {
+  // P1-2. Co-presence: a real Codex card establishes positive evidence, and the
+  // foreign card then folds onto it — so the day loses a story outright.
+  const out = dedupeAndNormalizeSources([
+    REAL_RESET_CARD,
+    card("Mistral 额度重置", "mistral 公告"),
+    card("Gemini 额度调整", "谷歌公告"),
+  ]);
+  const titles = out.map((s) => s.title);
+  assert.equal(out.length, 3, `a foreign vendor's reset folded onto the OpenAI one: ${JSON.stringify(titles)}`);
+});
+
+test("dedupeAndNormalizeSources: an account-security reset does not fold onto the quota reset", () => {
+  // P1-2. The exact title the round-3 comment claims to have fixed.
+  const out = dedupeAndNormalizeSources([
+    REAL_RESET_CARD,
+    card("Google 账号安全重置新流程上线", "谷歌账号安全策略更新说明"),
+  ]);
+  assert.equal(
+    out.length,
+    2,
+    `an account-security story folded into "ChatGPT/Codex 额度重置": ${JSON.stringify(out.map((s) => s.title))}`,
+  );
+});
+
+test("dedupeAndNormalizeSources: a rate-limit reset does not fold onto a balance reset", () => {
+  // P1-2. `limit` is deliberately not a quota object, but "reset" alone still
+  // makes this a positive match once the title also says 额度-adjacent English.
+  const out = dedupeAndNormalizeSources([
+    REAL_RESET_CARD,
+    card("Mistral API rate limit reset", "mistral raised the ceiling"),
+  ]);
+  assert.equal(
+    out.length,
+    2,
+    `a rate-limit story folded into "ChatGPT/Codex 额度重置": ${JSON.stringify(out.map((s) => s.title))}`,
+  );
+});
+
+test("dedupeAndNormalizeSources: a policy/flow story does not fold onto the quota reset", () => {
+  // P1-2. Same shape, Chinese vocabulary.
+  const out = dedupeAndNormalizeSources([
+    REAL_RESET_CARD,
+    card("额度重置政策流程调整公告", "平台公告"),
+    card("账号安全政策更新", "平台公告"),
+  ]);
+  assert.equal(
+    out.length,
+    3,
+    `a policy/flow story folded in: ${JSON.stringify(out.map((s) => s.title))}`,
+  );
+});
+
+test("dedupeAndNormalizeSources: the real vague reset posts still fold", () => {
+  // The positive side of the same change: tightening the vendor constraint must
+  // not cost the module its original job. These are the 2026-08-09 titles.
+  const out = dedupeAndNormalizeSources([
+    REAL_RESET_CARD,
+    card("重置了重置了！", "短"),
+    card("codex 周一还会重置！", "短"),
+    card("奥特曼又给重置了", "短"),
+  ]);
+  assert.equal(out.length, 1, "the real vague posts must still collapse onto the real card");
+  assert.equal(out[0].title, "ChatGPT/Codex 额度重置");
+});
+
+test("dedupeAndNormalizeSources: vague posts naming a foreign entity still do NOT fold", () => {
+  // ...and the co-presence guard must not become so broad that it also rejects
+  // the real thing. A vague post ABOUT Redis is still a Redis story.
+  //
+  // Scope note: the module clusters on TITLE only, by design — the snippet picks
+  // the representative, it never decides membership. So a foreign subject named
+  // ONLY in the snippet ("又重置了" + "Redis 连接池 reset 后异常") is invisible to
+  // it. That is a real residual limitation, not a bug: the title alone gives no
+  // signal to separate it from "codex 周一还会重置！", which is the same shape,
+  // and folding on snippet prose is the opposite of the module's purpose.
+  // Recorded as 需要确认 rather than asserted either way.
+  const out = dedupeAndNormalizeSources([REAL_RESET_CARD, card("Redis 重置了", "Redis 连接池 reset 后异常")]);
+  assert.equal(out.length, 2, "a Redis story named in the TITLE folded in just because it said 重置");
+});
