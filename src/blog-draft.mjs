@@ -55,6 +55,14 @@ export function convertReportToBlogDraft(markdown, { date, sourceFile = "", imag
   const dropped = Number.parseInt(frontMatter.days_dropped || "0", 10);
   if (Number.isFinite(dropped) && dropped > 0) warnings.push(`已过滤 ${dropped} 条时效不符来源`);
   if (/低素材提示|低素材/.test(body)) warnings.push("当日硬源不足，正文包含近期趋势，请人工核验后再发布");
+  // 2026-09-27 review D2: ai-news.mjs writes this banner into the body exactly
+  // when synthesis failed and the text is the model's raw memory answer — the one
+  // day a draft must not be published on trust. The detector looked only for
+  // 低素材, so `review_warnings` came out `[]` and the pending review flag stood
+  // alone with nothing pointing at what is actually wrong.
+  if (/综合失败/.test(body)) {
+    warnings.push("综合失败：正文是模型未经来源核实的原始回答，发布前必须逐条核对事实");
+  }
   const publicBody = cleanObsidianMarkdown(body, { imagePath });
   const header = [
     "---",
@@ -63,7 +71,11 @@ export function convertReportToBlogDraft(markdown, { date, sourceFile = "", imag
     "draft: true",
     "type: ai-daily-report",
     "tags: [AI, 日报]",
-    `source: ${yamlQuote(sourceFile)}`,
+    // 2026-09-27 review D1: this was the generating machine's absolute iCloud
+    // path. It is published front-matter — it exposed the user's home directory
+    // and username, and told a reader nothing. The date is the part with actual
+    // value, so the path is dropped and provenance is kept as a date.
+    `source_date: ${yamlQuote(date)}`,
     "publish_review: pending",
     "review_warnings:",
     ...(warnings.length ? warnings.map((warning) => `  - ${yamlQuote(warning)}`) : ["  []"]),
