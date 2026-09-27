@@ -513,7 +513,17 @@ export async function synthesizeWithWebSearch({
             // echoes a key or the linux.do cookie would ship the secret to the
             // third-party gateway inside a tool message it retains. The full
             // detail stays in the local log.
-            content = `检索（${q}）失败：${e?.code || e?.name || "unknown"}（详见本机日志）`;
+            //
+            // 2026-09-27 review P2-4: this promised "详见本机日志" while writing
+            // NOTHING to any log, and the `|| "unknown"` fallback almost never
+            // helped because grok-cli's Error carries no `.code`, and its `.name`
+            // is the generic "Error" — so the operator saw a bare "Error" and
+            // no trace anywhere. It is logged for real now. The logged message is
+            // already secret-redacted at the grok-cli boundary, so writing it to
+            // the local launchd log does not reintroduce the leak.
+            console.error(`[synth] 检索失败 q=${JSON.stringify(q)}:`, e);
+            const tag = e?.code || (e?.name && e.name !== "Error" ? e.name : null) || "unknown";
+            content = `检索（${q}）失败：${tag}（详见本机日志 logs/launchd.err.log）`;
           }
         } else {
           content = "（web_search 未给出有效查询词，本次未检索）";

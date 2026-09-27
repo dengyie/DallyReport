@@ -8,6 +8,7 @@ import {
   redactSecrets,
   MAX_STDOUT_BYTES,
   truncateRawForParseError,
+  balancedJsonObjects,
 } from "../src/grok-cli.mjs";
 
 async function fixtureSearchDir() {
@@ -438,4 +439,54 @@ test("runFetch: child stderr is capped like stdout", async () => {
     if (prev == null) delete process.env.GROK_CHILD_TIMEOUT_MS;
     else process.env.GROK_CHILD_TIMEOUT_MS = prev;
   }
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-27 review (round 4) P2-6: the JSON extractor picked the WRONG object.
+//
+// extractLastJsonObject started from `lastIndexOf("}")` and returned the single
+// balanced object ending there. A trailing debug line carrying its own braces
+// therefore beat the real payload:
+//
+//   {content:{text:"REAL PAYLOAD"},...}\nDEBUG {level: info, ts: 1}
+//   -> picked {level: info, ts: 1}
+//
+// The whole fetch then reported an error on an otherwise-successful child. The
+// old comment claimed this function existed to make noise HARMLESS; it was noise
+// in one direction only. Note the debug object is unquoted JS, so it does not
+// even parse as JSON — the original code never noticed, because it never tried.
+// ---------------------------------------------------------------------------
+
+test("runFetch: a trailing debug line with braces does not hijack the payload", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-json-"));
+  await fixtureScript(
+    root,
+    "fetch.js",
+    `process.stdout.write(JSON.stringify({content:{text:"REAL PAYLOAD"},diagnostics:{provider:"direct"}}));
+     process.stdout.write("\\nDEBUG {level: info, ts: 1}");`,
+  );
+  const r = await runFetch("https://example.com", { grokSearchDir: root });
+  assert.equal(r.text, "REAL PAYLOAD", "the real payload must win over a trailing noise object");
+});
+
+test("runFetch: a leading debug line with braces does not hijack the payload", async () => {
+  // The direction the original function was written for — both must hold.
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-json2-"));
+  await fixtureScript(
+    root,
+    "fetch.js",
+    `process.stdout.write("DEBUG {level: info, ts: 1}\\n");
+     process.stdout.write(JSON.stringify({content:{text:"REAL PAYLOAD"},diagnostics:{provider:"direct"}}));`,
+  );
+  const r = await runFetch("https://example.com", { grokSearchDir: root });
+  assert.equal(r.text, "REAL PAYLOAD");
+});
+
+test("balancedJsonObjects: yields each top-level object exactly once, noise excluded", async () => {
+  const { balancedJsonObjects } = await import("../src/grok-cli.mjs");
+  const objs = [...balancedJsonObjects('{"a":1} junk {"b":"} not a brace {"} {"c":3}')];
+  assert.deepEqual(objs, ['{"a":1}', '{"b":"} not a brace {"}', '{"c":3}']);
+  // A stray close brace in noise must not produce a candidate.
+  assert.deepEqual([...balancedJsonObjects("} } }")], []);
+  assert.deepEqual([...balancedJsonObjects("no braces here")], []);
 });

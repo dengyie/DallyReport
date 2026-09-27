@@ -200,14 +200,30 @@ function runScript(scriptPath, args) {
 // installed grok-search scripts send diagnostics to stderr, not stdout), but one
 // stray console.log in a dependency update would silently convert every working
 // fetch into a hard failure across all five collectors.
-function extractLastJsonObject(text) {
-  const end = text.lastIndexOf("}");
-  if (end < 0) return null;
-  // Walk backwards to the matching '{', ignoring braces inside strings.
+//
+// 2026-09-27 review P2-6: returning the SINGLE last balanced object was wrong in
+// the other direction. `lastIndexOf("}")` lands on the last closing brace in the
+// whole stream, so a trailing debug line carrying its own braces wins over the
+// real payload:
+//   {content:{text:"REAL PAYLOAD"},...}\nDEBUG {level: info, ts: 1}
+//   -> picked {level: info, ts: 1}; the payload was silently discarded and the
+//      collector reported an error on an otherwise-successful fetch.
+//
+// So this yields every balanced top-level object and parseJsonOut takes the LAST
+// one that actually parses. That keeps the original intent (a trailing noise
+// line cannot break a good payload) and fixes the mirrored case.
+//
+// The scan runs FORWARD, tracking string/escape state. Walking backwards from
+// the last brace — the original approach — cannot express "every object": to
+// resume an earlier scan it would have to re-read the text between two objects,
+// which merges that text into the next candidate ("{...}\nDEBUG {" parses to
+// nothing). Forward scanning keeps each candidate exactly one object.
+export function* balancedJsonObjects(text) {
   let depth = 0;
   let inString = false;
   let escaped = false;
-  for (let i = end; i >= 0; i--) {
+  let start = -1;
+  for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (escaped) {
       escaped = false;
@@ -222,13 +238,18 @@ function extractLastJsonObject(text) {
       continue;
     }
     if (inString) continue;
-    if (ch === "}") depth++;
-    else if (ch === "{") {
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === "}") {
+      if (depth === 0) continue; // stray close brace, e.g. in noise text
       depth--;
-      if (depth === 0) return text.slice(i, end + 1);
+      if (depth === 0 && start >= 0) {
+        yield text.slice(start, i + 1);
+        start = -1;
+      }
     }
   }
-  return null;
 }
 
 function parseJsonOut(stdout, scriptPath, args, truncated = false) {
@@ -237,14 +258,17 @@ function parseJsonOut(stdout, scriptPath, args, truncated = false) {
   try {
     return JSON.parse(trimmed);
   } catch {
-    const candidate = extractLastJsonObject(trimmed);
-    if (candidate) {
+    // Last object that actually parses wins, so a trailing noise line cannot
+    // hide the real payload and cannot break a good one either.
+    let lastParsed = null;
+    for (const candidate of balancedJsonObjects(trimmed)) {
       try {
-        return JSON.parse(candidate);
+        lastParsed = JSON.parse(candidate);
       } catch {
-        /* fall through to the parse-error result */
+        /* not a complete JSON value — keep looking */
       }
     }
+    if (lastParsed != null) return lastParsed;
     // Bounded raw: head+tail only, so a huge garbage dump never rides inside the
     // error object (the full capped stdout stays on err.stdout for debugging).
     const out = { __parse_error: true, raw: truncateRawForParseError(stdout) };
