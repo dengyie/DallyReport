@@ -358,8 +358,118 @@ export function isSameDaySource(src, dateStr) {
 // `怎么买` is kept verbatim: 「剩余额度怎么买」 is a buyer, not a seller.
 // news-dedup.mjs now folds the genuinely duplicated announcements instead of
 // papering over the loss.
-export const NEGATIVE_COMMUNITY_RE =
-  /(?:出|收|买|卖|求购|出售|转让|低价).{0,14}(?:号|账号)|(?:号|账号).{0,4}(?:出|收|买|卖)|\b\d+出\b|求车|人找车|车找人|车位|拼车|合租|代充|挂号|抽奖|降智|封号|被封|土区|日区|美区|里拉|阿根廷|美运|低价订阅|怎么买|接码|退款|(?<!超)出(?!输)[^。！？\n]{0,6}(?:额度|配额|余额|quota)|(?:额度|配额|余额|quota).{0,10}(?:出售|出个|出车|出号|卖|转让|怎么买|低价|代充|回收|收号|收个)|(?:出售|出个|出车|出号|卖|转让|收号|收个|低价|代充|回收).{0,10}(?:额度|配额|余额|quota)|鉴别渠道|收鸡|出鸡|溢价|邀请码|纯手工|黑五|秒杀|中转站|注册送|求个.*车|本质是个快捷方式|勇闯/i;
+//
+// 2026-09-27 review F1/F2/F3 — measured against the 1,593 real linux.do titles
+// still in reports-cache. Two classes of error, opposite directions:
+//
+//   UNDER-blocking (F2). The round-4 narrowing replaced the bare 出/收 with
+//   explicit two-character forms, which is right for 「出号」 but left the plain
+//   seller shapes uncaught: 收余额, 余额出100, quota出3个 all got through. A
+//   balance being sold is the single most common trade on this forum.
+//   Seller verbs are now paired with a DEAL noun (余额/额度/配额/quota/号/车),
+//   so 「出 100 余额」 is caught while 出现/导出/给出/产出/找出/列出/输出 —
+//   which all pair a verb with a non-deal noun — are structurally unreachable.
+//
+//   OVER-blocking (F3). 降智, 鉴别渠道 and 中转站 sat on the list as bare terms.
+//   The cache holds 4 real 降智 posts (incl. "openAI 降智及用户画像可以从官方
+//   接口查询了", an official-API feature) and 1 鉴别渠道 post; 2 of 8 中转站 posts
+//   are real news. They now need a selling context, which is what the 6
+//   advertising 中转站 posts all have and the 2 news posts do not. As with
+//   额度重置 before them: suppression upstream is what forces the fold to
+//   fabricate, so a bare term with no vendor/deal context is a guess, not a
+//   filter.
+//
+//   2026-09-27 review F4 — a shape filter, not a term pile. F1/F2/F3 each
+//   fixed a few terms, and then the same failure came back one title at a
+//   time. The rows above are all instances of ONE rule nobody had written down:
+//   a forum title is trade spam when it reads like an OFFER, and an offer is
+//   (a thing offered) + (a price / a payment hook) + (a way to get it). The
+//   three groups below are those three slots, so a new vendor name or a new
+//   slang for "cheap" reaches the filter by filling in a slot instead of by
+//   being appended to a list that has to be re-audited by hand.
+//
+//   Evidence for the rewrite: every one of the 17 titles the old rows dropped
+//   from the 1,641 AI-gate survivors in reports-cache was a false positive —
+//   「claude max封号 不给退款（已退款）」, 「openai自用老号被封了，解封后工作
+//   空间被冻结怎么整」, 「Anthropic额度加倍活动，中转站会不会考虑在非高峰时间
+//   降价？」. 封号/被封/退款/邀请码/美区/土区/日区 are all AI product states,
+//   not trade slang; a title that contains one of them and NO offer shape is
+//   news, and the old rows said otherwise.
+// The `(?<![\d])` guard on 号/鸡 is what keeps 「deepseek 新价格出了 8月17号生效」
+// out: without it the date's 号 satisfies the deal noun and the row reads the
+// sentence as a sale. 车位/号池/账号 are unambiguous and stay unguarded.
+const OFFER_OBJECT = "(?:余额|额度|配额|quota|车位|号池|账号|(?<![\\d])(?:号|鸡))";
+// A subscription or a plan is only a giveaway when an offer surrounds it — a
+// vendor's own "OpenAI 探索新商业模式：不光卖订阅" and "大家 grok 订阅收到重置了吗"
+// both read as 卖订阅/订阅收, so these two nouns are confined to row 1.
+const OFFER_SOFT = "(?:订阅|套餐|额度卡|礼品卡|gift\\s*card)";
+const OFFER_PRICE =
+  "(?:优惠价|特价|半价|一折|1折|0\\.\\d+\\s*倍|\\d+\\s*折|倍率|低价|白菜价|白菜|白菜价|免费额度|白送|送\\s*[\\d$￥¥]|注册送|注册即送|首充|福利|抽奖|抽\\s*\\d|红包|优惠|折扣|秒杀|特价分组|稳定渠道|长期服务|开票|开清单|聚合\\d+渠道)";
+const OFFER_HOOK = "(?:私信|详私|dd|滴滴|扣扣|qq|加我|联系|上车|自助|发车|车找人|人找车|可拼|接码|注册送|留\\s*id|留\\s*ID|评论.{0,6}送|就送|就是送|抽.{0,8}红包|名额|先到先得|进群|拉群)";
+// A trade window is short: an ad is dense, and widening it to a whole title
+// is what turned 「Anthropic 额度加倍活动，中转站会不会考虑在非高峰时间降价？」
+// into a false positive. 18 characters is enough for 「号池线路自营」 and
+// 「充值 1:1，GPT 低至 0.08 倍率」 without reaching across a sentence.
+const OFFER_GAP = ".{0,18}?";
+// Row 3 needs a much tighter window than row 1. An ad states the sale in a
+// few characters (「出 100 余额」, 「收号」); a sentence of ordinary prose can
+// carry 出 or 收 and a deal noun eighteen characters apart without ever being
+// about a sale. 8 covers every seller shape in the cache and stops short of
+// crossing a clause.
+const TIGHT_GAP = ".{0,8}?";
+// 出 and 收 are single characters that both start and END ordinary words, so
+// neither side can be trusted bare. The lookbehind blocks the compounds that
+// END in the verb (出现/超出/做出/导出/登录... 退出/登出/弹出) and the lookahead
+// blocks the ones that START with it (出现/出错/出租/出售), while 出售/转让/求购
+// — which are unambiguously seller-speak — need no guard at all. Without both
+// halves the row reads 「GPT 出现 bug，额度全部重置了」 and 「Anthropic 强制登出
+// 受影响账户」 as sales.
+const SELLER_VERB_BARE =
+  "(?<![\u8d85\u8f93\u505a\u51fa\u5217\u7ed9\u4ea7\u627e\u5bfc\u767b\u9000\u7b7e\u5f39\u62bd\u9000\u51fa\u5e26])(?:出(?![\u73b0\u9519\u79df\u552e\u53e3\u7248\u56fe\u54c1\u5708\u5c40\u8231\u5dee\u6f0f\u571f\u8d27\u6d77\u5c71\u95e8\u56fd\u8f93\u51fa\u4f4e])|(?<!\u56de)(?<![\u6536]\u5f39)\u6536(?![\u8d39\u5165\u76ca\u652f\u5230\u96c6\u56de\u636e\u5355\u53d6\u8d2d\u4ef7\u7cfb\u7edf\u7edf\u8ba1\u5e03\u7f6e\u7cfb\u6570\u636e])(?![回收|刷|到底]))";
+const SELLER_VERB_STRONG = "(?:卖|转让|求购|低价|溢价)";
+export const NEGATIVE_COMMUNITY_RE = new RegExp(
+  String.raw`(?:` +
+    // Row 1 — the full offer shape: object + price + hook, or any two of the three.
+    // Requiring two slots is what separates a sale from a topic that merely
+    // mentions 额度 or 订阅; all three of the 福利羊毛-shaped cache ads have
+    // object+price+hook, and none of the 17 false positives has two.
+    String.raw`(?:${OFFER_OBJECT}|${OFFER_SOFT})${OFFER_GAP}(?:${OFFER_PRICE}${OFFER_GAP}${OFFER_HOOK}|${OFFER_HOOK}${OFFER_GAP}${OFFER_PRICE})` +
+    // Row 2 — the unambiguous trade words. None of these is reachable from
+    // ordinary prose, so they stay bare: 车位/合租/求车/人找车/车找人 name the
+    // trade itself, and 接码/代充/挂号/收鸡/出鸡 are commerce this forum does not
+    // otherwise discuss.
+    //
+    // 封号/被封/退款 are NOT in this row and never should be. They are AI
+    // product states, and the old bare entries for them dropped ten real titles
+    // out of the cache. A title about a ban or a refund is news.
+    String.raw`|(?:车位|合租|求车|人找车|车找人|收鸡|出鸡|接码|代充|挂号)` +
+    // 邀请码 needs a giveaway shape beside it: OpenAI 推出 codex 邀请码计划 is a
+    // program and 喜报：有人拿到 gemini 邀请码了 is a signup report. The second
+    // branch is a title that is ONLY the label.
+    String.raw`|邀请码${TIGHT_GAP}(?:还有|剩余|剩|转让|出售|低价|免费|送出|送|收|要|求|抽奖|名额|先到先得)|^[^，。！？]{0,6}邀请码$` +
+    String.raw`|注册送|注册即送` +
+    // Regional-arbitrage how-tos. The region alone is not the tell — three real
+    // cache posts are a 土区 login that worked, a 美区 giftcard that did not
+    // activate, and an account unlock. A region followed by a how-to or
+    // purchase verb is the arbitrage post, and is what 「土耳其 里拉区 订阅攻略」
+    // and 「日区的 apple pay 该怎么搞定」 both are.
+    String.raw`|(?:土|日|美|里拉|阿根廷|美运|土耳其|国|港|新|欧|亚|韩|英|俄|加|澳|荷)区(?:.{0,10}?(?:攻略|教程|怎么|如何|购买|开通|代充|搞定|白嫖|优惠|打折|低价|折扣|拼车|合租|车位|上车))` +
+    // A relay/reseller paired with a deal noun. Two of the eight cache 中转站
+    // posts are real news and neither mentions a balance; the six ads all do.
+    String.raw`|(?:中转站|号池|合租巴士|转售|分销商)${OFFER_GAP}(?:余额|额度|配额|quota|车位|号|账号|订阅|套餐)` +
+    // 溢价 needs a seller verb beside it: 「A股存储巨头，定增大幅溢价」 is
+    // financial news, 「溢价 出」 is not.
+    String.raw`|溢价(?:.{0,6}?(?:出|收|卖|转让|低价))` +
+    // Row 3 — an explicit seller verb bound to a deal noun, in either order.
+    // The deal noun is the discriminator: 出现/导出/给出/产出/找出/列出 pair a
+    // verb with a noun nobody sells, and 回收站 pairs 收 with a place. The two
+    // verb slots are the guard against 出/收 as ordinary characters; see
+    // SELLER_VERB_BARE above.
+    String.raw`|(?:${SELLER_VERB_BARE}${TIGHT_GAP}|${SELLER_VERB_STRONG})${TIGHT_GAP}${OFFER_OBJECT}` +
+    String.raw`|${OFFER_OBJECT}${TIGHT_GAP}(?:${SELLER_VERB_BARE}|${SELLER_VERB_STRONG})` +
+    ")",
+  "i",
+);
 
 // High-value technical and authoritative outlink domains worthy of unfurling/preservation.
 export const HIGH_VALUE_OUTLINK_RE =

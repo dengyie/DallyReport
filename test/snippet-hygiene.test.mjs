@@ -293,3 +293,192 @@ test("NEGATIVE_COMMUNITY_RE: 超出/输出/回收站 are not seller-speak", () =
     assert.ok(NEGATIVE_COMMUNITY_RE.test(t), `应命中噪声: ${t}`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// 2026-09-27 review F1/F2/F3 — the trading-noise filter, measured against the
+// 1,593 real linux.do titles still in reports-cache.
+//
+// Three bare terms were dropping real AI news UPSTREAM, before dedup ever saw
+// it: 降智 (4 real posts in the cache, incl. an official-API feature post), 鉴别
+// 渠道 (1), and 中转站 (2 of 8 are real — "hetzner 也开始做中转站了" and a
+// public-computing platform announcement). Meanwhile the round-4 narrowing let
+// three real trading posts through: 收余额 / 余额出100 / quota出3个.
+//
+// The lesson from the quota-reset cluster is the same one that produced the
+// 2026-09-26 fix: suppression upstream is what forces the fold to fabricate. A
+// bare term with no vendor context is not a filter, it is a guess.
+// ---------------------------------------------------------------------------
+
+const REAL_NEWS = [
+  // All four are verbatim from reports-cache.
+  "codex今天降智有点厉害",
+  "openAI降智及用户画像可以从官方接口查询了",
+  "实锤了（bushi） astra降智cli和桌面版有关联",
+  "幽默老马，grok4.5又迎来降智。还在测“鸟骑车”吗？快来测测“狗撒尿”吧。",
+  "DeepSeek 官方 API 和 Web 炸了，是鉴别渠道是否官转的好机会",
+  "hetzner也开始做中转站了",
+  "【官方中转站】杭州西湖智算公共服务平台。发现多地政府都在做算力中转，扶持opc、ai短剧",
+  // Ordinary words that a bare 出/收 used to swallow.
+  "OpenAI 宣布 API 出现新参数",
+  "Claude Code 导出对话功能上线",
+  "研究给出推理成本的下降曲线",
+  "论文找出长上下文注意力的衰减点",
+  "Gemini 列出多模态能力清单",
+  "Meta 产出新的开源权重",
+  "模型输出质量提升明显",
+  "回收站里的旧模型权重还能用吗",
+  "超出配额限制后的降级策略",
+  "余额怎么查",
+  "Claude 额度重置了，喜报",
+];
+
+const TRADING_NOISE = [
+  "收余额",
+  "余额出100",
+  "quota出3个",
+  "剩余额度低价出售",
+  "收号",
+  "出号",
+  "低价出 Claude Pro 车位",
+  "接码",
+  "求车",
+  "车位",
+  "代充",
+  "中转站 余额",
+  "溢价 出",
+  "邀请码",
+];
+
+test("NEGATIVE_COMMUNITY_RE: never drops a real news title from the cache", () => {
+  for (const title of REAL_NEWS) {
+    assert.equal(
+      NEGATIVE_COMMUNITY_RE.test(title),
+      false,
+      `real AI news was dropped as trading noise: 「${title}」`,
+    );
+  }
+});
+
+test("NEGATIVE_COMMUNITY_RE: still drops the trading noise it is there for", () => {
+  for (const title of TRADING_NOISE) {
+    assert.equal(
+      NEGATIVE_COMMUNITY_RE.test(title),
+      true,
+      `trading noise got through: 「${title}」`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-27 review F4 — the trade filter rewritten as an offer SHAPE.
+//
+// F1/F2/F3 fixed six individual terms. Measuring the result against the whole
+// cache showed why that approach had run out of road: of the 1,641 titles
+// that clear the AI-relevance gate, the filter was still dropping 17 of them,
+// and every single one was a false positive —
+//
+//   「claude max封号 不给退款（已退款）」   「claude封号退款问题」
+//   「为什么claude 不退款了」              「求救！apple不给退款Claude」
+//   「Claude现在封号退款吗」              「openai自用老号被封了，解封后工作空间被冻结怎么整」
+//   「Claude 账号终于还是被封，GLM 5.2 能平替吗？」
+//   「opencode go破限封号吗」             「Anthropic额度加倍活动，中转站会不会考虑在非高峰时间降价？」
+//   「deepseek新价格出了 8月17号生效」     「ChatGPT ios美区giftcard订阅plus成功但还是free账号状态」
+//   「天才程序员复活了，我的土区plus codex又能登录了」
+//   「新人报道，还有10个gemini pro的邀请码」
+//
+// 封号/被封/退款/邀请码/美区/土区/日区 are AI product states, not trade
+// slang. Each had been appended to a list of "bad words" and every append
+// traded one class of title for another. The rewrite states the rule those
+// words were all instances of: a trade post is an OFFER — a thing offered, a
+// price or payment hook, a way to get it — and the three groups below are
+// those three slots. A new vendor name or a new slang for "cheap" now fills
+// a slot instead of being appended to a list that has to be re-audited.
+// ---------------------------------------------------------------------------
+
+const CACHE_ADS = [
+  "【OOIOO】 Coding 站试营业了，L站注册送 5$ 评论送 30$",
+  "「合租巴士入驻L站两个月」同步官方降价，纯血Pro号池订阅低至0.16倍率。稳定持续输出服务，评论就送5刀codex订阅套餐",
+  "【快跑AI】GPT-5.6 特价分组 0.08倍率 180+稳定渠道 告别429 注册送10$",
+  "「合租巴士ai中转站」codex福利继续送，评论留id就送5刀体验额度！充值福利多多，订阅闲时可暂停 ！",
+  "【富可敌国｜佬友专属福利】GateAI API 中转站｜号池线路自营｜注册留 ID 最高领 $7，百楼抽 $30｜充值 1:1，GPT 低至 0.08 倍率",
+  "【Krill-夏促狂欢季】纯血pro号池无惧波澜稳如泰山！77 折回归，套餐低至 0.1155！狂欢就是送，评论就是送，留 ID 就送 Codex 套餐~ 余额调用Grok-4.5 限时0.001倍率！Kimi 限时折扣低至 0.28 倍！",
+];
+
+// Every one of these is a verbatim cache title or a close paraphrase of a
+// class of them. Each was a false positive under the term list.
+const CACHE_FALSE_POSITIVES = [
+  // 退款/封号/被封 are product states, not seller-speak.
+  "claude封号退款问题",
+  "claude max封号 不给退款（已退款）",
+  "为什么claude 不退款了",
+  "求救！apple不给退款Claude",
+  "Claude现在封号退款吗",
+  "openai自用老号被封了，解封后工作空间被冻结怎么整",
+  "Claude 账号终于还是被封，GLM 5.2 在日常使用/编程上能平替吗？",
+  "opencode go破限封号吗",
+  "Claude 遭窃密木马盗号，Anthropic 强制登出受影响账户并删除付款方式",
+  "悲报～～谷歌疑似大面积封号今晚",
+  "有点好笑，Tibo教用户用CPA反代到cc使用，然后用户被A/封号了找Tibo算账",
+  "DeepSeek前端组小修小补的一天：开放平台发票/退款申请弹窗重做",
+  "giffgaff退款到账了",
+  // 出/收 as ordinary words, in both directions of the verb.
+  "GPT出现bug，额度全部重置了。",
+  "openai自用老号被封了，解封后余额恢复",
+  "OpenAI 宣布 API 出现新参数",
+  "Claude Code 导出对话功能上线",
+  "研究给出推理成本的下降曲线",
+  "论文找出长上下文注意力的衰减点",
+  "Gemini 列出多模态能力清单",
+  "Meta 产出新的开源权重",
+  "模型输出质量提升明显",
+  "回收站里的旧模型权重还能用吗",
+  "回收站已清理，空间恢复",
+  "超出配额限制后的降级策略",
+  "朱雀三号一级成功回收",
+  "deepseek新价格出了 8月17号生效，按97%命中率大概是原本的4-5倍",
+  "【Codex Banked Reset +1】2000万用户里程碑奖励&Tibo就额度消耗过快做出回应",
+  "quota 统计口径变更说明",
+  "数据收集范围调整公告",
+  // 收 with a noun that is not a thing one sells.
+  "请注意查收本月账单",
+  "apple 回收旧机型补贴政策",
+  // Region tags on a login that worked, not an arbitrage how-to.
+  "天才程序员复活了，我的土区plus codex又能登录了",
+  "ChatGPT ios美区giftcard订阅plus成功但是还是free账号状态",
+  // 邀请码 / 拼车 as product words, not giveaways.
+  "OpenAI 推出 codex 邀请码计划",
+  "新用户可领 claude 邀请码",
+  "喜报：有人拿到 gemini 邀请码了",
+  "模型评测：拼车功能上线企业版",
+  "Plus要恢复5小时限额了，20x和5x暂时保持不变，20x拼车恐成最大赢家",
+  // 订阅/套餐 as nouns a vendor talks about, not as goods being sold.
+  "OpenAI 探索新商业模式：不光卖订阅，客户用 AI 赚了钱将获得分成",
+  "【grok】大家gork订阅收到重置了吗？",
+  // A relay mention in a real question about pricing.
+  "Anthropic额度加倍活动，中转站会不会考虑在非高峰时间降价？",
+  "hetzner也开始做中转站了",
+  "【官方中转站】杭州西湖智算公共服务平台。发现多地政府都在做算力中转，扶持opc、ai短剧",
+  // Money-market and sports words that used to share a line with 溢价 / 阿根廷.
+  "560元/股！A股存储巨头，定增大幅溢价",
+  "梅西宣布从阿根廷国家队退役",
+  "勇闯基金一个月亏损2.46",
+];
+
+test("NEGATIVE_COMMUNITY_RE: F4 shape filter keeps every cache ad", () => {
+  for (const title of CACHE_ADS) {
+    assert.ok(
+      NEGATIVE_COMMUNITY_RE.test(title),
+      `offer-shaped ad got through: 「${title}」`,
+    );
+  }
+});
+
+test("NEGATIVE_COMMUNITY_RE: F4 shape filter drops none of the cache's real news", () => {
+  for (const title of CACHE_FALSE_POSITIVES) {
+    assert.equal(
+      NEGATIVE_COMMUNITY_RE.test(title),
+      false,
+      `real title dropped as trade spam: 「${title}」`,
+    );
+  }
+});
