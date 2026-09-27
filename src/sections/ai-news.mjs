@@ -7,7 +7,7 @@ import { fetchNodeSeekAiSources } from "../nodeseek.mjs";
 import { fetchV2exAiSources } from "../v2ex.mjs";
 import { dedupeAndNormalizeSources } from "../news-dedup.mjs";
 import { fetchAllDailySources } from "../sources-daily.mjs";
-import { filterByRecency } from "../snippet-hygiene.mjs";
+import { filterByRecency, isSameDaySource } from "../snippet-hygiene.mjs";
 
 export function computeAiNewsStatus({
   searchOk,
@@ -111,6 +111,12 @@ export function selectCitedSources(sources, bodyText) {
   return [...indices]
     .sort((a, b) => a - b)
     .map((i) => ({ n: i + 1, source: list[i] }));
+}
+
+// Count same-day material. See isSameDaySource for why recency, not the
+// fromDaily stamp, decides this. Exported for unit tests.
+export function countDailySources(sources, dateStr) {
+  return (sources || []).filter((s) => isSameDaySource(s, dateStr)).length;
 }
 
 // Render the reference bullets. `deps` exists so the unit test can drive the
@@ -411,7 +417,9 @@ export async function aiNewsSection(
   // the provenance flag stamped on them before the fold (see primarySources),
   // not a URL back-match: a cluster's representative can be a forum card, which
   // made the daily card silently stop counting (2026-09-26 review).
-  const dailyCount = sources.filter((s) => s?.fromDaily).length;
+  // 2026-09-27 review B2: recency now decides, so a same-day forum post counts
+  // even when no hard source survived — see countDailySources.
+  const dailyCount = countDailySources(sources, config.date);
   const genericCount = Math.max(0, sources.length - dailyCount);
   let header = "";
   if (config.reportStrictDaily !== false) {

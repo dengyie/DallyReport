@@ -307,6 +307,31 @@ export function filterByRecency(sources, dateStr) {
   return { sources: kept, dropped };
 }
 
+// Whether one source is same-day material, decided with the SAME window and the
+// SAME per-source grace filterByRecency applies. Exported so the material-window
+// count and the recency gate can never disagree about a single card.
+//
+// 2026-09-27 review B2: the count used to be `s.fromDaily` alone — a flag
+// stamped only on the hard-source list. A day whose hard sources all failed but
+// which had a dozen same-day linux.do posts therefore reported 当日素材 0 条 and
+// printed the 低素材 warning over a body written entirely from that morning's
+// posts. Provenance is a property of the card's timestamp, not of the collector
+// that happened to produce it.
+export function isSameDaySource(src, dateStr) {
+  if (src?.fromDaily === true) return true;
+  if (!dateStr || typeof dateStr !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return false;
+  }
+  const ts = sourceEpochMs(src);
+  // No usable timestamp → freshness is unknown, not proven. A tavily/firecrawl
+  // card is not evidence of anything being published today.
+  if (ts == null) return false;
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const todayStart = Date.UTC(y, m - 1, d, 0, 0, 0, 0) - 8 * 60 * 60 * 1000;
+  const grace = Number(src?.recencyGraceDays) > 0 ? Number(src.recencyGraceDays) : 0;
+  return ts >= todayStart - grace * 24 * 60 * 60 * 1000;
+}
+
 // Negative filter for community forums (drops account trading, carpooling, quota complaints, payment tricks)
 // 账号交易形态：动词（出/收/买/卖/求购/出售/转让）后可隔 0-10 字再接「号/账号」——
 // 「收Google账号」「出ChatGPT Plus 账号」「卖号」等真实标题隔字/带英文也不漏。

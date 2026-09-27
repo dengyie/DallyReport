@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { selectCitedSources, buildReferenceLines } from "../src/sections/ai-news.mjs";
+import {
+  selectCitedSources,
+  buildReferenceLines,
+  countDailySources,
+} from "../src/sections/ai-news.mjs";
 
 // ---------------------------------------------------------------------------
 // 2026-09-27 review B1: the reference list was FILTERED but still rendered by
@@ -84,4 +88,65 @@ test("buildReferenceLines: still degrades a non-http(s) URL to a plain title", (
     sanitizeUrl: () => null,
   });
   assert.equal(lines[0], "- Evil \\[x\\]\\(y\\)", "no clickable link for a non-http(s) scheme");
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-27 review B2: 当日素材 was undercounted to zero.
+//
+// `fromDaily` was stamped ONLY on the hard-source list (HN/36kr/arXiv), so a
+// day whose hard sources all failed but which had a dozen same-day linux.do
+// posts reported "当日素材 0 条" and printed the 低素材 warning — the report
+// describing itself as stale while resting entirely on material published that
+// morning. That is the warning that exists to make the user distrust the body.
+//
+// Provenance is decided by RECENCY here, not by which collector happened to
+// produce the card: a forum post created this morning is same-day material.
+// ---------------------------------------------------------------------------
+
+const BJ = (s) => ({ publishedAt: Date.parse(`${s}T04:00:00Z`) });
+
+test("countDailySources: a same-day forum post counts as 当日素材", () => {
+  const n = countDailySources(
+    [
+      { title: "今日发布", url: "https://linux.do/t/1", ...BJ("2026-09-27") },
+      { title: "旧闻", url: "https://linux.do/t/2", ...BJ("2026-09-20") },
+      { title: "无时间戳", url: "https://linux.do/t/3" },
+    ],
+    "2026-09-27",
+  );
+  assert.equal(n, 1, "only the same-day card counts");
+});
+
+test("countDailySources: the hard-source fromDaily flag still counts", () => {
+  const n = countDailySources(
+    [
+      { title: "硬源", url: "https://hn/1", fromDaily: true },
+      { title: "论坛旧闻", url: "https://linux.do/t/2", ...BJ("2026-09-20") },
+    ],
+    "2026-09-27",
+  );
+  assert.equal(n, 1);
+});
+
+test("countDailySources: a timestamp-less card is NOT silently same-day", () => {
+  // Contrasts with the test above: a Tavily/firecrawl card has no timestamp, so
+  // nothing about it is provably same-day. Counting it would inflate the
+  // material count with unknowns and suppress the low-material warning that
+  // protects the reader on a genuinely thin day.
+  const n = countDailySources([{ title: "无时间戳", url: "https://x/1" }], "2026-09-27");
+  assert.equal(n, 0);
+});
+
+test("countDailySources: the grace window is respected, as filterByRecency applies it", () => {
+  // arXiv papers carry recencyGraceDays: 1 — a card that passed the recency gate
+  // on the strength of its grace must still count, otherwise the two functions
+  // disagree about the same card.
+  const n = countDailySources(
+    [
+      { title: "arXiv 昨日", url: "https://arxiv/1", ...BJ("2026-09-26"), recencyGraceDays: 1 },
+      { title: "arXiv 前日", url: "https://arxiv/2", ...BJ("2026-09-24"), recencyGraceDays: 1 },
+    ],
+    "2026-09-27",
+  );
+  assert.equal(n, 1, "the card inside the grace window counts");
 });
