@@ -125,7 +125,7 @@ export function buildReferenceLines(
   cited,
   deps = { stripMarkdown, sanitizeUrl },
 ) {
-  return (cited || []).slice(0, 30).map(({ source: s }) => {
+  return (cited || []).slice(0, 30).map(({ n, source: s }, i) => {
     // Strip markdown fragments from scraped titles first (v2ex/linuxdo titles
     // can carry `[...](...)` residue and reply metadata), THEN escape what
     // remains so parens can't break the markdown link syntax.
@@ -141,7 +141,18 @@ export function buildReferenceLines(
     // two tests guarding it protected code that never shipped while this path
     // ran unvalidated. Degrade to a plain title when the URL is not http(s).
     const url = deps.sanitizeUrl(s.url);
-    return url ? `- [${title}](<${url}>)` : `- ${title}`;
+    // 2026-09-28 review G1: the bullets are unnumbered, so the ONLY way a reader
+    // resolves a body's `[N]` is by reading the number off the list. B1 stopped
+    // the renderer from RENUMBERING the filtered subset, but it never made the
+    // number visible — `n` was destructured away right here. So `[N]` was still
+    // positional, and any body that skipped a marker (the shipped 2026-09-28
+    // cited [2]..[10] over 9 bullets) pointed every marker one line off, with
+    // the tail marker pointing at no line at all.
+    //
+    // `n ?? i + 1` keeps a hand-built entry (no `n`) numbered by position
+    // rather than printing a literal `[undefined]`.
+    const num = Number.isInteger(n) && n > 0 ? n : i + 1;
+    return url ? `- [${num}] [${title}](<${url}>)` : `- [${num}] ${title}`;
   });
 }
 

@@ -87,7 +87,16 @@ test("buildReferenceLines: still degrades a non-http(s) URL to a plain title", (
     stripMarkdown: (t) => t,
     sanitizeUrl: () => null,
   });
-  assert.equal(lines[0], "- Evil \\[x\\]\\(y\\)", "no clickable link for a non-http(s) scheme");
+  // 2026-09-28 G1: expected string gained the `[1]` prefix. The assertion's
+  // SUBJECT is unchanged — a non-http(s) scheme must not become a clickable
+  // link, and the brackets in the title must still be escaped so they cannot
+  // form a link either. Only the number the renderer now prints differs; the
+  // escaping itself (`Evil \[x\]\(y\)`) is asserted exactly as before.
+  assert.equal(
+    lines[0],
+    "- [1] Evil \\[x\\]\\(y\\)",
+    "no clickable link for a non-http(s) scheme, number still shown",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -149,4 +158,76 @@ test("countDailySources: the grace window is respected, as filterByRecency appli
     "2026-09-27",
   );
   assert.equal(n, 1, "the card inside the grace window counts");
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-28 review G1: B1 fixed the SELECTION but not the RENDER.
+//
+//   selectCitedSources returns {n, source}; buildReferenceLines then did
+//     return `- [${title}](<${url}>)`     // <- n destructured away, never printed
+//
+// The reference bullets are unnumbered by design (verified unchanged on
+// 2026-09-25/26/27), so a reader resolves a body's `[N]` by COUNTING the
+// displayed entries. That is only correct when the cited subset happens to be
+// 1..k contiguous. The moment a body skips a marker, every number shifts.
+//
+// Shipped 2026-09-28: AI.md cited [2]..[10] and listed 9 unnumbered bullets.
+// [3] (Cloudflare Turnstile) resolved to the 2nd line, 龙猫加入opencode; [10]
+// resolved to nothing at all. Every one of the 9 markers was wrong.
+//
+// The number is already in the data. The renderer only has to print it.
+// ---------------------------------------------------------------------------
+
+const DEPS = { stripMarkdown: (t) => t, sanitizeUrl: (u) => u };
+const FIVE = [
+  { title: "A", url: "https://a.test/1" },
+  { title: "B", url: "https://b.test/2" },
+  { title: "C", url: "https://c.test/3" },
+  { title: "D", url: "https://d.test/4" },
+  { title: "E", url: "https://e.test/5" },
+];
+
+test("G1: a body skipping markers must still render each source under its OWN number", () => {
+  // The shipped shape: cites 2, 3, 5 — skips 1 and 4.
+  const lines = buildReferenceLines(selectCitedSources(FIVE, "一 [2] 二 [3] 三 [5]"), DEPS);
+  assert.equal(lines.length, 3);
+  assert.match(lines[0], /^\- \[2\] /, "line 1 is source B and must PRINT [2], not sit unnumbered");
+  assert.match(lines[1], /^\- \[3\] /, "line 2 is source C and must PRINT [3]");
+  assert.match(lines[2], /^\- \[5\] /, "line 3 is source E and must PRINT [5]");
+});
+
+test("G1: a reader counting the list must land on the cited source", () => {
+  // The actual failure: body says [3] is Cloudflare; counting the bullets must
+  // not hand the reader 龙猫. Assert the number the reader SEES maps to the
+  // source the body named.
+  const lines = buildReferenceLines(selectCitedSources(FIVE, "Turnstile [3]"), DEPS);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^\- \[3\] \[C\]/, "the only bullet must be [3] C — visible number, not position");
+});
+
+test("G1: a contiguous subset is unchanged (1..k still prints 1..k)", () => {
+  const lines = buildReferenceLines(selectCitedSources(FIVE, "一 [1] 二 [2]"), DEPS);
+  assert.match(lines[0], /^\- \[1\] /);
+  assert.match(lines[1], /^\- \[2\] /);
+});
+
+test("G1: the no-marker path numbers every source by position", () => {
+  // With no [N] in the body selectCitedSources returns 1..N, so printing n is
+  // identical to printing position. Guards the degraded/fallback path.
+  const lines = buildReferenceLines(selectCitedSources(FIVE, "正文没有任何引用标记"), DEPS);
+  assert.equal(lines.length, 5);
+  lines.forEach((l, i) => assert.match(l, new RegExp(`^\\- \\[${i + 1}\\] `)));
+});
+
+test("G1: the non-http(s) degrade path keeps the number and drops the link", () => {
+  const lines = buildReferenceLines(selectCitedSources(FIVE, "见 [2]"), {
+    stripMarkdown: (t) => t,
+    sanitizeUrl: () => null,
+  });
+  assert.equal(lines[0], "- [2] B", "number survives even when the URL is rejected");
+});
+
+test("G1: an entry with no n falls back to its position, never printing [undefined]", () => {
+  const lines = buildReferenceLines([{ source: { title: "X", url: "https://x.test/9" } }], DEPS);
+  assert.equal(lines[0], "- [1] [X](<https://x.test/9>)");
 });
