@@ -686,6 +686,16 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
     // concurrent grok-search child processes, each spawning its own browser/CDP
     // tab and disk cache write. That is the rate-limit shape, not the throughput
     // shape. Reuse mapLimit (the same limiter enrichLinuxdoPosts uses) at 4.
+    //
+    // 2026-09-27 review P2-3: this passed deadline=0, i.e. NO wall-clock budget.
+    // The worst case was 40 targets at concurrency 4, each able to burn
+    // GROK_CHILD_TIMEOUT_MS (default 2 min) — 10 rounds x 2 min = 20 minutes of a
+    // 09:00 report producing nothing visible, with no error to explain it. Same
+    // partial-return contract as enrichLinuxdoPosts: past the deadline the loop
+    // stops scheduling NEW targets and the cards that were not enriched fall back
+    // to their excerpt/title, which is a normal, already-handled outcome.
+    const deepBudgetMs = Number(config.linuxdoDeepFetchBudgetMs ?? 300000);
+    const deepDeadline = deepBudgetMs > 0 ? Date.now() + deepBudgetMs : 0;
     await mapLimit(
       deepTargets,
       DEEP_FETCH_CONCURRENCY,
@@ -722,8 +732,14 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
           /* deep-fetch failure → keep excerpt/title card */
         }
       },
-      0,
+      deepDeadline,
     );
+    if (deepDeadline && Date.now() >= deepDeadline && deepMap.size < deepTargets.length) {
+      deepFetchFailures.push({
+        url: null,
+        message: `deep-fetch 预算 ${deepBudgetMs}ms 用尽，${deepTargets.length - deepMap.size}/${deepTargets.length} 个目标保留摘要`,
+      });
+    }
   }
 
   for (const card of combined) {
@@ -1098,7 +1114,7 @@ export async function downloadAttachmentAsset(url, destFile, { fetchImpl = fetch
 // once. `deadline` (epoch ms; 0 = none) stops the loop scheduling NEW items once
 // passed, so a wall-clock budget bounds the crawl while the returns stay partial
 // (nothing already running is aborted — it's bounded by its own fetch timeouts).
-async function mapLimit(items, limit, fn, deadline = 0) {
+export async function mapLimit(items, limit, fn, deadline = 0) {
   const out = new Array(items.length);
   let next = 0;
   const worker = async () => {

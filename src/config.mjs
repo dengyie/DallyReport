@@ -315,6 +315,15 @@ export function loadConfig({ date = null } = {}) {
     // synthesis model real body content for the top ~12 of today's posts; the rest
     // stay title-only. Raise for richer analysis, lower for a faster run.
     linuxdoNews34DeepLimit: int("LINUXDO_NEWS34_DEEP_FETCH_LIMIT", 40),
+    // Wall-clock budget for the whole deep-fetch phase. Without it the worst case
+    // is bounded only by the per-child timeout: 40 targets at concurrency 4, each
+    // able to burn GROK_CHILD_TIMEOUT_MS (default 2 min) = 10 rounds x 2 min =
+    // 20 minutes of a 09:00 report doing nothing visible. On expiry the loop
+    // stops scheduling NEW targets and returns what it already has — the same
+    // partial-return contract enrichLinuxdoPosts uses for its own budget, so a
+    // slow upstream costs enrichment depth, not the whole report.
+    // 0 = no ceiling.
+    linuxdoDeepFetchBudgetMs: int("LINUXDO_DEEP_FETCH_BUDGET_MS", 300000),
     // Post-report enrichment: crawl COMPLETE post bodies (OP + replies) via the
     // Discourse topic JSON API and download attachments into the vault. Disable to
     // keep the run light (scheduled/headless without the 9222 browser).

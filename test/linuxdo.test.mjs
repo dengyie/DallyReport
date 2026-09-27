@@ -18,6 +18,7 @@ import {
   extractAttachments,
   enrichLinuxdoPosts,
   selectDeepFetchTargets,
+  mapLimit,
 } from "../src/linuxdo.mjs";
 
 const LISTING_FIXTURE = `
@@ -1167,4 +1168,52 @@ test("fetchLinuxDoAiSources: deep-fetch concurrency is bounded, not one-shot per
     peak < N,
     `a one-shot Promise.all would reach ${N}; peak was ${peak}`,
   );
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-27 review (round 4) P2-3: the deep-fetch phase had NO wall-clock bound.
+//
+// `mapLimit` accepted a `deadline` and the enrichment crawl used it, but the
+// deep-fetch call site passed 0 — no ceiling. With the shipped defaults
+// (LINUXDO_NEWS34_DEEP_FETCH_LIMIT=40, DEEP_FETCH_CONCURRENCY=4) and a child
+// timeout of 2 min, the worst case is 10 rounds x 2 min = 20 minutes of a 09:00
+// report producing nothing visible and logging no error.
+//
+// mapLimit itself had zero coverage, which is why deadline=0 went unnoticed.
+// ---------------------------------------------------------------------------
+
+test("mapLimit: a deadline stops scheduling new items and returns partial results", async () => {
+  let started = 0;
+  const items = Array.from({ length: 40 }, (_, i) => i);
+  const startedAt = Date.now();
+  const out = await mapLimit(
+    items,
+    4,
+    async (item) => {
+      started++;
+      await new Promise((r) => setTimeout(r, 40));
+      return item;
+    },
+    Date.now() + 120, // ~3 rounds at 4-way concurrency, 40ms each
+  );
+  const elapsed = Date.now() - startedAt;
+  assert.ok(elapsed < 2000, `the deadline did not bound the loop: ${elapsed}ms`);
+  assert.ok(started < 40, `every item ran despite the deadline: ${started}/40`);
+  assert.equal(out.length, 40, "the result array keeps its shape; unrun slots are undefined");
+  assert.ok(out.filter((v) => v !== undefined && v !== null).length < 40);
+});
+
+test("mapLimit: deadline=0 means no ceiling (the old deep-fetch behaviour)", async () => {
+  const items = Array.from({ length: 12 }, (_, i) => i);
+  const out = await mapLimit(items, 2, async (i) => i * 2, 0);
+  assert.equal(out.filter((v) => v !== undefined).length, 12, "everything runs with no deadline");
+});
+
+test("mapLimit: an expired deadline stops everything immediately", async () => {
+  let started = 0;
+  await mapLimit([1, 2, 3, 4, 5, 6, 7, 8], 2, async () => {
+    started++;
+    return 1;
+  }, Date.now() - 1);
+  assert.equal(started, 0, "an already-expired deadline must schedule nothing");
 });
