@@ -68,7 +68,6 @@ function runScript(scriptPath, args) {
     const stdoutChunks = [];
     let stdoutBytes = 0;
     let truncated = false;
-    let stderr = "";
     child.stdout.on("data", (c) => {
       const buf = Buffer.isBuffer(c) ? c : Buffer.from(c);
       if (stdoutBytes >= MAX_STDOUT_BYTES) {
@@ -85,17 +84,25 @@ function runScript(scriptPath, args) {
       stdoutChunks.push(buf);
       stdoutBytes += buf.length;
     });
-    child.stderr.on("data", (c) => (stderr += c.toString()));
+    let stderrRaw = "";
+    child.stderr.on("data", (c) => (stderrRaw += c.toString()));
+    // Redact on the way OUT of runScript, not at the throw site. The raw stderr
+    // is also attached to the error verbatim (`err.stderr = res.stderr`), so a
+    // caller reading the PROPERTY — rather than the message — got the unredacted
+    // key back even with the message already scrubbed. Redacting at this one sink
+    // closes both paths at once. 2026-09-27 review P0-2: leaked IMAGE_API_KEY
+    // end-to-end through a real child.
+    const currentStderr = () => redactSecrets(stderrRaw);
     const currentStdout = () => Buffer.concat(stdoutChunks).toString("utf8");
     child.on("error", (err) =>
-      finish({ ok: false, err, stdout: currentStdout(), stderr, timedOut, truncated }),
+      finish({ ok: false, err, stdout: currentStdout(), stderr: currentStderr(), timedOut, truncated }),
     );
     child.on("close", (code) =>
       finish({
         ok: code === 0 && !timedOut,
         code,
         stdout: currentStdout(),
-        stderr,
+        stderr: currentStderr(),
         timedOut,
         truncated,
       }),
@@ -126,7 +133,7 @@ function runScript(scriptPath, args) {
         ok: false,
         code: null,
         stdout: currentStdout(),
-        stderr,
+        stderr: currentStderr(),
         timedOut: true,
         truncated,
       });
@@ -197,25 +204,70 @@ function parseJsonOut(stdout, scriptPath, args, truncated = false) {
 // linux.do session cookie (e.g. an auth path that echoes the request). That text
 // is quoted into thrown error messages, which the synthesis tool loop used to
 // forward to the third-party LLM gateway. Redact before interpolation.
-const SECRET_ENV_KEYS = [
-  "GROK_API_KEY",
-  "OPENAI_API_KEY",
-  "TAVILY_API_KEY",
-  "FIRECRAWL_API_KEY",
-  "LINUXDO_COOKIE",
-];
-function redactSecrets(text) {
+//
+// 2026-09-27 review (round 4) — the previous version enumerated a HAND-KEPT list
+// of five variable names. That list was stale on day one: IMAGE_API_KEY is a
+// first-class required key in this project (config.mjs imageApiKey() falls back
+// to GROK_API_KEY) and it was absent, so an image-gen key echoed by a child went
+// straight into a thrown Error verbatim. Every other secret in .env was equally
+// exposed, because a list only ever covers what someone remembered to add — a
+// hand-list is a bug that regenerates itself. So enumerate the ENVIRONMENT
+// instead: any variable whose NAME looks secret-ish has its VALUE redacted,
+// whatever it is called and whenever it lands in .env.
+const SECRET_NAME_RE =
+  /(?:^|[^A-Za-z0-9_])([A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|SESSION|AUTH)[A-Za-z0-9_]*)/;
+
+/** Exported for tests: the env-var names this redactor would consult. */
+export function secretEnvKeys(env = process.env) {
+  return Object.keys(env).filter((k) => SECRET_NAME_RE.test(k));
+}
+
+export function redactSecrets(text, env = process.env) {
   let out = String(text || "");
-  for (const key of SECRET_ENV_KEYS) {
-    const value = process.env[key];
-    if (value && value.length >= 8) out = out.split(value).join(`[${key} 已脱敏]`);
+  // Pass 1: the value of every secret-looking env var. The `>= 8` floor guards
+  // against a 1-2 char value ("1", "on") being scrubbed out of every ordinary
+  // word; real credentials are far longer than that.
+  for (const key of secretEnvKeys(env)) {
+    const value = env[key];
+    if (typeof value === "string" && value.length >= 8) {
+      out = out.split(value).join(`[${key} 已脱敏]`);
+    }
   }
-  // Also catch the common "key=<value>" / "cookie=<value>" echo shape whatever
-  // the variable is named, so an unknown secret is not spliced through.
-  return out.replace(
-    /((?:api[_-]?key|token|cookie|authorization|bearer|secret)\s*[=:]\s*)(\S{8,})/gi,
+  // Pass 2: labelled secrets the env sweep cannot know about. Three shapes, each
+  // with a concrete child that prints it:
+  //  1. label + separator:   `api_key=…`, `cookie: …`, `X-Grok-Key: …`
+  //  2. label + whitespace:  `apiKey sk-live-…`   (no separator at all)
+  //  3. auth word + token:   `Bearer ghs_…`, `Basic dXNlcjpwYXNzd29yZDEyMw==`
+  //
+  // The round-3 alternation listed `bearer`/`authorization` but then REQUIRING
+  // `[=:]` after the label made both of them unreachable — the single most likely
+  // thing for an auth failure to print ("Bearer <token>") matched nothing. And
+  // because the label was a bare alternation with no `[-_]` allowed, `X-Grok-Key:`
+  // and `x-api-key=` did not match either.
+  const SECRET_VALUE = String.raw`[A-Za-z0-9._~+/=-]{8,}`;
+  // A label may be compound: "X-Grok-Key", "x_api_key", "apiKey", "session-token".
+  const SECRET_LABEL = String.raw`(?:[A-Za-z0-9]+[-_])*(?:api[-_]?key|access[-_]?key|private[-_]?key|key|token|secret|cookie|session|auth|authorization|bearer|password|passwd|credential|signature)[A-Za-z0-9_-]*`;
+  // 1. label + [=:]
+  out = out.replace(
+    new RegExp(String.raw`\b(${SECRET_LABEL})\s*[=:]\s*${SECRET_VALUE}`, "gi"),
+    (m, p1) => `${p1} [已脱敏]`,
+  );
+  // 2. label + whitespace. The value must additionally look like a credential
+  // (>= 12 chars AND containing a `-` or `_`) so that "token count=12345" and
+  // "timeout after 20000ms" survive intact — over-redaction is its own outage.
+  out = out.replace(
+    new RegExp(
+      String.raw`\b(${SECRET_LABEL}\s+)((?=[^\s]*[-_])${String.raw`[A-Za-z0-9._~+/=-]{12,}`})`,
+      "gi",
+    ),
     (m, p1) => `${p1}[已脱敏]`,
   );
+  // 3. auth word + bare token (RFC 7235 shape).
+  out = out.replace(
+    /\b(bearer|authorization|basic)\s+([A-Za-z0-9._~+/=-]{8,})/gi,
+    (m, p1) => `${p1} [已脱敏]`,
+  );
+  return out;
 }
 
 export async function runSearch(query, config, { days, extra } = {}) {

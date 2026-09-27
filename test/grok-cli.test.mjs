@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { runFetch, MAX_STDOUT_BYTES, truncateRawForParseError } from "../src/grok-cli.mjs";
+import {
+  runFetch,
+  redactSecrets,
+  MAX_STDOUT_BYTES,
+  truncateRawForParseError,
+} from "../src/grok-cli.mjs";
 
 async function fixtureSearchDir() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-"));
@@ -237,4 +242,94 @@ test("runFetch: a child error message does not carry a secret through", async ()
   }
   assert.doesNotMatch(message, /sk-live-LEAKME/, "the secret must be redacted");
   assert.match(message, /已脱敏/, "the message says it was redacted");
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-27 四轮复审 P0：脱敏白名单陈旧 + 裸 Bearer 未拦。
+//
+// round-3 用的是**手写 5 个变量名**的白名单。白名单第一天就是陈旧的：IMAGE_API_KEY
+// 是本项目一等必填 key（config.mjs 的 imageApiKey() 会回落到 GROK_API_KEY），却根本
+// 不在名单里；.env 里其它任何 key 同样漏网——名单只覆盖「有人想起来加」的变量。
+// 通用正则也救不了：它要求 key=/token= 前缀，而子进程回显**裸凭证**时没有前缀。
+// ---------------------------------------------------------------------------
+
+test("redactSecrets: consults the ENVIRONMENT, not a hand-kept variable list", () => {
+  // The regression that mattered: a secret the list never named. If the redactor
+  // only reads a fixed set of names, adding a new key to .env silently leaks.
+  const env = {
+    PATH: "/usr/bin",
+    HOME: "/Users/mango",
+    GROK_API_KEY: "sk-grok-AAAABBBBCCCCDDDD",
+    IMAGE_API_KEY: "sk-image-EEEFFFFFGGGGHHHH",
+    SOME_BRAND_NEW_TOKEN_I_ADDED_LATER: "tok-1111222233334444",
+    ANTHROPIC_API_KEY: "sk-antro-ZZZZYYYYXXXXWWWW",
+  };
+  const out = redactSecrets(
+    "upstream rejected credential sk-image-EEEFFFFFGGGGHHHH and tok-1111222233334444",
+    env,
+  );
+  assert.ok(!out.includes("EEEFFFFFGGGGHHHH"), "IMAGE_API_KEY must be redacted");
+  assert.ok(!out.includes("1111222233334444"), "an unknown future token must be redacted");
+  assert.match(out, /\[IMAGE_API_KEY 已脱敏\]/);
+  assert.match(out, /\[SOME_BRAND_NEW_TOKEN_I_ADDED_LATER 已脱敏\]/);
+});
+
+test("redactSecrets: a bare Bearer credential is redacted (no separator)", () => {
+  // Round-3's regex required [=:] AFTER the label, so `bearer`/`authorization`
+  // were in the alternation but unreachable — and "Bearer <tok>" is the single
+  // most likely shape for an auth failure to print into stderr.
+  const out = redactSecrets("Authorization: Bearer ghs_16C7e42F292c6912E7660c839347Ae", {});
+  assert.ok(!out.includes("ghs_16C7e42F292c6912E7660c839347Ae"), out);
+  for (const raw of [
+    "Bearer ghs_16C7e42F292c6912E7660c839347Ae",
+    "authorization: Basic dXNlcjpwYXNzd29yZDEyMw==",
+    "X-Grok-Key: xai-9f2b7c1d4e6a8b0c2d4e6f8a0b2c4d6e",
+    "apiKey sk-live-LEAK-12345678",
+    "cookie: _t_uid=abc123def456ghi789",
+  ]) {
+    const r = redactSecrets(raw, {});
+    assert.ok(!/ghs_16C7e42|xai-9f2b7c1d|sk-live-LEAK|abc123def456ghi789/.test(r), `LEAKED: ${r}`);
+  }
+});
+
+test("redactSecrets: does not destroy useful diagnostics", () => {
+  // Over-redaction would be its own outage: an operator staring at
+  // "检索失败：Error" learns nothing. Keep the human-useful parts.
+  for (const raw of [
+    "token count=12345 exceeded the context window",
+    "usage: prompt tokens 1234567, completion 89012",
+    "grok-search fetch.js 退出码 1：no stdout",
+    "getaddrinfo ENOTFOUND api.example.com",
+    "HTTP 524 upstream timeout after 20000ms",
+  ]) {
+    assert.equal(redactSecrets(raw, {}), raw, `diagnostic was mangled: ${raw}`);
+  }
+});
+
+test("runFetch: a secret echoed to stderr does not reach the thrown Error", async () => {
+  // End-to-end, through the real child: the property that actually matters is
+  // not "redactSecrets works" but "no secret reaches the error a caller holds".
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-secret-"));
+  const key = "sk-image-E2ELEAK99887766554433";
+  await fixtureScript(
+    root,
+    "fetch.js",
+    `process.stderr.write("upstream rejected credential ${key}\\n");process.exit(3);`,
+  );
+  const prev = process.env.IMAGE_API_KEY;
+  process.env.IMAGE_API_KEY = key;
+  try {
+    let caught = null;
+    try {
+      await runFetch("https://example.com", { grokSearchDir: root });
+    } catch (e) {
+      caught = e;
+    }
+    assert.ok(caught, "the failing fetch must throw");
+    const text = `${caught.message}\n${caught.stderr || ""}`;
+    assert.ok(!text.includes(key), `secret leaked into the error: ${text}`);
+  } finally {
+    if (prev == null) delete process.env.IMAGE_API_KEY;
+    else process.env.IMAGE_API_KEY = prev;
+  }
 });
