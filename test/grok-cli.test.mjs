@@ -333,3 +333,109 @@ test("runFetch: a secret echoed to stderr does not reach the thrown Error", asyn
     else process.env.IMAGE_API_KEY = prev;
   }
 });
+
+// ---------------------------------------------------------------------------
+// 2026-09-27 review (round 4) P1-3: process containment.
+//
+// runScript kills only the DIRECT child. Verified: a grandchild that inherits
+// stdio survives the parent's SIGTERM as a live orphan (grandchild pid alive,
+// parent dead). `child.kill(sig)` signals one pid; it is not a group kill. On
+// the timeout path that orphan keeps running for the rest of the day, and on
+// the normal path any long-lived grandchild a grok-search dependency spawns
+// outlives the report entirely.
+//
+// `killAllChildren` (child-tracker.mjs) has the same one-pid limitation, so
+// reaping on interrupt does not cover it either.
+// ---------------------------------------------------------------------------
+
+const isAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+async function readPid(file) {
+  return Number((await fs.readFile(file, "utf8")).trim());
+}
+
+test("runFetch: the timeout kills the whole process group, not just the direct child", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-group-"));
+  const gcPidFile = path.join(root, "gc.pid");
+  // The child records ITS OWN pid from inside a grandchild, so what we check is
+  // genuinely a grandchild of the node process under test.
+  await fixtureScript(
+    root,
+    "fetch.js",
+    `const{spawn}=require("child_process");
+     spawn(process.execPath,["-e",\`require("fs").writeFileSync(${JSON.stringify(gcPidFile)},String(process.pid));setTimeout(()=>{},120000)\`],{stdio:"ignore"});
+     process.on("SIGTERM",()=>{}); // force the group-kill path to do the work
+     setInterval(()=>{},1000);`,
+  );
+  const prev = process.env.GROK_CHILD_TIMEOUT_MS;
+  process.env.GROK_CHILD_TIMEOUT_MS = "600";
+  let gcPid = null;
+  try {
+    await runFetch("https://example.com", { grokSearchDir: root }).catch(() => {});
+    // The grandchild writes its pid asynchronously; give it a moment.
+    for (let i = 0; i < 40 && gcPid === null; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      try {
+        gcPid = await readPid(gcPidFile);
+      } catch {
+        /* not written yet */
+      }
+    }
+    assert.ok(gcPid, "the grandchild never started, so this test proves nothing");
+    // Let the group kill land.
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(
+      isAlive(gcPid),
+      false,
+      `grandchild ${gcPid} survived the timeout as an orphan — only the direct child was signalled`,
+    );
+  } finally {
+    if (gcPid && isAlive(gcPid)) {
+      try {
+        process.kill(gcPid, "SIGKILL");
+      } catch {
+        /* gone */
+      }
+    }
+    if (prev == null) delete process.env.GROK_CHILD_TIMEOUT_MS;
+    else process.env.GROK_CHILD_TIMEOUT_MS = prev;
+  }
+});
+
+test("runFetch: child stderr is capped like stdout", async () => {
+  // Verified: an uncapped stderr listener accumulated 50 MiB from a single child,
+  // against MAX_STDOUT_BYTES = 8 MiB for stdout. stdout is capped precisely
+  // because "a child can print without bound"; stderr was exempt for no reason
+  // that survives a child that loops on a warning.
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-errcap-"));
+  await fixtureScript(
+    root,
+    "fetch.js",
+    `const chunk="X".repeat(64*1024);let n=0;
+     const t=setInterval(()=>{n+=chunk.length;process.stderr.write(chunk);
+       if(n>=${20 * 1024 * 1024}){clearInterval(t);process.exit(1);}},0);`,
+  );
+  const prev = process.env.GROK_CHILD_TIMEOUT_MS;
+  process.env.GROK_CHILD_TIMEOUT_MS = "20000";
+  let err = null;
+  try {
+    await runFetch("https://example.com", { grokSearchDir: root }).catch((e) => {
+      err = e;
+    });
+    assert.ok(err, "the failing child must throw");
+    assert.ok(
+      err.stderr.length <= MAX_STDOUT_BYTES,
+      `stderr grew unbounded: ${err.stderr.length} bytes (stdout cap is ${MAX_STDOUT_BYTES})`,
+    );
+  } finally {
+    if (prev == null) delete process.env.GROK_CHILD_TIMEOUT_MS;
+    else process.env.GROK_CHILD_TIMEOUT_MS = prev;
+  }
+});

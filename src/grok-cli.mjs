@@ -42,6 +42,23 @@ export function truncateRawForParseError(raw) {
   );
 }
 
+// Signal the child's whole process group, falling back to the single pid when the
+// group is unavailable (no pid, or the child died and the group is gone). Group
+// signalling needs the child to have been spawned `detached: true`; without it
+// `-pid` would target THIS process's group and kill the report itself, so the
+// fallback is not optional.
+function killGroup(child, sig) {
+  if (typeof child?.pid === "number" && child.pid > 0) {
+    try {
+      process.kill(-child.pid, sig);
+      return;
+    } catch {
+      /* group already reaped — fall through to the single-pid path */
+    }
+  }
+  child?.kill?.(sig);
+}
+
 function runScript(scriptPath, args) {
   return new Promise((resolve) => {
     const timeoutMs = childTimeoutMs();
@@ -51,20 +68,35 @@ function runScript(scriptPath, args) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // Release the pipes once nothing more will be read from them. On the
+      // timeout path the child is SIGKILLed 3s AFTER we settle, so both streams
+      // are still open and their listeners still live at this point; without
+      // this they keep buffering into a result nobody reads. 2026-09-27 P1-3.
+      for (const s of [child?.stdout, child?.stderr]) {
+        try {
+          s?.destroy?.();
+        } catch {
+          /* already gone */
+        }
+      }
       resolve(val);
     };
     const child = spawn(
       process.execPath,
       [scriptPath, ...args],
-      { env: childEnv(), stdio: ["ignore", "pipe", "pipe"] },
+      // detached puts the child in its OWN process group, which is what makes the
+      // group kill below possible. 2026-09-27 review P1-3: `child.kill(sig)`
+      // signals exactly one pid, so a grandchild that inherited stdio survived the
+      // timeout as a live orphan (verified: parent dead, grandchild alive). Group
+      // signalling is the only thing that reaps the whole subtree.
+      { env: childEnv(), stdio: ["ignore", "pipe", "pipe"], detached: true },
     );
     // Register with the global child tracker so run.mjs reaps this process (SIGKILL)
     // if the main run is interrupted mid-search — otherwise it would orphan.
-    trackChild(child);
+    trackChild(child, { detached: true });
     // stdout is accumulated as Buffers (concatenated once at close — also correct
     // for multibyte chars split across chunk boundaries) and capped at
-    // MAX_STDOUT_BYTES. stderr stays uncapped: it is the child's small diagnostic
-    // channel, and its tail is what the thrown error messages quote.
+    // MAX_STDOUT_BYTES. stderr is capped on the same terms; see its listener.
     const stdoutChunks = [];
     let stdoutBytes = 0;
     let truncated = false;
@@ -85,7 +117,28 @@ function runScript(scriptPath, args) {
       stdoutBytes += buf.length;
     });
     let stderrRaw = "";
-    child.stderr.on("data", (c) => (stderrRaw += c.toString()));
+    let stderrBytes = 0;
+    let stderrTruncated = false;
+    child.stderr.on("data", (c) => {
+      // stderr is capped on the same terms as stdout. 2026-09-27 review P1-3:
+      // the listener was a bare `stderr += c.toString()` and a child looping on a
+      // warning pushed 50 MiB into the heap (measured) against MAX_STDOUT_BYTES =
+      // 8 MiB for stdout. "It is only a diagnostic channel" is not a bound.
+      const buf = Buffer.isBuffer(c) ? c : Buffer.from(c);
+      if (stderrBytes >= MAX_STDOUT_BYTES) {
+        stderrTruncated = true;
+        return;
+      }
+      const room = MAX_STDOUT_BYTES - stderrBytes;
+      if (buf.length > room) {
+        stderrRaw += buf.subarray(0, room).toString("utf8");
+        stderrBytes = MAX_STDOUT_BYTES;
+        stderrTruncated = true;
+        return;
+      }
+      stderrRaw += buf.toString("utf8");
+      stderrBytes += buf.length;
+    });
     // Redact on the way OUT of runScript, not at the throw site. The raw stderr
     // is also attached to the error verbatim (`err.stderr = res.stderr`), so a
     // caller reading the PROPERTY — rather than the message — got the unredacted
@@ -118,13 +171,13 @@ function runScript(scriptPath, args) {
       // daily run past its window. `Promise.allSettled` cannot rescue a pending
       // thunk. Settle here; the `settled` guard makes any later `close` a no-op.
       try {
-        child.kill("SIGTERM");
+        killGroup(child, "SIGTERM");
       } catch {
         /* ignore */
       }
       setTimeout(() => {
         try {
-          child.kill("SIGKILL");
+          killGroup(child, "SIGKILL");
         } catch {
           /* ignore */
         }

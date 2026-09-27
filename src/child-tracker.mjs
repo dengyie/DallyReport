@@ -10,11 +10,19 @@
 // immediate kill is the reliable way to guarantee no orphan survives us.
 
 const children = new Set();
+// pids of tracked children that were spawned `detached`, i.e. into their own
+// process group. Only these may be signalled by group (-pid); see trackChild.
+const detachedChildren = new Set();
 
 // Register a child for reaping. Defensive: ignores non-child objects (test stubs
 // may lack .kill/.once). The child is dropped from the set when it exits or errors
 // on its own, so the set only holds genuinely in-flight processes.
-export function trackChild(child) {
+//
+// `detached` records whether the caller spawned the child into its OWN process
+// group. It gates the group kill in killAllChildren: `process.kill(-pid)` on a
+// child that shares OUR group would kill the report itself, so a non-detached
+// child must only ever be signalled by its single pid.
+export function trackChild(child, { detached = false } = {}) {
   if (!child || typeof child.kill !== "function" || typeof child.once !== "function") {
     return child;
   }
@@ -22,6 +30,9 @@ export function trackChild(child) {
   const drop = () => children.delete(child);
   child.once("exit", drop);
   child.once("error", drop);
+  if (detached && typeof child.pid === "number" && child.pid > 0) {
+    detachedChildren.add(child.pid);
+  }
   return child;
 }
 
@@ -29,6 +40,21 @@ export function trackChild(child) {
 // process.on('exit') and from SIGINT/SIGTERM handlers.
 export function killAllChildren() {
   for (const child of children) {
+    const pid = child.pid;
+    const group = typeof pid === "number" && detachedChildren.has(pid);
+    let done = false;
+    if (group) {
+      try {
+        process.kill(-pid, "SIGKILL");
+        done = true;
+      } catch {
+        /* group already gone — fall back to the single pid */
+      }
+    }
+    if (done) {
+      detachedChildren.delete(pid);
+      continue;
+    }
     try {
       child.kill("SIGKILL");
     } catch {
@@ -36,4 +62,5 @@ export function killAllChildren() {
     }
   }
   children.clear();
+  detachedChildren.clear();
 }
