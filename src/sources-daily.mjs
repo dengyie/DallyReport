@@ -334,9 +334,19 @@ export async function fetchOfficialBlogRss(
     }
 
     const todayStart = beijingMidnightMs(config.date);
+    // Official blogs don't publish daily; grace 1 day so yesterday's posts are
+    // still treated as "today" for the material window.
+    //
+    // 2026-09-27 review C1: the gate used to be a strict `pubDateMs < todayStart`
+    // and the grace was attached only to the card that had already survived it —
+    // so the field downstream honours was dead code and the comment above was
+    // false. A Beijing-yesterday post measured as dropped. The cutoff now
+    // expresses the window this source is actually given.
+    const BLOG_GRACE_DAYS = 1;
+    const windowStart = todayStart - BLOG_GRACE_DAYS * 24 * 60 * 60 * 1000;
     const sources = [];
     for (const item of items) {
-      if (item.pubDateMs != null && item.pubDateMs < todayStart) continue;
+      if (item.pubDateMs != null && item.pubDateMs < windowStart) continue;
       if (!isAiRelevant(item.title, item.url)) continue;
       sources.push({
         url: item.url,
@@ -345,9 +355,7 @@ export async function fetchOfficialBlogRss(
         provider: provider || site,
         score: 0,
         publishedAt: item.pubDateMs ?? Date.now(),
-        // Official blogs don't publish daily; grace 1 day so yesterday's
-        // posts are still treated as "today" for the material window.
-        recencyGraceDays: 1,
+        recencyGraceDays: BLOG_GRACE_DAYS,
       });
       if (sources.length >= limit) break;
     }
@@ -417,6 +425,8 @@ export async function fetchArxivDaily(config, { limit = 5, runFetch: doFetch } =
     if (!text) return [];
 
     const todayStart = beijingMidnightMs(config.date);
+    const ARXIV_GRACE_DAYS = 2;
+    const arxivWindowStart = todayStart - ARXIV_GRACE_DAYS * 24 * 60 * 60 * 1000;
 
     // Parse Atom entries via regex
     const entryRegex = /<entry>([\s\S]*?)<\/entry>/gi;
@@ -438,7 +448,12 @@ export async function fetchArxivDaily(config, { limit = 5, runFetch: doFetch } =
       const absUrl = id.replace(/v\d+$/i, "").replace(/^http:/, "https:");
 
       const publishedAt = published ? new Date(published).getTime() : 0;
-      if (publishedAt < todayStart) continue;
+      // 2026-09-27 review C1: the cutoff was a strict `publishedAt < todayStart`
+      // while the grace of 2 was attached only to cards that had survived it, so
+      // the field was dead code. On a 09:00 Beijing run this dropped the whole
+      // previous Beijing day's batch — measured empty. The window is now
+      // expressed in the cutoff itself.
+      if (publishedAt < arxivWindowStart) continue;
 
       // arXiv abstracts are often very technical; always include them
       sources.push({
@@ -452,7 +467,7 @@ export async function fetchArxivDaily(config, { limit = 5, runFetch: doFetch } =
         // land on "yesterday" or the day before. Grace 2 days so yesterday's +
         // today's papers survive the recency gate (arxiv publishes in a burst
         // late UTC; a strict same-day window would starve the paper source).
-        recencyGraceDays: 2,
+        recencyGraceDays: ARXIV_GRACE_DAYS,
       });
       if (sources.length >= limit) break;
     }

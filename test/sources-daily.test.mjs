@@ -156,10 +156,10 @@ const ARXIV_SAMPLE = `<?xml version="1.0" encoding="UTF-8"?>
 <published>2026-08-10T04:00:00Z</published>
 </entry>
 <entry>
-<title>Yesterday's Paper</title>
+<title>Stale Paper</title>
 <id>http://arxiv.org/abs/2608.09999v1</id>
 <summary>Old stuff.</summary>
-<published>2026-08-09T02:00:00Z</published>
+<published>2026-08-05T02:00:00Z</published>
 </entry>
 </feed>`;
 
@@ -174,7 +174,7 @@ test("arXiv: parses same-day papers, normalizes URL, drops stale", async () => {
   assert.ok(paper);
   assert.equal(paper.provider, "arxiv");
   assert.equal(paper.url, "https://arxiv.org/abs/2608.10001");
-  assert.ok(!sources.some((s) => s.title.includes("Yesterday")), "stale paper dropped");
+  assert.ok(!sources.some((s) => s.title.includes("Stale")), "stale paper dropped");
 });
 
 test("arXiv: fetch failure -> [] (never throws)", async () => {
@@ -507,4 +507,78 @@ test("interleaveAndCap: a cap at or above the pool returns everything", () => {
   const parts = [part("hn", 2), part("openai", 2)];
   assert.equal(interleaveAndCap(parts, 4).length, 4);
   assert.equal(interleaveAndCap(parts, 99).length, 4);
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-27 review C1: `recencyGraceDays` was DEAD CODE on both graced fetchers.
+//
+// Both sites filtered with a strict `publishedAt < todayStart -> continue` and
+// only THEN attached `recencyGraceDays`, a field the downstream filterByRecency
+// honours. Anything the grace was written to rescue had already been dropped, so
+// the option silently did nothing and the comment describing it was false.
+// Measured: a Beijing-yesterday official-blog post (grace 1) and a two-Beijing-
+// days-ago arXiv paper (grace 2) both came back empty.
+//
+// The gate must be expressed in terms of the window this source is given.
+// ---------------------------------------------------------------------------
+
+const DAY = 24 * 60 * 60 * 1000;
+
+test("official blog RSS: a Beijing-yesterday post survives the declared 1-day grace", async () => {
+  // A 09:00 Beijing run on 2026-09-27. The previous Beijing day began at
+  // 2026-09-25T16:00Z, so a post published then is "yesterday" in the report's
+  // own calendar — the case the grace of 1 exists for.
+  const feed = `<?xml version="1.0"?><rss><channel><item>` +
+    `<title>OpenAI ships a new model</title>` +
+    `<link>https://openai.test/1</link>` +
+    `<pubDate>${new Date("2026-09-25T20:00:00Z").toUTCString()}</pubDate>` +
+    `</item></channel></rss>`;
+  const out = await fetchOfficialBlogRss(
+    "https://openai.test/feed",
+    { cacheDir: null, date: "2026-09-27" },
+    { site: "openai", runFetch: async () => ({ text: feed, fromCache: false, provider: "t" }) },
+  );
+  assert.equal(out.length, 1, "grace 1 must actually admit yesterday");
+  assert.equal(out[0].recencyGraceDays, 1);
+});
+
+test("official blog RSS: a 3-day-old post is still excluded", async () => {
+  // The contrast direction — widening the window must not let real staleness in.
+  const feed = `<?xml version="1.0"?><rss><channel><item>` +
+    `<title>Ancient OpenAI post</title>` +
+    `<link>https://openai.test/2</link>` +
+    `<pubDate>${new Date("2026-09-22T12:00:00Z").toUTCString()}</pubDate>` +
+    `</item></channel></rss>`;
+  const out = await fetchOfficialBlogRss(
+    "https://openai.test/feed",
+    { cacheDir: null, date: "2026-09-27" },
+    { site: "openai", runFetch: async () => ({ text: feed, fromCache: false, provider: "t" }) },
+  );
+  assert.equal(out.length, 0);
+});
+
+test("arxiv: a two-Beijing-days-ago paper survives the declared 2-day grace", async () => {
+  // A 09:00 Beijing run on 2026-09-27: the previous Beijing day began at
+  // 2026-09-25T16:00Z, so an arXiv submit at 2026-09-25T20:00Z is one Beijing day
+  // back and the declared grace of 2 must admit it.
+  const atom = `<feed><entry><title>Attention study</title>` +
+    `<id>http://arxiv.org/abs/2509.01234v1</id><summary>s</summary>` +
+    `<published>2026-09-25T20:00:00Z</published></entry></feed>`;
+  const out = await fetchArxivDaily(
+    { cacheDir: null, date: "2026-09-27" },
+    { runFetch: async () => ({ text: atom, fromCache: false, provider: "t" }) },
+  );
+  assert.equal(out.length, 1, "grace 2 must actually admit the previous Beijing day");
+  assert.equal(out[0].recencyGraceDays, 2);
+});
+
+test("arxiv: a five-day-old paper is still excluded", async () => {
+  const atom = `<feed><entry><title>Stale paper</title>` +
+    `<id>http://arxiv.org/abs/2501.00001v1</id><summary>s</summary>` +
+    `<published>2026-09-01T12:00:00Z</published></entry></feed>`;
+  const out = await fetchArxivDaily(
+    { cacheDir: null, date: "2026-09-27" },
+    { runFetch: async () => ({ text: atom, fromCache: false, provider: "t" }) },
+  );
+  assert.equal(out.length, 0);
 });
