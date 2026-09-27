@@ -19,23 +19,72 @@ import { sanitizeSnippet, isInjectionOnlySource, NEGATIVE_COMMUNITY_RE } from ".
 // Shared AI-keyword gate for the community collectors. Kept broad enough for
 // Chinese + English model names and tooling chatter across L 站 / NodeSeek / V2EX.
 //
-// 2026-09-26 review: this alternation started with a bare `ai`, unanchored, so it
-// matched the letters a-i-a inside ordinary English words. Verified false
-// positives on real forum-title shapes: "Daily maintenance window 这个公告",
-// "Repair chain 讨论", "请问 Email 收不到验证码", "Air conditioning 闲聊",
-// "求推荐 training 用的笔记本", "Failed to load 报错" — all six passed the
-// "is this AI news?" gate. It also over-matched on bare `api`, `grok`, `sora`,
-// `cursor`, `token` and `xai`. Word-boundary the Latin tokens (`\bai\b` not
-// `ai`); the CJK alternatives have no word boundaries to anchor to and stay as-is.
-// The genuinely-broad ones that also cover non-AI usage ("maintain", "email",
-// "daily", "said", "trained") were only ever true by accident of the bare `ai`,
-// so anchoring removes them without losing real AI posts.
-export const AI_TITLE_RE =
-  // 额度/配额/余额 with an explicit how-to verb: these are usage questions about
-  // a model account ("剩余额度查询方法", "余额怎么查"), which the bare `额度重置`
-  // entry used to drop. They only reach this gate once the negative filter has
-  // let them through, so naming the verb keeps the spam filter in charge.
-  /\bai\b|artificial intelligence|人工智能|大模型|大 模型|\bgpt\b|\bgpt-?4o?\b|chatgpt|claude|openai|anthropic|deepseek|gemini|\bllms?\b|\bqwen\b|\bkimi\b|\bglm\b|智谱|混元|豆包|通义|月之暗面|机器人|\bagents?\b|opencode|midjourney|\bsora\b|\bcursor\b|codex|ollama|\bvllm\b|huggingface|\bnvidia\b|推理|蒸馏|榜单|模型|\btokens?\b|\bgrok\b|\bxai\b|perplexity|cohere|mistral|\bllama\b|falcon|生图|文生|数字人|短剧|seedance|\bmimo\b|longcat|pangu|openpangu|nanobanana|\bveo\b|yiapi|中转站|\bapis?\b|\bcoding agents?\b|编程助手|提示词|词元|(?:剩余|可用|查询|查看|重置|恢复)?\s*(?:额度|配额|余额)\s*(?:查询|查看|怎么|如何|重置|恢复|刷新|到账|用完|上限)/i;
+// 2026-09-27 review (round 4) corrects the 2026-09-26 fix. That fix put a
+// WORD BOUNDARY on BOTH ends of every Latin token (`\bgpt\b`). The leading `\b`
+// is what actually blocks the false positives — it is what stops "maintain",
+// "email", "said" and "trained" from matching. The TRAILING one caused a much
+// larger regression: `5`/`4`/`3` are word characters, so every glued version
+// number failed. 20 of 48 real AI headlines were being dropped, and they were
+// the most common title shape on an AI forum:
+//
+//   LOST  GPT5 发布   GLM4.5 发布   Qwen3 登顶   Llama4 开源   Grok4 发布
+//   LOST  Sora2 评测  Kimi2 上下文  Veo3 竞品    Mimo7B 评测   vLLM0.9 部署
+//   LOST  agentic 架构  tokenizer 改进  AIGC 行业报告
+//
+// `\bgpt-?4o?\b` was a special case that accidentally rescued GPT-4o/GPT4o but
+// NOT GPT-5/GPT4/GPT5 — i.e. exactly the newest-generation titles were the ones
+// lost. So: keep the leading `\b`, replace the trailing one with an OPTIONAL
+// version suffix. `test/community-ai-corpus.test.mjs` pins both directions —
+// the KEEP side (this regression) and the DROP side (the original bare-`ai`
+// bug) — because 352 green tests did not catch either.
+// Built with a RegExp constructor, not a literal: the pattern is too long to
+// survive as one line, and a JS regex literal cannot span lines. `x` (extended)
+// is what makes the per-token grouping readable — the previous one-line form
+// was unreviewable precisely because a reader could not see which `\b` did what.
+const AI_TITLE_RE_SRC = [
+  // --- bare `ai` family: leading \b only. The version forms need no trailing
+  // boundary because `2` is a word char, but the standalone form must keep one
+  // or "maintain"/"email"/"said"/"trained" come back.
+  String.raw`\bai\b`,
+  String.raw`\bai\d`,
+  String.raw`aigc`,
+  String.raw`artificial intelligence`,
+  // --- CJK: no word boundaries to anchor to, unchanged.
+  `人工智能|大模型|大 模型|智谱|混元|豆包|通义|月之暗面|机器人`,
+  `推理|蒸馏|榜单|模型|生图|文生|数字人|短剧|编程助手|提示词|词元`,
+  // --- vendor names, always safe as bare substrings (multi-char, collision-free)
+  `chatgpt|claude|openai|anthropic|deepseek|gemini|mistral|perplexity|cohere`,
+  `huggingface|nvidia|codex|ollama|opencode|midjourney|falcon|seedance`,
+  `longcat|pangu|openpangu|nanobanana|yiapi|中转站`,
+  // --- versioned model names: \b on the LEFT, optional version on the right.
+  // This is the round-4 fix: the trailing \b used to eat `GPT5` / `GLM4.5`.
+  String.raw`\bgpt(?:-?\d[\w.]*)?o?\b`,
+  String.raw`\bqwen(?:-?\d[\w.]*)?\b`,
+  String.raw`\bglm(?:-?\d[\w.]*)?\b`,
+  String.raw`\bkimi(?:-?[\w.]+)?\b`,
+  String.raw`\bllama(?:-?\d[\w.]*)?\b`,
+  String.raw`\bmimo(?:-?[\w.]*)?\b`,
+  String.raw`\bllms?(?:-?\d[\w.]*)?\b`,
+  String.raw`\bgrok(?:-?\d[\w.]*)?\b`,
+  String.raw`\bsora(?:-?\d[\w.]*)?\b`,
+  String.raw`\bveo(?:-?\d[\w.]*)?\b`,
+  String.raw`\bvllm(?:-?[\w.]*)?\b`,
+  // --- compound-word families: suffix-anchored, no trailing \b
+  String.raw`\bagent(?:s|ic|ive|ic\w*)?\b`,
+  String.raw`\bcursor(?:s|-?\d[\w.]*)?\b`,
+  String.raw`\btoken(?:s|izer|izers|omics|ization|isation|gate)?\b`,
+  String.raw`\bapis?\b`,
+  String.raw`\bxai\b`,
+  String.raw`\bcoding agents?\b`,
+  // --- 额度/配额/余额 with an explicit how-to verb. These are usage questions
+  // about a model account ("剩余额度查询方法", "余额怎么查"), which the old bare
+  // `额度重置` / `余额` negative-filter entries used to drop.
+  `(?:剩余|可用|查询|查看|重置|恢复)?\\s*(?:额度|配额|余额)\\s*(?:查询|查看|怎么|如何|重置|恢复|刷新|到账|用完|上限)`,
+].join("|");
+
+export const AI_TITLE_RE = new RegExp(AI_TITLE_RE_SRC, "i");
+
+
 
 // Promo/ads that should sink to the bottom even when keyword-adjacent.
 const PROMO_TITLE_RE =
