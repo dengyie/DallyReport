@@ -257,3 +257,39 @@ test("sanitizeSnippet: brand typos fixed at the ingest choke point", () => {
   // prompt all sanitize titles here, so one fix covers all three surfaces.
   assert.equal(sanitizeSnippet("Anthoropic 宣布推出 LSVP", { maxChars: 200 }), "Anthropic 宣布推出 LSVP");
 });
+
+// ---------------------------------------------------------------------------
+// 2026-09-27 review (round 4) P2-1: the bare 出/收 in the quota rows.
+//
+// The two quota rows end in a bare `出`/`收` alternation:
+//   (?:额度|配额|余额|quota).{0,10}(?:出售|出|卖|转让|怎么买|低价|代充|回收|收)
+// so 超出 / 输出 / 超出配额 / 回收站 / 配额超出的 all matched. These are not
+// seller-speak at all — 超出 and 输出 are ordinary words, and 回收站 appears in
+// any "disk cleanup" thread. Verified over-kills before this test existed.
+// ---------------------------------------------------------------------------
+
+test("NEGATIVE_COMMUNITY_RE: 超出/输出/回收站 are not seller-speak", () => {
+  const overkilled = [
+    "超出配额限制的处理方式",
+    "配额超出后的降级策略",
+    "模型输出质量提升明显",
+    "输出 token 统计异常",
+    "回收站已清理，空间恢复",
+    "该功能输出结果与预期不符",
+  ];
+  for (const t of overkilled) {
+    assert.ok(!NEGATIVE_COMMUNITY_RE.test(t), `误杀真实 AI 新闻: ${t}`);
+  }
+  // ...and the seller shapes the bare verb was there for must STILL be caught.
+  const noise = [
+    "剩余额度低价出售",
+    "额度重置了 出个车",
+    "3出 中转站 余额",
+    "出 quota 三个",
+    "收 余额 低价",
+    "配额代充优惠",
+  ];
+  for (const t of noise) {
+    assert.ok(NEGATIVE_COMMUNITY_RE.test(t), `应命中噪声: ${t}`);
+  }
+});

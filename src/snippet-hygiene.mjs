@@ -320,10 +320,21 @@ export function filterByRecency(sources, dateStr) {
 //    balance word (剩余/额度/配额/余额/quota), so 「Claude 额度重置了 喜报」 and
 //    「余额怎么查」 are real AI news that survives, while 「剩余额度低价出售」,
 //    「额度重置了 出个车」 and 「3出 中转站 余额」 stay filtered.
+//
+// 2026-09-27 review (round 4) P2-1: the seller alternation still ended in BARE
+// `出` and `收`, so 「超出配额限制」「配额超出后的降级策略」「模型输出质量提升」
+// and 「回收站已清理」 all matched. 超出/输出/回收站 are ordinary words, not
+// seller speak, and each of those is a real AI story dropped UPSTREAM — before
+// dedup ever saw it. The two-character seller forms are now listed explicitly
+// (出个/出车/出号/收号/收个/收一个), which is what real trading posts say. The
+// mixed CJK↔Latin case the original comment cared about ("出 quota 三个") is
+// caught by an explicit row, with a negative lookbehind/lookahead so 超出 and
+// 输出 — the two ordinary words the bare 出 was over-matching — cannot reach it.
+// `怎么买` is kept verbatim: 「剩余额度怎么买」 is a buyer, not a seller.
 // news-dedup.mjs now folds the genuinely duplicated announcements instead of
 // papering over the loss.
 export const NEGATIVE_COMMUNITY_RE =
-  /(?:出|收|买|卖|求购|出售|转让|低价).{0,14}(?:号|账号)|(?:号|账号).{0,4}(?:出|收|买|卖)|\b\d+出\b|求车|人找车|车找人|车位|拼车|合租|代充|挂号|抽奖|降智|封号|被封|土区|日区|美区|里拉|阿根廷|美运|低价订阅|怎么买|接码|退款|(?:额度|配额|余额|quota).{0,10}(?:出售|出|卖|转让|怎么买|低价|代充|回收|收)|(?:出售|出|卖|转让|收|低价|代充|回收).{0,10}(?:额度|配额|余额|quota)|鉴别渠道|收鸡|出鸡|溢价|邀请码|纯手工|黑五|秒杀|中转站|注册送|求个.*车|本质是个快捷方式|勇闯/i;
+  /(?:出|收|买|卖|求购|出售|转让|低价).{0,14}(?:号|账号)|(?:号|账号).{0,4}(?:出|收|买|卖)|\b\d+出\b|求车|人找车|车找人|车位|拼车|合租|代充|挂号|抽奖|降智|封号|被封|土区|日区|美区|里拉|阿根廷|美运|低价订阅|怎么买|接码|退款|(?<!超)出(?!输)[^。！？\n]{0,6}(?:额度|配额|余额|quota)|(?:额度|配额|余额|quota).{0,10}(?:出售|出个|出车|出号|卖|转让|怎么买|低价|代充|回收|收号|收个)|(?:出售|出个|出车|出号|卖|转让|收号|收个|低价|代充|回收).{0,10}(?:额度|配额|余额|quota)|鉴别渠道|收鸡|出鸡|溢价|邀请码|纯手工|黑五|秒杀|中转站|注册送|求个.*车|本质是个快捷方式|勇闯/i;
 
 // High-value technical and authoritative outlink domains worthy of unfurling/preservation.
 export const HIGH_VALUE_OUTLINK_RE =
