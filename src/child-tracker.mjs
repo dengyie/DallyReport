@@ -27,11 +27,20 @@ export function trackChild(child, { detached = false } = {}) {
     return child;
   }
   children.add(child);
-  const drop = () => children.delete(child);
+  // Prune BOTH registries on exit/error. 2026-09-27 review A5: the detached pid
+  // used to survive the drop, so the set grew once per search all run, and — far
+  // worse — a later unrelated child that the OS assigned the same recycled pid
+  // was then signalled with `process.kill(-pid)`. A group kill aimed at a stale
+  // pid is the one signal that can take down the report itself.
+  const pid = typeof child.pid === "number" && child.pid > 0 ? child.pid : null;
+  const drop = () => {
+    children.delete(child);
+    if (pid != null) detachedChildren.delete(pid);
+  };
   child.once("exit", drop);
   child.once("error", drop);
-  if (detached && typeof child.pid === "number" && child.pid > 0) {
-    detachedChildren.add(child.pid);
+  if (detached && pid != null) {
+    detachedChildren.add(pid);
   }
   return child;
 }

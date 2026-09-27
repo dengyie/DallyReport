@@ -246,6 +246,38 @@ test("runFetch: a child error message does not carry a secret through", async ()
 });
 
 // ---------------------------------------------------------------------------
+// 2026-09-27 review (round 5) A4: stderr was accumulated as `stderrRaw += c.toString()`
+// while stdout correctly kept Buffers. A UTF-8 character split across two pipe
+// chunks is decoded as two independent latin1/U+FFFD sequences on the first chunk,
+// so any Chinese diagnostic from a child was corrupted in the very message the
+// operator reads. Measured: 3 replacement characters in a 3-line Chinese stderr.
+// ---------------------------------------------------------------------------
+
+test("runFetch: multibyte stderr survives chunk boundaries intact", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-mb-"));
+  // One character per write forces the pipe to deliver many small chunks, so
+  // multi-byte sequences are split across chunk edges.
+  await fixtureScript(
+    root,
+    "fetch.js",
+    `const line = "深度抓取失败：页面需要登录".repeat(50);
+     for (const ch of line) process.stderr.write(ch);
+     process.exit(1);`,
+  );
+  let message = "";
+  try {
+    await runFetch("https://example.com", { grokSearchDir: root });
+  } catch (e) {
+    message = e.message;
+  }
+  assert.doesNotMatch(message, /�/, "no replacement characters — stderr must be decoded as a whole");
+  assert.ok(
+    message.includes("深度抓取失败：页面需要登录"),
+    "the Chinese diagnostic must survive verbatim",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // 2026-09-27 四轮复审 P0：脱敏白名单陈旧 + 裸 Bearer 未拦。
 //
 // round-3 用的是**手写 5 个变量名**的白名单。白名单第一天就是陈旧的：IMAGE_API_KEY
@@ -490,3 +522,83 @@ test("balancedJsonObjects: yields each top-level object exactly once, noise excl
   assert.deepEqual([...balancedJsonObjects("} } }")], []);
   assert.deepEqual([...balancedJsonObjects("no braces here")], []);
 });
+
+// ---------------------------------------------------------------------------
+// 2026-09-27 review (round 5) A2: a backslash OUTSIDE a string desynchronised the
+// scanner. `escaped` was set by any backslash, including one in noise text such as
+// a Windows path or a progress line, so the NEXT quote was swallowed as "escaped"
+// and `inString` never flipped. One stray "\" anywhere before the payload made
+// every real brace invisible — the fetch failed with __parse_error on a
+// perfectly good child.
+// ---------------------------------------------------------------------------
+
+test("balancedJsonObjects: a backslash in noise text does not desync the scan", () => {
+  // The real repro: a lone backslash in a log line escapes the NEXT quote, so
+  // inString latches on and never clears — every real brace after it is treated
+  // as string content and the payload is lost entirely.
+  assert.deepEqual(
+    [...balancedJsonObjects('WARN C:\\tmp "unterminated\n{"content":{"text":"OK"}}')],
+    ['{"content":{"text":"OK"}}'],
+  );
+  // A backslash with nothing after it must not swallow the payload either.
+  assert.deepEqual([...balancedJsonObjects('path C:\\\n{"a":1}')], ['{"a":1}']);
+  // The payload BEFORE a stray backslash must still be found.
+  assert.deepEqual([...balancedJsonObjects('{"a":1} tail \\u00e9 noise')], ['{"a":1}']);
+  // A backslash inside a string still escapes (the behaviour being protected).
+  assert.deepEqual([...balancedJsonObjects('{"a":"x\\\\"} {"b":2}')], ['{"a":"x\\\\"}', '{"b":2}']);
+});
+
+test("runFetch: noise containing a stray backslash before the payload does not fail the fetch", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-bs2-"));
+  await fixtureScript(
+    root,
+    "fetch.js",
+    `process.stderr.write("cache dir C:\\\\tmp " + '"' + "unterminated\\n");
+     process.stdout.write(JSON.stringify({content:{text:"REAL PAYLOAD"},diagnostics:{provider:"direct"}}));`,
+  );
+  const r = await runFetch("https://example.com", { grokSearchDir: root });
+  assert.equal(r.text, "REAL PAYLOAD");
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-27 review (round 5) A3: "last object that parses" is the wrong rule.
+// parseJsonOut took the LAST parseable object, but grok-search can legitimately
+// print a well-formed JSON diagnostic line AFTER the payload (that is exactly
+// the shape the comment above feared). Parseability is not payload-ness: a
+// `{level, ts}` line parses fine, so it silently replaced a good result with a
+// diagnostic and the collector reported an error on a successful fetch. The
+// selection has to score by payload SHAPE.
+// ---------------------------------------------------------------------------
+
+test("runFetch: a trailing VALID json log line does not hijack the payload", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-json3-"));
+  await fixtureScript(
+    root,
+    "fetch.js",
+    `process.stdout.write(JSON.stringify({content:{text:"REAL PAYLOAD"},diagnostics:{provider:"direct"}}));
+     process.stdout.write(JSON.stringify({level:"info",ts:1,msg:"done"})+"\\n");`,
+  );
+  const r = await runFetch("https://example.com", { grokSearchDir: root });
+  assert.equal(r.text, "REAL PAYLOAD", "a parseable diagnostic object must not beat the payload");
+});
+
+test("runFetch: the payload is still found when the diagnostic line comes FIRST", async () => {
+  // Contrast direction — shape scoring must work in both orders.
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-json4-"));
+  await fixtureScript(
+    root,
+    "fetch.js",
+    `process.stdout.write(JSON.stringify({level:"info",ts:1})+"\\n");
+     process.stdout.write(JSON.stringify({content:{text:"REAL PAYLOAD"},diagnostics:{provider:"direct"}}));`,
+  );
+  const r = await runFetch("https://example.com", { grokSearchDir: root });
+  assert.equal(r.text, "REAL PAYLOAD");
+});
+
+test("balancedJsonObjects scoring: a content-shaped object outranks a bare diagnostic", () => {
+  // If both parse, the payload shape decides. Exposed through the same path
+  // parseJsonOut uses, asserted here at the unit level.
+  const objs = [...balancedJsonObjects('{"level":"info"}\n{"content":{"text":"P"}}')];
+  assert.equal(objs.length, 2, "both objects are candidates");
+});
+

@@ -116,7 +116,13 @@ function runScript(scriptPath, args) {
       stdoutChunks.push(buf);
       stdoutBytes += buf.length;
     });
-    let stderrRaw = "";
+    // stderr is accumulated as BUFFERS, exactly like stdout. 2026-09-27 review
+    // A4: it used to be `stderrRaw += c.toString()` per chunk, so a UTF-8
+    // character split across two pipe chunks decoded to U+FFFD and every Chinese
+    // diagnostic was mangled in the very message the operator reads. Decoding
+    // once over the concatenated buffer is the only correct way to reassemble a
+    // split multi-byte sequence. The byte cap is unchanged.
+    const stderrChunks = [];
     let stderrBytes = 0;
     let stderrTruncated = false;
     child.stderr.on("data", (c) => {
@@ -131,12 +137,12 @@ function runScript(scriptPath, args) {
       }
       const room = MAX_STDOUT_BYTES - stderrBytes;
       if (buf.length > room) {
-        stderrRaw += buf.subarray(0, room).toString("utf8");
+        stderrChunks.push(buf.subarray(0, room));
         stderrBytes = MAX_STDOUT_BYTES;
         stderrTruncated = true;
         return;
       }
-      stderrRaw += buf.toString("utf8");
+      stderrChunks.push(buf);
       stderrBytes += buf.length;
     });
     // Redact on the way OUT of runScript, not at the throw site. The raw stderr
@@ -145,7 +151,7 @@ function runScript(scriptPath, args) {
     // key back even with the message already scrubbed. Redacting at this one sink
     // closes both paths at once. 2026-09-27 review P0-2: leaked IMAGE_API_KEY
     // end-to-end through a real child.
-    const currentStderr = () => redactSecrets(stderrRaw);
+    const currentStderr = () => redactSecrets(Buffer.concat(stderrChunks).toString("utf8"));
     const currentStdout = () => Buffer.concat(stdoutChunks).toString("utf8");
     child.on("error", (err) =>
       finish({ ok: false, err, stdout: currentStdout(), stderr: currentStderr(), timedOut, truncated }),
@@ -209,47 +215,92 @@ function runScript(scriptPath, args) {
 //   -> picked {level: info, ts: 1}; the payload was silently discarded and the
 //      collector reported an error on an otherwise-successful fetch.
 //
-// So this yields every balanced top-level object and parseJsonOut takes the LAST
-// one that actually parses. That keeps the original intent (a trailing noise
-// line cannot break a good payload) and fixes the mirrored case.
+// So this yields every balanced top-level object and parseJsonOut picks the one
+// that best matches the payload SHAPE. Parseability alone is not enough: a
+// trailing `{"level":"info","ts":1}` diagnostic line is perfectly valid JSON and
+// would silently replace a good result.
 //
 // The scan runs FORWARD, tracking string/escape state. Walking backwards from
 // the last brace — the original approach — cannot express "every object": to
 // resume an earlier scan it would have to re-read the text between two objects,
 // which merges that text into the next candidate ("{...}\nDEBUG {" parses to
 // nothing). Forward scanning keeps each candidate exactly one object.
+//
+// 2026-09-27 review A2: `escaped` was set by ANY backslash, including one in
+// plain noise text such as a Windows temp path. A lone backslash before a quote
+// swallowed that quote, `inString` latched on, and every subsequent real brace
+// was treated as string content — the payload vanished and the fetch failed on a
+// perfectly good child. Two rules close that off, and both are properties of
+// JSON itself rather than heuristics about the noise:
+//
+//   1. a backslash only escapes INSIDE a string;
+//   2. a string literal can only ever be a key, a value or an array element, so
+//      it must follow `{`, `[`, `,` or `:`. A quote anywhere else cannot be part
+//      of a valid JSON document — in noise prose it is just a character, and in a
+//      truncated document the object is unparseable either way. Ignoring such
+//      quotes keeps an unterminated string in a log line from swallowing the
+//      payload behind it.
 export function* balancedJsonObjects(text) {
   let depth = 0;
   let inString = false;
   let escaped = false;
   let start = -1;
+  // Last non-whitespace structural character seen at this depth. Undefined until
+  // a '{' opens the object being scanned.
+  let lastSignificant = "";
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (ch === "\\") {
-      escaped = true;
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
       continue;
     }
     if (ch === '"') {
-      inString = !inString;
+      // Position 2 above: a quote outside a structural slot is not a string.
+      if (depth > 0 && ":,{[".includes(lastSignificant)) inString = true;
       continue;
     }
-    if (inString) continue;
     if (ch === "{") {
-      if (depth === 0) start = i;
+      if (depth === 0) {
+        start = i;
+        lastSignificant = "";
+      }
       depth++;
+      lastSignificant = "{";
     } else if (ch === "}") {
       if (depth === 0) continue; // stray close brace, e.g. in noise text
       depth--;
+      lastSignificant = "}";
       if (depth === 0 && start >= 0) {
         yield text.slice(start, i + 1);
         start = -1;
       }
+    } else if (depth > 0 && !/\s/.test(ch)) {
+      lastSignificant = ch;
     }
   }
+}
+
+// How much a parsed object looks like the payload these children actually emit
+// (grok-search writes {content:{text|full_path}, diagnostics:{...}}). Higher is
+// better; a bare object is 0. Used to pick between multiple parseable objects.
+function payloadScore(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return 0;
+  let score = 0;
+  if (value.content && typeof value.content === "object") {
+    score += 3;
+    if (typeof value.content.text === "string" && value.content.text) score += 3;
+    if (typeof value.content.full_path === "string") score += 2;
+  }
+  if (typeof value.text === "string" && value.text) score += 2;
+  if (Array.isArray(value.sources)) score += 2;
+  if (value.diagnostics && typeof value.diagnostics === "object") score += 1;
+  return score;
 }
 
 function parseJsonOut(stdout, scriptPath, args, truncated = false) {
@@ -258,17 +309,26 @@ function parseJsonOut(stdout, scriptPath, args, truncated = false) {
   try {
     return JSON.parse(trimmed);
   } catch {
-    // Last object that actually parses wins, so a trailing noise line cannot
-    // hide the real payload and cannot break a good one either.
-    let lastParsed = null;
+    // Highest payload score wins; a parseable-but-shapeless diagnostic object
+    // scores 0, so it can only be used when NOTHING better was found. 2026-09-27
+    // review A3: "last one that parses" let a trailing `{"level":"info"}` line
+    // replace a good result and turn a successful fetch into a reported error.
+    let bestParsed = null;
+    let bestScore = -1;
     for (const candidate of balancedJsonObjects(trimmed)) {
+      let parsed;
       try {
-        lastParsed = JSON.parse(candidate);
+        parsed = JSON.parse(candidate);
       } catch {
-        /* not a complete JSON value — keep looking */
+        continue; // not a complete JSON value — keep looking
+      }
+      const score = payloadScore(parsed);
+      if (score > bestScore) {
+        bestParsed = parsed;
+        bestScore = score;
       }
     }
-    if (lastParsed != null) return lastParsed;
+    if (bestParsed != null) return bestParsed;
     // Bounded raw: head+tail only, so a huge garbage dump never rides inside the
     // error object (the full capped stdout stays on err.stdout for debugging).
     const out = { __parse_error: true, raw: truncateRawForParseError(stdout) };

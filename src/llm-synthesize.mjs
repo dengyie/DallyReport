@@ -14,6 +14,10 @@
 // because loadConfig deliberately does not export credentials.
 
 import { sanitizeSnippet, clarifySnippet } from "./snippet-hygiene.mjs";
+// No cycle: grok-cli imports child-tracker only, and this module is imported by
+// config/ai-news. redactSecrets is reused rather than reimplemented so the log
+// line and the thrown message can never drift apart in what they scrub.
+import { redactSecrets } from "./grok-cli.mjs";
 
 const DEFAULT_MODEL = "grok-4.5";
 const DEFAULT_MAX_TOKENS = 4000;
@@ -521,7 +525,17 @@ export async function synthesizeWithWebSearch({
             // no trace anywhere. It is logged for real now. The logged message is
             // already secret-redacted at the grok-cli boundary, so writing it to
             // the local launchd log does not reintroduce the leak.
-            console.error(`[synth] 检索失败 q=${JSON.stringify(q)}:`, e);
+            //
+            // 2026-09-27 review A1: passing the Error OBJECT was the leak.
+            // console.error formats an Error with util.format, which walks its
+            // OWN enumerable properties — so grok-cli's `err.stdout` and
+            // `err.stderr` (raw child output; only the *message* was redacted)
+            // landed verbatim in logs/launchd.err.log. The whole point of the
+            // loop above is that raw child output must not escape. Log the
+            // redacted message plus an explicit allow-list of scalar tags.
+            console.error(
+              `[synth] 检索失败 q=${JSON.stringify(q)}: ${redactSecrets(e?.message || String(e))}`,
+            );
             const tag = e?.code || (e?.name && e.name !== "Error" ? e.name : null) || "unknown";
             content = `检索（${q}）失败：${tag}（详见本机日志 logs/launchd.err.log）`;
           }

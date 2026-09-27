@@ -50,3 +50,88 @@ test("trackChild: ignores objects without kill/once (defensive)", () => {
   // Nothing tracked -> killAllChildren is a no-op.
   assert.doesNotThrow(() => killAllChildren());
 });
+
+// ---------------------------------------------------------------------------
+// 2026-09-27 review (round 5) A5: `detachedChildren` was never pruned.
+//
+// The drop handler removed the child object from `children` but left its pid in
+// `detachedChildren` forever. Two consequences:
+//   1. the set grew once per search for the whole run — an unbounded leak on a
+//      day with many searches;
+//   2. more seriously, a later unrelated child that the OS happened to assign
+//      the SAME recycled pid was then treated as detached and signalled with
+//      `process.kill(-pid)`. On a 09:00 launchd run the report itself is the most
+//      likely victim of a group kill aimed at a recycled pid.
+// ---------------------------------------------------------------------------
+
+test("trackChild: a detached child's pid is pruned when it exits, never reused as a group target", () => {
+  const original = process.kill;
+  const groupSignals = [];
+  process.kill = (pid, sig) => {
+    groupSignals.push({ pid, sig });
+  };
+  try {
+    const first = fakeChild();
+    first.pid = 424242;
+    trackChild(first, { detached: true });
+    first.emit("exit", 0);
+
+    // The OS now hands the same pid to a NEW, non-detached child.
+    const second = fakeChild();
+    second.pid = 424242;
+    trackChild(second);
+
+    killAllChildren();
+
+    assert.deepEqual(
+      groupSignals,
+      [],
+      "a recycled pid must never receive a group kill — it could hit the report itself",
+    );
+    assert.deepEqual(second.signals, ["SIGKILL"], "the new child is still reaped by its single pid");
+  } finally {
+    process.kill = original;
+  }
+});
+
+test("trackChild: a detached child's pid is pruned on 'error' as well", () => {
+  const original = process.kill;
+  const groupSignals = [];
+  process.kill = (pid, sig) => {
+    groupSignals.push({ pid, sig });
+  };
+  try {
+    const first = fakeChild();
+    first.pid = 515151;
+    trackChild(first, { detached: true });
+    first.emit("error", new Error("spawn failed"));
+
+    const second = fakeChild();
+    second.pid = 515151;
+    trackChild(second);
+    killAllChildren();
+
+    assert.deepEqual(groupSignals, [], "error path must prune the detached pid too");
+    assert.deepEqual(second.signals, ["SIGKILL"]);
+  } finally {
+    process.kill = original;
+  }
+});
+
+test("trackChild: a still-live detached child IS group-killed (the original behaviour)", () => {
+  const original = process.kill;
+  const groupSignals = [];
+  process.kill = (pid, sig) => {
+    groupSignals.push({ pid, sig });
+  };
+  try {
+    const c = fakeChild();
+    c.pid = 313131;
+    trackChild(c, { detached: true });
+    killAllChildren();
+    assert.deepEqual(groupSignals, [{ pid: -313131, sig: "SIGKILL" }], "grandchildren are reaped");
+    assert.deepEqual(c.signals, [], "no redundant single-pid kill when the group kill worked");
+  } finally {
+    process.kill = original;
+  }
+});

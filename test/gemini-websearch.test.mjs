@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import util from "node:util";
 import { synthesizeWithWebSearch } from "../src/llm-synthesize.mjs";
 
 // 行为测试全部注入 stub、从不碰网；凭证门只查环境变量存在性。给无 .env 的机器也
@@ -168,8 +169,56 @@ test("synthesizeWithWebSearch: a failing searchImpl renders 检索失败, still 
   assert.equal(fetchStub.calls.length, 2);
 });
 
-test("synthesizeWithWebSearch: missing searchImpl -> SYNTH_NO_SEARCH_IMPL", async () => {
-  await assert.rejects(
+// 2026-09-27 review (round 5) A1: the search-failure log was itself the leak.
+// The tool message correctly withheld the error text, but the line added last
+// round to make "详见本机日志" true was `console.error(msg, e)` — and Node
+// formats an Error by walking its OWN enumerable properties, so grok-cli's
+// `err.stdout` / `err.stderr` (raw child output, only the *message* is
+// redacted) were dumped verbatim into logs/launchd.err.log. Measured: a secret
+// in err.stdout reached the log in full.
+test("synthesizeWithWebSearch: a secret on the thrown error never reaches the log", async () => {
+  const fetchStub = seqStubFetch([
+    toolCallResponse("call_1", "查询"),
+    textResponse("正文"),
+  ]);
+  const lines = [];
+  const realError = console.error;
+  // Capture exactly what console.error formats — util.format, NOT String(): only
+  // util.format walks an Error's own enumerable properties, which is the whole
+  // point of this test. Using String(e) here would make it pass vacuously.
+  console.error = (...a) => lines.push(util.format(...a));
+  let out;
+  try {
+    out = await synthesizeWithWebSearch({
+      query: "q",
+      date: "2026-08-07",
+      sources: [{ url: "u", title: "t", snippet: "s" }],
+      maxSearchRounds: 2,
+      fetch: fetchStub,
+      searchImpl: async () => {
+        // Shaped exactly like grok-cli's error: redacted message, RAW stdout.
+        const e = new Error("grok-search search.js 退出码 1：auth failed api_key [已脱敏]");
+        e.script = "search.js";
+        e.stdout = '{"raw":"api_key=sk-live-LOGLEAK-12345678"}';
+        e.stderr = "session cookie: linuxdo_session=LINUXDO-COOKIE-LEAK-9999";
+        e.code = "GROK_EXIT";
+        throw e;
+      },
+    });
+  } finally {
+    console.error = realError;
+  }
+  assert.equal(out, "正文");
+  const logged = lines.join("\n");
+  assert.match(logged, /\[synth\] 检索失败/, "the failure is still logged — the log must stay useful");
+  assert.match(logged, /退出码 1/, "the redacted message is still logged, so the log is diagnosable");
+  assert.doesNotMatch(logged, /sk-live-LOGLEAK/, "err.stdout must not be dumped to the log");
+  assert.doesNotMatch(logged, /LINUXDO-COOKIE-LEAK/, "err.stderr must not be dumped to the log");
+  // The log must not carry the whole raw stream either, just the redacted message.
+  assert.ok(logged.length < 600, `log line must stay bounded, got ${logged.length} chars`);
+});
+
+test("synthesizeWithWebSearch: missing searchImpl -> SYNTH_NO_SEARCH_IMPL", async () => {  await assert.rejects(
     () =>
       synthesizeWithWebSearch({
         query: "q",
