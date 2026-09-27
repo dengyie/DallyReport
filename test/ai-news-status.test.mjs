@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeAiNewsStatus, shouldSynthesize } from "../src/sections/ai-news.mjs";
+import {
+  computeAiNewsStatus,
+  shouldSynthesize,
+  formatDailySourceDiagnostics,
+} from "../src/sections/ai-news.mjs";
 
 test("computeAiNewsStatus: zero-citation output with sources remains usable", () => {
   const status = computeAiNewsStatus({
@@ -230,4 +234,50 @@ test("sanitizeUrl: whitespace/control-character smuggling is rejected", async ()
   assert.equal(sanitizeUrl("java\nscript:alert(1)"), "");
   assert.equal(sanitizeUrl(" javascript:alert(1)"), "");
   assert.equal(sanitizeUrl("https://exa mple.com"), "");
+});
+
+
+// ---------------------------------------------------------------------------
+// 2026-09-28 H1: a starved hard source must not be reported as a collection
+// failure. It fetched fine; the recency window emptied it. "采集失败" points the
+// reader at the network when the publishing calendar is the real cause — and on
+// 2026-09-28 all five vendor blogs were starved, so the summary would have
+// blamed five healthy feeds for a quiet week.
+// ---------------------------------------------------------------------------
+
+test("H1: a source starved by the recency window is named 当日无新内容", () => {
+  const labels = formatDailySourceDiagnostics(
+    { openai: { count: 1, sample: [{ reason: "no-fresh-items-in-window", parsed: 1230 }] } },
+    "当日硬源",
+  );
+  assert.deepEqual(labels, ["当日硬源/openai（当日无新内容）"]);
+  assert.doesNotMatch(labels.join(), /采集失败/, "starvation is not a collection failure");
+});
+
+test("H1: a source that actually failed still says 采集失败", () => {
+  const labels = formatDailySourceDiagnostics(
+    { arxiv: { count: 2, sample: [{ reason: "ECONNRESET" }] } },
+    "当日硬源",
+  );
+  assert.deepEqual(labels, ["当日硬源/arxiv（2 项采集失败）"]);
+});
+
+test("H1: both kinds coexist and neither is mislabelled", () => {
+  const labels = formatDailySourceDiagnostics(
+    {
+      openai: { count: 1, sample: [{ reason: "no-fresh-items-in-window" }] },
+      hf: { count: 3, sample: [{ reason: "ECONNRESET" }] },
+    },
+    "当日硬源",
+  );
+  assert.equal(labels.length, 2);
+  assert.match(labels[0], /openai（当日无新内容）/);
+  assert.match(labels[1], /hf（3 项采集失败）/);
+});
+
+test("H1: a healthy run produces no labels at all", () => {
+  assert.deepEqual(formatDailySourceDiagnostics(undefined), []);
+  assert.deepEqual(formatDailySourceDiagnostics(null), []);
+  assert.deepEqual(formatDailySourceDiagnostics({}), []);
+  assert.deepEqual(formatDailySourceDiagnostics({ openai: { count: 0 } }), []);
 });

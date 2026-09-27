@@ -113,6 +113,30 @@ export function selectCitedSources(sources, bodyText) {
     .map((i) => ({ n: i + 1, source: list[i] }));
 }
 
+// Turn the per-provider hard-source diagnostics into reader-facing labels.
+//
+// 2026-09-28 H1: a STARVED source is not a collection failure. It fetched fine
+// and the recency window emptied it, so labelling that "N 项采集失败" sends the
+// reader to check the network when the calendar is the actual cause. On
+// 2026-09-28 all five vendor blogs were starved, so the summary would have
+// blamed five healthy feeds for a quiet publishing week — and the report still
+// printed a green success line over forum chatter. Pure + exported so both
+// directions are unit-testable without touching the network.
+export function formatDailySourceDiagnostics(dailyDiag, label = "当日硬源") {
+  if (!dailyDiag || typeof dailyDiag !== "object") return [];
+  const out = [];
+  for (const [provider, info] of Object.entries(dailyDiag)) {
+    if (!(info?.count > 0)) continue;
+    const starved = info.sample?.some((f) => f?.reason === "no-fresh-items-in-window");
+    out.push(
+      starved
+        ? `${label}/${provider}（当日无新内容）`
+        : `${label}/${provider}（${info.count} 项采集失败）`,
+    );
+  }
+  return out;
+}
+
 // Count same-day material. See isSameDaySource for why recency, not the
 // fromDaily stamp, decides this. Exported for unit tests.
 export function countDailySources(sources, dateStr) {
@@ -262,14 +286,12 @@ export async function aiNewsSection(
     // transport errors and return [], which is exactly why this shape exists —
     // without it a full outage of the daily hard sources printed a clean ✅
     // while the report quietly rested on forum posts alone.
-    const dailyDiag = arr?.dailyDiagnostics;
-    if (dailyDiag && typeof dailyDiag === "object") {
-      for (const [provider, info] of Object.entries(dailyDiag)) {
-        if (info?.count > 0) {
-          degradedSources.push(`${label}/${provider}（${info.count} 项采集失败）`);
-        }
-      }
-    }
+    //
+    // 2026-09-28 H1: a starved source is NOT a collection failure. It fetched
+    // fine and the recency window emptied it, so labelling that "N 项采集失败"
+    // sends the reader looking at the network instead of at the calendar. The
+    // reason is carried through and named.
+    degradedSources.push(...formatDailySourceDiagnostics(arr?.dailyDiagnostics, label));
   }
 
   const grokCitations =
