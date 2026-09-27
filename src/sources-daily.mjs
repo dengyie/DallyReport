@@ -463,6 +463,29 @@ export async function fetchArxivDaily(config, { limit = 5, runFetch: doFetch } =
 }
 
 /**
+ * Take at most `cap` items across the per-source parts, round-robin, so no whole
+ * source is starved by an earlier one exhausting the budget.
+ *
+ * Round-robin rather than even-share: even-share would need a policy for the
+ * remainder and would flatten an operator's deliberate per-source *_DAILY_LIMIT
+ * (they asked for 5 HN, 4 OpenAI). Round-robin takes one item from each source
+ * in turn, which honours those limits as an upper bound per source and spends
+ * the remaining budget in the same order the sources are already declared.
+ * Sources with nothing to contribute are skipped without consuming a turn.
+ */
+export function interleaveAndCap(parts, cap) {
+  const out = [];
+  const longest = parts.reduce((n, p) => Math.max(n, p.length), 0);
+  for (let i = 0; i < longest && out.length < cap; i++) {
+    for (const part of parts) {
+      if (out.length >= cap) break;
+      if (i < part.length) out.push(part[i]);
+    }
+  }
+  return out;
+}
+
+/**
  * Compute the epoch ms of midnight (Beijing time) for a given date string.
  * Used to filter sources by "today's content".
  */
@@ -517,7 +540,14 @@ export async function fetchAllDailySources(config) {
   // is actually returned — a caller spreading the result would otherwise drop a
   // property that was never enumerable in the first place.
   const diagnostics = collectDailyDiagnostics(parts);
-  const capped = cap != null && cap > 0 ? merged.slice(0, cap) : merged;
+  // 2026-09-27 review (round 4) P2-2. This used to be `merged.slice(0, cap)`,
+  // which takes the first N in ARRAY order. With the shipped per-source defaults
+  // (5+5+5+4+4+4+4 = 31) against the default cap of 15, the first three sources
+  // consumed the entire budget and openai / huggingface / blog.google /
+  // research.google contributed NOTHING — on every run, silently. Each of those
+  // has its own enable switch and its own *_DAILY_LIMIT that an operator can
+  // tune, and an operator watching one of those feeds fail would see no error.
+  const capped = cap != null && cap > 0 ? interleaveAndCap(parts, cap) : merged;
   if (Object.keys(diagnostics).length > 0) {
     Object.defineProperty(capped, "dailyDiagnostics", {
       value: diagnostics,

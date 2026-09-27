@@ -12,6 +12,7 @@ import {
   fetchHfDaily,
   fetchGoogleAiDaily,
   fetchGoogleResearchDaily,
+  interleaveAndCap,
 } from "../src/sources-daily.mjs";
 
 const TODAY = "2026-08-10";
@@ -445,4 +446,65 @@ test("fetchAllDailySources: a healthy run carries no diagnostics", async () => {
     googleResearchDailyEnabled: false,
   });
   assert.equal(out.dailyDiagnostics, undefined, "a clean run reports nothing");
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-27 review (round 4) P2-2: the aggregate cap was a FLAT slice, so
+// whole sources vanished.
+//
+// `parts.flat().slice(0, cap)` takes the first N in array order. With the
+// shipped defaults (hn 5 + kr36 5 + arxiv 5 + openai 4 + hf 4 + googleAi 4 +
+// googleResearch 4 = 31) against AGGREGATE_DAILY_SOURCE_LIMIT=15, the first
+// three sources consume the entire budget and openai, huggingface and both
+// Google feeds contribute NOTHING — on every run, silently. Each has its own
+// enable switch and its own *_DAILY_LIMIT in .env, and an operator watching
+// those feeds fail would see no error at all.
+//
+// The test above asserts only `out.length >= 1`, i.e. shape, not effect — the
+// same class of assertion that let this ship.
+// ---------------------------------------------------------------------------
+
+// Unit for the interleave itself: the effect under test is the SHAPE of the
+// capped pool, not each collector's HTTP behaviour (which these tests do not
+// mock faithfully — an all-seven mock is a second, unrelated test suite).
+function part(provider, n) {
+  return Array.from({ length: n }, (_, i) => ({ provider, title: `${provider}-${i}`, url: `https://x/${provider}/${i}` }));
+}
+
+test("interleaveAndCap: a source never starves because an earlier one filled the budget", () => {
+  // The shipped shape: 5+5+5+4+4+4+4 = 31 against the default cap of 15.
+  const parts = [
+    part("hn", 5), part("kr36", 5), part("arxiv", 5), part("openai", 4),
+    part("hf", 4), part("googleAi", 4), part("googleResearch", 4),
+  ];
+  const out = interleaveAndCap(parts, 15);
+  assert.equal(out.length, 15, "the cap itself must still hold");
+  const byProvider = {};
+  for (const s of out) byProvider[s.provider] = (byProvider[s.provider] || 0) + 1;
+  assert.deepEqual(
+    Object.keys(byProvider).sort(),
+    ["arxiv", "googleAi", "googleResearch", "hf", "hn", "kr36", "openai"],
+    `a whole source was starved by the flat slice: ${JSON.stringify(byProvider)}`,
+  );
+});
+
+test("interleaveAndNormalisation: a short part does not waste a turn", () => {
+  // A source that produced nothing must be skipped, not consume a slot — that is
+  // the whole point of interleaving over even-share.
+  const parts = [part("hn", 2), [], part("openai", 2), [], part("hf", 2)];
+  const out = interleaveAndCap(parts, 10);
+  assert.equal(out.length, 6, "everything from every non-empty part must survive");
+  assert.deepEqual([...new Set(out.map((s) => s.provider))].sort(), ["hf", "hn", "openai"]);
+});
+
+test("interleaveAndCap: a single source larger than the cap still fills it", () => {
+  const out = interleaveAndCap([part("hn", 30), part("openai", 2)], 15);
+  assert.equal(out.length, 15);
+  assert.equal(out[0].provider, "hn", "order within a source is preserved");
+});
+
+test("interleaveAndCap: a cap at or above the pool returns everything", () => {
+  const parts = [part("hn", 2), part("openai", 2)];
+  assert.equal(interleaveAndCap(parts, 4).length, 4);
+  assert.equal(interleaveAndCap(parts, 99).length, 4);
 });
