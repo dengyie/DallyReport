@@ -262,6 +262,36 @@ export function loadConfig({ date = null } = {}) {
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
     googleResearchDailyLimit: int("GOOGLE_RESEARCH_DAILY_LIMIT", 4),
+    // 2026-09-28 review H2: the daily-publishing half of the hard-source
+    // baseline. The five vendor blogs above are high-signal but publish
+    // weekly-ish; measured 2026-09-28 all five returned 0 items inside the
+    // recency window and the report degraded to forum chatter. These four
+    // publish every day, which is what a DAILY actually requires. Two are
+    // Chinese-language, which matters for a Chinese report.
+    techcrunchAiEnabled: (() => {
+      const raw = val("TECHCRUNCH_AI_DAILY_ENABLED");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    techcrunchAiLimit: int("TECHCRUNCH_AI_DAILY_LIMIT", 5),
+    vergeAiEnabled: (() => {
+      const raw = val("VERGE_AI_DAILY_ENABLED");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    vergeAiLimit: int("VERGE_AI_DAILY_LIMIT", 5),
+    qbitaiEnabled: (() => {
+      const raw = val("QBITAI_DAILY_ENABLED");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    qbitaiLimit: int("QBITAI_DAILY_LIMIT", 5),
+    infoqCnEnabled: (() => {
+      const raw = val("INFOQ_CN_DAILY_ENABLED");
+      if (raw == null) return true;
+      return raw === "1" || raw.toLowerCase() === "true";
+    })(),
+    infoqCnLimit: int("INFOQ_CN_DAILY_LIMIT", 5),
     // -- search model override (default: use GROK_MODEL = synthModel) ---
     // When set, grok-cli.mjs passes this model to grok-search search.js instead
     // of GROK_MODEL, allowing the search step to use a cheaper/faster model while

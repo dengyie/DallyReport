@@ -8,6 +8,7 @@
 // publishedAt is a Unix epoch MS for filterByRecency.
 
 import { runFetch } from "./grok-cli.mjs";
+import { AI_TITLE_RE } from "./community.mjs";
 
 // Attach per-source failure diagnostics to a source array WITHOUT making them
 // enumerable, so the array still behaves like a plain list everywhere it is
@@ -152,6 +153,34 @@ export async function fetchHackerNewsDaily(config, { limit = 5, fetchImpl = fetc
   }
 }
 
+// 2026-09-28 review H3: this was a SECOND, hand-maintained copy of the AI
+// relevance gate, and the two had drifted in opposite directions.
+//
+//   sources-daily's copy: `大模型` was its ONLY CJK branch. It rejected
+//     `又快又能打！匿名模型玉兔模型杀上双榜第一，Coding实测全记录` — a real
+//     model-launch headline, and exactly what a Chinese daily exists to carry.
+//   community's copy (AI_TITLE_RE): rich CJK (人工智能/模型/推理/蒸馏/榜单),
+//     corpus-tested against real forum titles, but it has NO bare `models?`
+//     and no `machine learning`/`neural`/`inference`/`mcp`, because a
+//     linux.do title never says "Introducing a new model" without a vendor.
+//
+// Neither is a superset of the other, so replacing one with the other would
+// break the other corpus. This is a UNION: the module gates a MIXED corpus
+// (official blogs + aggregators + HN) and each gate is right for its own half.
+// The union admits everything either gate admitted before, so no story that
+// used to pass can start failing, and the CJK coverage the new Chinese feeds
+// need is added.
+const DAILY_AI_RELEVANT_SRC = [
+  String.raw`\bai\b`,
+  String.raw`artificial intelligence|\bllms?\b|\bgpt\b|chatgpt|claude|anthropic|openai`,
+  String.raw`deepseek|gemini|mistral|llama|cohere|perplexity|hugging ?face|langchain`,
+  String.raw`\brag\b|\bagents?\b|codex|cursor|copilot|\bmodels?\b|machine learning`,
+  String.raw`\bml\b|neural|transformer|diffusion|\btokens?\b|reasoning|fine.?tun`,
+  String.raw`rlhf|dpo|grpo|\blora\b|quantization|inference|vllm|ollama|opencode`,
+  String.raw`ai.*coding|agent.*harness|tool.*use|\bmcp\b|function.*call`,
+].join("|");
+const AI_RELEVANT_RE = new RegExp(`${AI_TITLE_RE.source}|${DAILY_AI_RELEVANT_SRC}`, "i");
+
 function isAiRelevant(title, url) {
   const text = `${title} ${url || ""}`.toLowerCase();
   // 2026-09-26 review P1: the alternation's first branch used to be a bare,
@@ -159,10 +188,9 @@ function isAiRelevant(title, url) {
   // "maintain", "available", "domain", "chain", "detail", "Rainbow" — so the
   // filter was effectively always true and HN contributed its first N stories
   // regardless of topic. Latin branches are now word-anchored; CJK branches have
-  // no word boundaries to anchor to and stay unanchored.
-  return /\bai\b|artificial intelligence|\bllms?\b|\bgpt\b|chatgpt|claude|anthropic|openai|deepseek|gemini|mistral|llama|cohere|perplexity|hugging ?face|langchain|\brag\b|\bagents?\b|codex|cursor|copilot|\bmodels?\b|大模型|machine learning|\bml\b|neural|transformer|diffusion|\btokens?\b|reasoning|fine.?tun|rlhf|dpo|grpo|\blora\b|quantization|inference|vllm|ollama|opencode|ai.*coding|agent.*harness|tool.*use|\bmcp\b|function.*call/i.test(
-    text,
-  );
+  // no word boundaries to anchor to and stay unanchored. That anchoring now
+  // lives in community.mjs's AI_TITLE_RE, which this module reuses.
+  return AI_RELEVANT_RE.test(text);
 }
 
 // --- 36kr RSS (zero-config, Chinese tech news) ---
@@ -286,18 +314,73 @@ export function parseRssItems(xml, { maxChars = 20000 } = {}) {
       pubDateMs: Number.isFinite(pubDateMs) ? pubDateMs : null,
     });
   }
+  // 2026-09-28 review H2: Atom. The Verge's AI feed is Atom, and this parser
+  // matched only <item>, so that feed parsed to ZERO items and looked exactly
+  // like an empty channel. <entry> differs in three ways that matter: the link
+  // is an href ATTRIBUTE rather than element text, the date is <published>/
+  // <updated> in ISO-8601 rather than RFC-822 <pubDate>, and the id is often
+  // the canonical URL. Dropping <entry> support is how a live daily feed reads
+  // as a dead one.
+  const entryRe = /<entry(?:\s[^>]*)?>([\s\S]*?)<\/entry>/gi;
+  while ((m = entryRe.exec(cap)) !== null) {
+    const block = m[1];
+    const title = decodeEntities(stripCdata(extractTag(block, "title")));
+    // rel="alternate" is the canonical entry link; fall back to the first href,
+    // then to <id>, which Atom requires and which is usually the permalink.
+    const links = [...block.matchAll(/<link\b([^>]*)>/gi)].map((x) => x[1]);
+    const attrsOf = (a) => ({
+      href: (a.match(/href="([^"]+)"/i) || [])[1] || "",
+      rel: (a.match(/rel="([^"]+)"/i) || [])[1] || "",
+    });
+    const parsedLinks = links.map(attrsOf).filter((l) => l.href);
+    const link =
+      decodeEntities(
+        (parsedLinks.find((l) => /alternate/i.test(l.rel))?.href || parsedLinks[0]?.href || "").trim(),
+      ) || decodeEntities(extractTag(block, "id")).trim();
+    const pubRaw =
+      extractTag(block, "published") || extractTag(block, "updated") || extractTag(block, "date");
+    if (!title || !link) continue;
+    const pubDateMs = pubRaw ? Date.parse(pubRaw) : NaN;
+    out.push({
+      title: title.slice(0, 300),
+      url: link,
+      pubDateMs: Number.isFinite(pubDateMs) ? pubDateMs : null,
+    });
+  }
   return out;
+}
+
+// Atom <link> selection lives inline above; this stub is gone.
+function stripCdata(s) {
+  return String(s || "").replace(/^\s*<!\[CDATA\[/, "").replace(/\]\]>\s*$/, "");
 }
 
 /** Decode the common HTML entities found in RSS titles/links. */
 function decodeEntities(s) {
   return String(s || "")
+    .replace(/&#(\d+);/g, (_, d) => safeFromCodePoint(Number(d)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => safeFromCodePoint(Number.parseInt(h, 16)))
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, " ")
     .replace(/&#39;/g, "'")
     .replace(/&#x27;/g, "'");
+}
+
+// 2026-09-28 H4: TechCrunch ships `Anthropic&#8217;s` inside <title> and the
+// entity reached the note verbatim. fromCodePoint THROWS on an out-of-range
+// value, so decoding numerically has to be defensive — a malformed entity from
+// any feed would otherwise take down every title in the report, which is the
+// opposite of a graceful degrade.
+function safeFromCodePoint(code) {
+  try {
+    return Number.isFinite(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : "";
+  } catch {
+    return "";
+  }
 }
 
 /**
@@ -359,8 +442,19 @@ export async function fetchOfficialBlogRss(
       });
       if (sources.length >= limit) break;
     }
-    // A feed that parsed fine but yielded nothing for today is a normal quiet day
-    // on these blogs — not a failure. Only transport/parse problems are reported.
+    // 2026-09-28 review H1: this used to return a bare `sources` with no
+    // diagnostic, on the grounds that "a feed that parsed fine but yielded
+    // nothing for today is a normal quiet day". That is true of ONE blog and
+    // false in aggregate: measured 2026-09-28, all five configured hard sources
+    // returned 0, `dailyDiagnostics` came back null, and the report still
+    // printed a clean success over forum chatter. P2 caught transport failure;
+    // a feed that fetches fine and is then emptied by the window is the far
+    // more common case and was completely silent. Name it.
+    if (sources.length === 0) {
+      return attachDailyDiagnostics([], site, [
+        { reason: "no-fresh-items-in-window", parsed: items.length },
+      ]);
+    }
     return sources;
   } catch (err) {
     return attachDailyDiagnostics([], site, [{ reason: err?.code || err?.name || "error" }]);
@@ -400,6 +494,65 @@ export async function fetchGoogleResearchDaily(config, opts = {}) {
     runFetch: opts.runFetch,
     site: "google-research",
     provider: "google-research-blog",
+  });
+}
+
+// --- Daily-publishing news aggregators (2026-09-28 review H2) ---
+//
+// The five vendor blogs above are high-signal but publish weekly-ish, so they
+// cannot carry a DAILY. Measured 2026-09-28 against the live feeds, every one
+// of them returned 0 items inside the recency window (newest OpenAI post 45h
+// old, newest arXiv paper 4 days old) and the report fell back to forum
+// chatter — 6 of 9 sources, and on 09-27 fully 100%.
+//
+// These four publish every day, which is what the "same-day hard source" role
+// actually requires. Two are Chinese-language, which matters for a Chinese
+// daily. Fresh-item counts measured on 2026-09-28 (1-day window, after the
+// existing AI-relevance gate): techcrunch-ai 4, qbitai 3, infoq-cn 3,
+// verge-ai 3.
+//
+// They reuse fetchOfficialBlogRss rather than getting bespoke parsers, so the
+// same window, the same relevance gate and the same H1 starved-source
+// diagnostic apply to them. Verge is Atom, which is why parseRssItems grew
+// <entry> support above.
+const TECHCRUNCH_AI_FEED = "https://techcrunch.com/category/artificial-intelligence/feed/";
+const VERGE_AI_FEED = "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml";
+const QBITAI_FEED = "https://www.qbitai.com/feed";
+const INFOQ_CN_FEED = "https://www.infoq.cn/feed";
+
+export async function fetchTechcrunchAiDaily(config, opts = {}) {
+  return fetchOfficialBlogRss(TECHCRUNCH_AI_FEED, config, {
+    limit: opts.limit ?? 5,
+    runFetch: opts.runFetch,
+    site: "techcrunch-ai",
+    provider: "techcrunch-ai",
+  });
+}
+
+export async function fetchVergeAiDaily(config, opts = {}) {
+  return fetchOfficialBlogRss(VERGE_AI_FEED, config, {
+    limit: opts.limit ?? 5,
+    runFetch: opts.runFetch,
+    site: "verge-ai",
+    provider: "verge-ai",
+  });
+}
+
+export async function fetchQbitaiDaily(config, opts = {}) {
+  return fetchOfficialBlogRss(QBITAI_FEED, config, {
+    limit: opts.limit ?? 5,
+    runFetch: opts.runFetch,
+    site: "qbitai",
+    provider: "qbitai",
+  });
+}
+
+export async function fetchInfoqCnDaily(config, opts = {}) {
+  return fetchOfficialBlogRss(INFOQ_CN_FEED, config, {
+    limit: opts.limit ?? 5,
+    runFetch: opts.runFetch,
+    site: "infoq-cn",
+    provider: "infoq-cn",
   });
 }
 
@@ -521,7 +674,10 @@ export async function fetchAllDailySources(config) {
   // back to its own hardcoded default and an operator tuning HN_DAILY_LIMIT in
   // .env saw no effect and no warning. `aggregateDailySourceLimit` had no
   // consumer at all, leaving the merged pool unbounded.
-  const [hn, kr36, arxiv, openai, hf, googleAi, googleResearch] = await Promise.all([
+  const [
+    hn, kr36, arxiv, openai, hf, googleAi, googleResearch,
+    techcrunch, verge, qbitai, infoqCn,
+  ] = await Promise.all([
     config.hnDailyEnabled !== false
       ? fetchHackerNewsDaily(config, { limit: config.hnDailyLimit }).catch(() => [])
       : Promise.resolve([]),
@@ -545,8 +701,27 @@ export async function fetchAllDailySources(config) {
           () => [],
         )
       : Promise.resolve([]),
+    // 2026-09-28 review H2: the daily-publishing half of the baseline. Each is
+    // individually switchable so an operator can mute one that goes bad without
+    // losing the rest — the aggregator feeds are the only ones that carry a
+    // quiet day, so muting them re-creates the exact failure this fixes.
+    config.techcrunchAiEnabled !== false
+      ? fetchTechcrunchAiDaily(config, { limit: config.techcrunchAiLimit }).catch(() => [])
+      : Promise.resolve([]),
+    config.vergeAiEnabled !== false
+      ? fetchVergeAiDaily(config, { limit: config.vergeAiLimit }).catch(() => [])
+      : Promise.resolve([]),
+    config.qbitaiEnabled !== false
+      ? fetchQbitaiDaily(config, { limit: config.qbitaiLimit }).catch(() => [])
+      : Promise.resolve([]),
+    config.infoqCnEnabled !== false
+      ? fetchInfoqCnDaily(config, { limit: config.infoqCnLimit }).catch(() => [])
+      : Promise.resolve([]),
   ]);
-  const parts = [hn, kr36, arxiv, openai, hf, googleAi, googleResearch];
+  const parts = [
+    hn, kr36, arxiv, openai, hf, googleAi, googleResearch,
+    techcrunch, verge, qbitai, infoqCn,
+  ];
   const merged = parts.flat();
   const cap = Number.isFinite(config.aggregateDailySourceLimit)
     ? config.aggregateDailySourceLimit

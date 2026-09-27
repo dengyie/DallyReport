@@ -13,6 +13,10 @@ import {
   fetchGoogleAiDaily,
   fetchGoogleResearchDaily,
   interleaveAndCap,
+  fetchTechcrunchAiDaily,
+  fetchVergeAiDaily,
+  fetchQbitaiDaily,
+  fetchInfoqCnDaily,
 } from "../src/sources-daily.mjs";
 
 const TODAY = "2026-08-10";
@@ -444,6 +448,13 @@ test("fetchAllDailySources: a healthy run carries no diagnostics", async () => {
     hfDailyEnabled: false,
     googleAiDailyEnabled: false,
     googleResearchDailyEnabled: false,
+    // 2026-09-28 H2: the source set grew; this test enumerates all of them, so
+    // the four new daily aggregators must be named here too or they run
+    // unconfigured against a real network and report a spurious failure.
+    techcrunchAiEnabled: false,
+    vergeAiEnabled: false,
+    qbitaiEnabled: false,
+    infoqCnEnabled: false,
   });
   assert.equal(out.dailyDiagnostics, undefined, "a clean run reports nothing");
 });
@@ -581,4 +592,191 @@ test("arxiv: a five-day-old paper is still excluded", async () => {
     { runFetch: async () => ({ text: atom, fromCache: false, provider: "t" }) },
   );
   assert.equal(out.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-28 review H1: a hard source that FETCHES but yields nothing after the
+// recency window was reported as a healthy run.
+//
+//   // A feed that parsed fine but yielded nothing for today is a normal quiet
+//   // day on these blogs — not a failure. Only transport/parse problems are
+//   // reported.
+//   return sources;                       // <- 0 items, no diagnostic
+//
+// That is true for ONE blog on a quiet day and false as an aggregate. Measured
+// 2026-09-28: every hard source returned 0, `dailyDiagnostics` was null, and
+// the report still printed "✅ 综合成功" on 9 sources of which 6 were forum
+// chatter. The P2 fix caught transport failure; it left the far more common
+// case — fetched fine, filtered to zero — completely silent.
+//
+// Both directions are asserted: a source that yields nothing is NAMED, and a
+// source that yields something is not.
+// ---------------------------------------------------------------------------
+
+// A well-formed feed whose only item is 30 days old: it parses, then the
+// recency window drops it. This is the exact shipped shape.
+const STALE_RSS = `<?xml version="1.0"?><rss version="2.0"><channel>
+<item><title>A real AI announcement</title><link>https://x.test/1</link>
+<pubDate>${new Date(Date.parse("2026-09-28T00:00:00+08:00") - 30 * 86400000).toUTCString()}</pubDate>
+<description>d</description></item></channel></rss>`;
+
+const FRESH_RSS = `<?xml version="1.0"?><rss version="2.0"><channel>
+<item><title>OpenAI ships a new model today</title><link>https://x.test/2</link>
+<pubDate>${new Date(Date.parse("2026-09-28T00:00:00+08:00") - 3600000).toUTCString()}</pubDate>
+<description>d</description></item></channel></rss>`;
+
+// These two drive `fetchOfficialBlogRss` with an injected runFetch rather than
+// mocking globalThis.fetch: the real runFetch shells out to
+// `config.grokSearchDir/scripts/fetch.js`, so a fetch-level mock never reaches
+// the RSS path and every source would report ERR_INVALID_ARG_TYPE — a test that
+// passes for the wrong reason. (That is exactly how the first version of this
+// test failed.)
+test("H1: a hard source that fetches fine but filters to zero IS reported", async () => {
+  const out = await fetchOfficialBlogRss(
+    "https://openai.com/news/rss.xml",
+    { date: "2026-09-28", cacheDir: null },
+    { limit: 5, site: "openai", provider: "openai-blog", runFetch: async () => ({ text: STALE_RSS }) },
+  );
+  assert.equal(out.length, 0, "a 30-day-old story is not same-day material");
+  const diag = out.dailyDiagnostics;
+  assert.ok(diag, "a source that yielded nothing must carry diagnostics");
+  assert.equal(diag.provider, "openai");
+  assert.match(
+    String(diag.failures[0].reason),
+    /window|stale|no-fresh|empty/i,
+    "the reason must say the window dropped it, not that it failed to fetch",
+  );
+});
+
+test("H1: a hard source that yields items is NOT reported as starved", async () => {
+  const out = await fetchOfficialBlogRss(
+    "https://openai.com/news/rss.xml",
+    { date: "2026-09-28", cacheDir: null },
+    { limit: 5, site: "openai", provider: "openai-blog", runFetch: async () => ({ text: FRESH_RSS }) },
+  );
+  assert.equal(out.length, 1, "the fresh story must survive");
+  assert.equal(
+    out.dailyDiagnostics,
+    undefined,
+    `a source that produced a source card must stay silent, got ${JSON.stringify(out.dailyDiagnostics)}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-28 review H2: the hard-source baseline was 5 feeds that all publish
+// weekly-ish, so the "≥10 same-day sources" contract was never met.
+//
+// Measured 2026-09-28 against the live feeds: openai/hf/google-ai/
+// google-research/arxiv each returned 0 items inside the window (newest
+// openai post 45h old, newest arXiv paper 4 days old), while four feeds that
+// publish DAILY were not connected at all:
+//
+//   techcrunch-ai  4 fresh items   verge-ai      3
+//   qbitai         3 fresh items   infoq-cn      3
+//
+// These four are the new baseline. Each is a real vendor/aggregator feed, and
+// two of them are Chinese-language, which matters for a Chinese daily.
+// ---------------------------------------------------------------------------
+
+const ATOM = (title, link, iso) => `<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><entry>
+<title>${title}</title><link href="${link}"/><id>${link}</id>
+<published>${iso}</published><updated>${iso}</updated>
+<summary>sum</summary></entry></feed>`;
+
+const HOUR_AGO = new Date(Date.parse("2026-09-28T00:00:00+08:00") - 3600000).toISOString();
+
+test("H2: the TechCrunch AI feed yields same-day items", async () => {
+  const out = await fetchTechcrunchAiDaily(
+    { date: "2026-09-28", cacheDir: null },
+    {
+      limit: 5,
+      runFetch: async () => ({
+        text: ATOM("OpenAI pauses training of its most capable models", "https://tc.test/1", HOUR_AGO),
+      }),
+    },
+  );
+  assert.equal(out.length, 1);
+  assert.equal(out[0].title, "OpenAI pauses training of its most capable models");
+  assert.equal(out[0].url, "https://tc.test/1");
+  assert.equal(out[0].provider, "techcrunch-ai", "the provider label must name the real feed");
+  assert.ok(out[0].publishedAt >= Date.parse("2026-09-28T00:00:00+08:00") - 86400000);
+});
+
+test("H2: the Verge AI feed yields same-day items", async () => {
+  const out = await fetchVergeAiDaily(
+    { date: "2026-09-28", cacheDir: null },
+    {
+      limit: 5,
+      runFetch: async () => ({
+        text: ATOM("Engram turns broken AI hallucinations into music", "https://verge.test/1", HOUR_AGO),
+      }),
+    },
+  );
+  assert.equal(out.length, 1);
+  assert.equal(out[0].provider, "verge-ai");
+  assert.equal(out[0].url, "https://verge.test/1");
+});
+
+test("H2: 量子位 (qbitai) yields same-day Chinese items", async () => {
+  const out = await fetchQbitaiDaily(
+    { date: "2026-09-28", cacheDir: null },
+    {
+      limit: 5,
+      runFetch: async () => ({
+        text: `<?xml version="1.0"?><rss version="2.0"><channel><item>
+<title>又快又能打！匿名模型玉兔模型杀上双榜第一</title>
+<link>https://www.qbitai.com/1</link>
+<pubDate>${new Date(Date.parse("2026-09-28T00:00:00+08:00") - 7200000).toUTCString()}</pubDate>
+<description>d</description></item></channel></rss>`,
+      }),
+    },
+  );
+  assert.equal(out.length, 1, "a Chinese feed must not be dropped for being CJK");
+  assert.equal(out[0].provider, "qbitai");
+  assert.match(out[0].title, /玉兔模型/);
+});
+
+test("H2: InfoQ 中文 yields same-day Chinese items", async () => {
+  const out = await fetchInfoqCnDaily(
+    { date: "2026-09-28", cacheDir: null },
+    {
+      limit: 5,
+      runFetch: async () => ({
+        text: `<?xml version="1.0"?><rss version="2.0"><channel><item>
+<title>阿里巴巴开源 AI 辅助代码评审工具 OpenCodeReview</title>
+<link>https://www.infoq.cn/1</link>
+<pubDate>${new Date(Date.parse("2026-09-28T00:00:00+08:00") - 7200000).toUTCString()}</pubDate>
+<description>d</description></item></channel></rss>`,
+      }),
+    },
+  );
+  assert.equal(out.length, 1);
+  assert.equal(out[0].provider, "infoq-cn");
+  assert.match(out[0].title, /OpenCodeReview/);
+});
+
+test("H2: a non-AI story on these feeds is filtered out", async () => {
+  // TechCrunch's AI category still carries the occasional non-AI story; the
+  // same relevance gate the vendor feeds use must apply, or the new baseline
+  // imports the same padding the review is trying to remove.
+  const out = await fetchTechcrunchAiDaily(
+    { date: "2026-09-28", cacheDir: null },
+    {
+      limit: 5,
+      runFetch: async () => ({
+        text: ATOM("Best kitchen sink picks for 2026", "https://tc.test/9", HOUR_AGO),
+      }),
+    },
+  );
+  assert.equal(out.length, 0, "a story with no AI signal must not enter the baseline");
+});
+
+test("H2: an old story on these feeds is filtered out by the window", async () => {
+  const old = new Date(Date.parse("2026-09-28T00:00:00+08:00") - 9 * 86400000).toISOString();
+  const out = await fetchTechcrunchAiDaily(
+    { date: "2026-09-28", cacheDir: null },
+    { limit: 5, runFetch: async () => ({ text: ATOM("Old OpenAI story", "https://tc.test/8", old) }) },
+  );
+  assert.equal(out.length, 0, "a 9-day-old story is not same-day material");
 });
