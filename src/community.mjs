@@ -15,6 +15,7 @@
 import path from "node:path";
 import { runFetch } from "./grok-cli.mjs";
 import { sanitizeSnippet, isInjectionOnlySource, NEGATIVE_COMMUNITY_RE } from "./snippet-hygiene.mjs";
+import { cacheKeyFor } from "./report-window.mjs";
 
 // Shared AI-keyword gate for the community collectors. Kept broad enough for
 // Chinese + English model names and tooling chatter across L 站 / NodeSeek / V2EX.
@@ -188,7 +189,7 @@ export async function fetchCommunitySources(site, config, deps = {}) {
   await Promise.all(
     listUrls.map(async (url, i) => {
       try {
-        const cacheFile = path.join(config.cacheDir, `${config.date}-${site.key}-list-${i}.txt`);
+        const cacheFile = path.join(config.cacheDir, `${cacheKeyFor(config)}-${site.key}-list-${i}.txt`);
         const res = await doFetch(url, config, {
           maxChars,
           provider: "auto",
@@ -247,7 +248,7 @@ export async function fetchCommunitySources(site, config, deps = {}) {
     await Promise.all(
       deepTargets.map(async (t) => {
         try {
-          const cacheFile = path.join(config.cacheDir, `${config.date}-${site.key}-topic-${t.id}.txt`);
+          const cacheFile = path.join(config.cacheDir, `${cacheKeyFor(config)}-${site.key}-topic-${t.id}.txt`);
           const res = await doFetch(t.url, config, {
             maxChars: Math.min(maxChars, 12000),
             provider: "auto",

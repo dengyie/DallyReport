@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { writeFileSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -10,6 +10,7 @@ import {
   enrichLinuxdoPosts,
   downloadAttachmentAsset,
 } from "../src/linuxdo.mjs";
+import { tmpDir, tmpDirSync } from "./helpers/tmp.mjs";
 
 const IMG_ORIG = "https://cdn3.ldstatic.com/original/4X/3/5/c/35cab35942d147a12df3c18a806afa15045af2e7.png";
 const IMG_ORIG2 = "https://cdn3.ldstatic.com/original/4X/1/2/3/abcdef123456789.png";
@@ -69,7 +70,7 @@ function makeTopicJson(title, cookedArr) {
 }
 
 test("enrichLinuxdoPosts: writes full post md + downloads attachments into vault folders", async () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-"));
+  const tmp = tmpDirSync("dally-posts-");
   const config = {
     date: "2026-08-07",
     obsidianDir: tmp,
@@ -110,7 +111,7 @@ test("enrichLinuxdoPosts: writes full post md + downloads attachments into vault
 });
 
 test("enrichLinuxdoPosts: honors fullPostsLimit (caps fan-out)", async () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-limit-"));
+  const tmp = tmpDirSync("dally-posts-limit-");
   const config = {
     date: "2026-08-07",
     obsidianDir: tmp,
@@ -129,7 +130,7 @@ test("enrichLinuxdoPosts: honors fullPostsLimit (caps fan-out)", async () => {
 });
 
 test("enrichLinuxPosts: no cookie / browser — fetchTopic null -> silently skipped", async () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-null-"));
+  const tmp = tmpDirSync("dally-posts-null-");
   const config = { date: "2026-08-07", obsidianDir: tmp, linuxdoFullPosts: true };
   const cards = [{ id: 10, url: "https://linux.do/t/topic/10", title: "A" }];
   const fetchTopic = async () => null;
@@ -160,7 +161,7 @@ test("extractAttachments: lightbox <a><img> collapses to the original, drops the
 });
 
 test("enrich: lightbox thread downloads one original; both image srcs rewrite to it", async () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-lightbox-"));
+  const tmp = tmpDirSync("dally-posts-lightbox-");
   const config = {
     date: "2026-08-07",
     obsidianDir: tmp,
@@ -196,7 +197,7 @@ test("enrich: lightbox thread downloads one original; both image srcs rewrite to
 });
 
 test("enrich: withAttachments=false writes the full post but downloads nothing", async () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-noattach-"));
+  const tmp = tmpDirSync("dally-posts-noattach-");
   const config = {
     date: "2026-08-07",
     obsidianDir: tmp,
@@ -220,7 +221,7 @@ test("enrich: withAttachments=false writes the full post but downloads nothing",
 });
 
 test("enrich: linuxdoFullPosts=false disables fetches entirely", async () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-off-"));
+  const tmp = tmpDirSync("dally-posts-off-");
   const config = { date: "2026-08-07", obsidianDir: tmp, linuxdoFullPosts: false };
   const cards = [{ id: 10, url: "https://linux.do/t/topic/10", title: "A" }];
   let fetches = 0;
@@ -232,7 +233,7 @@ test("enrich: linuxdoFullPosts=false disables fetches entirely", async () => {
 });
 
 test("enrich: byte budget stops pulling files but keeps the over-budget one linked (no orphan)", async () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-bytes-"));
+  const tmp = tmpDirSync("dally-posts-bytes-");
   const config = {
     date: "2026-08-07",
     obsidianDir: tmp,
@@ -259,7 +260,7 @@ test("enrich: byte budget stops pulling files but keeps the over-budget one link
 });
 
 test("enrich: a failing topic doesn't drop its siblings (partial success)", async () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-partial-"));
+  const tmp = tmpDirSync("dally-posts-partial-");
   const config = { date: "2026-08-07", obsidianDir: tmp, linuxdoFullPosts: true };
   const cards = [
     { id: 10, url: "https://linux.do/t/topic/10", title: "A" },
@@ -278,7 +279,7 @@ test("enrich: a failing topic doesn't drop its siblings (partial success)", asyn
 // --- second review pass fixes: host gate, streaming cap, reuse, deadline, continuation ---
 
 test("enrich: external-host img/link is never downloaded (host gate)", async () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-gate-"));
+  const tmp = tmpDirSync("dally-posts-gate-");
   const config = {
     date: "2026-08-07",
     obsidianDir: tmp,
@@ -305,7 +306,7 @@ test("enrich: external-host img/link is never downloaded (host gate)", async () 
 });
 
 test("downloadAttachmentAsset: refuses a single file over maxBytes via Content-Length", async () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), "dally-cap-cl-"));
+  const tmp = tmpDirSync("dally-cap-cl-");
   const dest = path.join(tmp, "big.bin");
   const fetchImpl = async () =>
     new Response("x".repeat(2048), { status: 200, headers: { "content-length": "2048" } });
@@ -319,7 +320,7 @@ test("downloadAttachmentAsset: refuses a single file over maxBytes via Content-L
 });
 
 test("downloadAttachmentAsset: streaming counter aborts mid-body when no Content-Length", async () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), "dally-cap-stream-"));
+  const tmp = tmpDirSync("dally-cap-stream-");
   const dest = path.join(tmp, "big.bin");
   let canceled = false;
   const body = new ReadableStream({
@@ -342,7 +343,7 @@ test("downloadAttachmentAsset: streaming counter aborts mid-body when no Content
 });
 
 test("enrich: re-run of the same date reuses the on-disk attachment (no re-download)", async () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-reuse-"));
+  const tmp = tmpDirSync("dally-posts-reuse-");
   const config = {
     date: "2026-08-07",
     obsidianDir: tmp,
@@ -364,7 +365,7 @@ test("enrich: re-run of the same date reuses the on-disk attachment (no re-downl
 });
 
 test("enrich: budget expiry stops scheduling new topics but returns partial results", async () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-deadline-"));
+  const tmp = tmpDirSync("dally-posts-deadline-");
   const config = {
     date: "2026-08-07",
     obsidianDir: tmp,
@@ -392,7 +393,7 @@ test("enrich: budget expiry stops scheduling new topics but returns partial resu
 });
 
 test("enrich: long threads paginate remaining posts and preserve order", async () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-longthread-"));
+  const tmp = tmpDirSync("dally-posts-longthread-");
   const config = {
     date: "2026-08-07",
     obsidianDir: tmp,
@@ -432,7 +433,7 @@ test("enrich: long threads paginate remaining posts and preserve order", async (
 });
 
 test("enrich: all-failed downloads leave no empty attachments dir behind", async () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), "dally-posts-cleandir-"));
+  const tmp = tmpDirSync("dally-posts-cleandir-");
   const config = {
     date: "2026-08-07",
     obsidianDir: tmp,

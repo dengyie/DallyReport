@@ -2,9 +2,9 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpDir, tmpDirSync } from "./helpers/tmp.mjs";
 
 // Integration tests that actually execute src/run.mjs as a child process, so the
 // entry file's own wiring is exercised — not just the units it imports.
@@ -31,7 +31,7 @@ const RUN_ENTRY = path.join(PROJECT_ROOT, "src", "run.mjs");
 // scheduled run's lock (admitting a second concurrent writer), and a live 09:00
 // run holding the lock made these tests fail the other way. config.mjs honors
 // CACHE_DIR, so point the child at a per-file temp cache dir instead.
-const CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "dally-integration-cache-"));
+const CACHE_DIR = tmpDirSync("dally-integration-cache-");
 after(() => fs.rmSync(CACHE_DIR, { recursive: true, force: true }));
 const LOCK_PATH = path.join(CACHE_DIR, "run.lock");
 
@@ -69,4 +69,43 @@ test("run.mjs: a live lock held by another PID is refused (exit 0, 已有实例�
   } finally {
     fs.rmSync(LOCK_PATH, { force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-28 weekly: --mode selects the report period. The validation gate must
+// sit BEFORE the lock and before any section, exactly like --section: an
+// operator typo (`--mode weekley`) must cost a message and exit 2, never a
+// half-run that burns LLM calls or writes a wrong-dated note into the vault.
+// ---------------------------------------------------------------------------
+
+test("run.mjs: --mode rejects an unknown value with exit 2 before any work", () => {
+  // `--section` is deliberately bogus. The mode gate must fire BEFORE the
+  // section gate, so the mode error is the one that surfaces — and naming a
+  // real section here would make a missing mode gate start a genuine run
+  // (network, LLM, vault write) inside the test, which is exactly what this
+  // file exists to avoid. First written with `--section ai`, it started one.
+  const r = runCli(["--mode", "weekley", "--section", "__no_such_section__"]);
+  assert.equal(r.status, 2, `expected exit 2 (unknown mode), got ${r.status}`);
+  assert.match(r.stderr, /未知 mode/, "stderr names the unknown mode");
+  assert.match(r.stderr, /daily/, "stderr lists the valid modes");
+  assert.doesNotMatch(r.stderr, /未知 section/, "the mode gate fires before the section gate");
+  assert.doesNotMatch(r.stderr, /已有实例在运行/, "must fail before the lock, not after");
+});
+
+test("run.mjs: --mode accepts daily and weekly and still reaches the section gate", () => {
+  // Reaching the known section's gate means argv parsing, the mode validation,
+  // config loading and the lock all ran without throwing. `--section` stays
+  // bogus on purpose so the child exits 2 there rather than starting a real run.
+  for (const mode of ["daily", "weekly", "auto"]) {
+    const r = runCli(["--mode", mode, "--section", "__no_such_section__"]);
+    assert.equal(r.status, 2, `--mode ${mode}: expected exit 2 at the section gate, got ${r.status}`);
+    assert.match(r.stderr, /未知 section/, `--mode ${mode}: reached the section gate`);
+    assert.doesNotMatch(r.stderr, /未知 mode/, `--mode ${mode}: mode itself validated`);
+  }
+});
+
+test("run.mjs: --help documents --mode", () => {
+  const r = runCli(["--help"]);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /--mode/);
 });

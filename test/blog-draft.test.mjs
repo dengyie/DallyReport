@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { cleanObsidianMarkdown, convertReportToBlogDraft, exportBlogDraft } from "../src/blog-draft.mjs";
+import { tmpDir, tmpDirSync } from "./helpers/tmp.mjs";
 
 test("blog draft conversion removes Obsidian-only syntax and marks review", () => {
   const draft = convertReportToBlogDraft(
@@ -24,7 +24,7 @@ test("cleanObsidianMarkdown preserves ordinary markdown", () => {
 });
 
 test("exportBlogDraft copies poster and writes a dated draft", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-blog-draft-"));
+  const root = await tmpDir("dally-blog-draft-");
   const obsidianDir = path.join(root, "vault");
   const outputDir = path.join(root, "output");
   await fs.mkdir(path.join(obsidianDir, "2026-08-13"), { recursive: true });

@@ -324,6 +324,11 @@ export function dedupeAndNormalizeSources(sources) {
       ...rep,
       ...(fromDaily ? { fromDaily: true } : {}),
       title: sanitizeSnippet(rewritten, { maxChars: 200 }),
+      // The fold is the evidence that these cards are one event. topicize reads
+      // this instead of re-running the cluster matcher, so a topic and the card
+      // the synthesizer sees cannot disagree about membership.
+      clusterKey: key,
+      clusterMembers: members.map((m) => ({ ...m })),
     };
     // The representative keeps its own slot; the other members collapse into it.
     for (let idx = 1; idx < slots.length; idx++) out[slots[idx]] = null;

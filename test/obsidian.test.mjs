@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { writeSection, rescueMarkdown } from "../src/obsidian.mjs";
+import { tmpDir } from "./helpers/tmp.mjs";
 
 async function tempDir() {
-  return fs.mkdtemp(path.join(os.tmpdir(), "dally-obsidian-"));
+  return tmpDir("dally-obsidian-");
 }
 
 async function tempFiles(dir) {

@@ -1,4 +1,4 @@
-import { runSearch } from "../grok-cli.mjs";
+import { runSearch, redactSecrets } from "../grok-cli.mjs";
 import { frontMatter, stripMarkdown, sanitizeUrl } from "../markdown.mjs";
 import { assertGrokCreds } from "../config.mjs";
 import { synthesizeFromSources, synthesizeWithWebSearch, renderSources } from "../llm-synthesize.mjs";
@@ -6,8 +6,13 @@ import { fetchLinuxDoAiSources, mergeSourcesPreferLinuxDo } from "../linuxdo.mjs
 import { fetchNodeSeekAiSources } from "../nodeseek.mjs";
 import { fetchV2exAiSources } from "../v2ex.mjs";
 import { dedupeAndNormalizeSources } from "../news-dedup.mjs";
+import { splitOverMergedBullets } from "../prose-tighten.mjs";
 import { fetchAllDailySources } from "../sources-daily.mjs";
-import { filterByRecency, isSameDaySource } from "../snippet-hygiene.mjs";
+import { filterByRecency, isInWindowSource } from "../snippet-hygiene.mjs";
+import { materialWindow } from "../report-window.mjs";
+import { topicize, gradeTopics, applyGradeCap } from "../topics.mjs";
+import { investigateTopics, renderInvestigationInput } from "../investigate.mjs";
+import { enforceOneTopicPerBullet } from "../topic-bullets.mjs";
 
 export function computeAiNewsStatus({
   searchOk,
@@ -93,17 +98,31 @@ export function shouldSynthesize({
 // 5-entry list therefore produced a two-line reference block whose second line
 // was silently the WRONG source — visible in the shipped 2026-09-27 note, and
 // the same wrong pairing reached the poster via `posterSources`.
+// A citation marker is one bracketed group holding one or more comma-separated
+// 1-based numbers. The multi-number form is not optional decoration: a body that
+// attributes one claim to two sources at once writes "[22, 25]", and the older
+// single-number pattern did not match that string AT ALL — the scan consumed
+// "[22" and died on the comma, so neither number was recorded. The shipped
+// 2026-09-25 weekly shipped exactly that marker, and sources 22 and 25 reached
+// the reader as citations pointing at nothing, with no error anywhere.
+//
+// The group is validated as a whole before any number inside it is trusted, so
+// a malformed half ("[2, abc]") contributes nothing rather than contributing its
+// well-formed neighbour under a marker the body never wrote.
+const CITE_RE = /\[(\d+(?:\s*,\s*\d+)*)\]/g;
+
 export function selectCitedSources(sources, bodyText) {
   const list = sources || [];
   const indices = new Set();
-  const citeRe = /\[(\d+)\]/g;
   let m;
-  while ((m = citeRe.exec(bodyText || "")) !== null) {
-    const idx = Number.parseInt(m[1], 10) - 1;
-    // Out-of-range markers are ignored rather than clamped: a body that cites
-    // [9] against 8 sources is malformed, and mapping it onto source 8 would
-    // assert a link the model never made.
-    if (Number.isInteger(idx) && idx >= 0 && idx < list.length) indices.add(idx);
+  while ((m = CITE_RE.exec(bodyText || "")) !== null) {
+    for (const part of m[1].split(",")) {
+      const idx = Number.parseInt(part.trim(), 10) - 1;
+      // Out-of-range markers are ignored rather than clamped: a body that cites
+      // [9] against 8 sources is malformed, and mapping it onto source 8 would
+      // assert a link the model never made.
+      if (Number.isInteger(idx) && idx >= 0 && idx < list.length) indices.add(idx);
+    }
   }
   if (!indices.size) {
     return list.map((source, i) => ({ n: i + 1, source }));
@@ -122,7 +141,11 @@ export function selectCitedSources(sources, bodyText) {
 // blamed five healthy feeds for a quiet publishing week — and the report still
 // printed a green success line over forum chatter. Pure + exported so both
 // directions are unit-testable without touching the network.
-export function formatDailySourceDiagnostics(dailyDiag, label = "当日硬源") {
+export function formatDailySourceDiagnostics(
+  dailyDiag,
+  label = "当日硬源",
+  starvedText = "当日无新内容",
+) {
   if (!dailyDiag || typeof dailyDiag !== "object") return [];
   const out = [];
   for (const [provider, info] of Object.entries(dailyDiag)) {
@@ -130,26 +153,88 @@ export function formatDailySourceDiagnostics(dailyDiag, label = "当日硬源") 
     const starved = info.sample?.some((f) => f?.reason === "no-fresh-items-in-window");
     out.push(
       starved
-        ? `${label}/${provider}（当日无新内容）`
+        ? `${label}/${provider}（${starvedText}）`
         : `${label}/${provider}（${info.count} 项采集失败）`,
     );
   }
   return out;
 }
 
+// 2026-09-28 weekly: every user-facing noun for the reporting period, in one
+// place. Scattered conditionals through the section meant a weekly shipped
+// "当日素材 N 条" over seven days of evidence — the note then describes its own
+// material as a single day, and the 低素材 threshold (a *daily* budget) is
+// consulted against a week's worth of cards, so a genuinely starved week never
+// trips it. mode is the report mode; undefined means daily, because bare
+// {date} test configs reach these helpers.
+export function reportPeriodWords(mode) {
+  return mode === "weekly"
+    ? { material: "本周素材", sources: "近 7 日来源", hard: "本周硬源", starved: "本周无新内容" }
+    : { material: "当日素材", sources: "近几日来源", hard: "当日硬源", starved: "当日无新内容" };
+}
+
+// The low-material threshold is a per-day budget, so it has to scale with the
+// window: a healthy week carries ~7x a healthy day, and comparing a week's
+// count against a day's threshold would silence the warning exactly when it is
+// most needed. 8 * 7 = 56 is far above any real weekly haul, so the weekly uses
+// a deliberately conservative 20 — enough to catch a week where the hard
+// sources were genuinely starved, not a week that merely trended quiet.
+export function lowMaterialThresholdFor(mode) {
+  return mode === "weekly" ? 20 : 8;
+}
+
+// Pure + exported so the wording is unit-testable without a live section run,
+// matching computeAiNewsStatus / formatDailySourceDiagnostics above.
+export function buildMaterialWindowHeader({
+  dailyCount = 0,
+  genericCount = 0,
+  recencyDropped = 0,
+  mode = "daily",
+} = {}) {
+  const w = reportPeriodWords(mode);
+  const parts = [`${w.material} ${dailyCount} 条`, `${w.sources} ${genericCount} 条`];
+  if (recencyDropped > 0) parts.push(`过期已过滤 ${recencyDropped} 条`);
+  let header = `> **素材窗口**：${parts.join("；")}。\n\n`;
+  const threshold = lowMaterialThresholdFor(mode);
+  if (dailyCount < threshold) {
+    header += `> ⚠️ **低素材提示**：${w.hard}不足 ${threshold} 条，正文以近期趋势为主，请注意时效。\n\n`;
+  }
+  return header;
+}
+
 // Count same-day material. See isSameDaySource for why recency, not the
 // fromDaily stamp, decides this. Exported for unit tests.
-export function countDailySources(sources, dateStr) {
-  return (sources || []).filter((s) => isSameDaySource(s, dateStr)).length;
+// `window` is the weekly span; omitted, the source must fall inside the report
+// DAY, which is what every daily note and the 2026-09-27 tests assert.
+export function countDailySources(sources, dateStr, window) {
+  return (sources || []).filter((s) => isInWindowSource(s, dateStr, window)).length;
 }
 
 // Render the reference bullets. `deps` exists so the unit test can drive the
 // pure formatting without the module's own imports.
+// Numbers in the body index the list the model was shown. That list is
+// `investigation.sources` once investigation has replaced the collected cards.
+// Resolving [N] against the pre-investigation list points every marker at the
+// wrong page as soon as a D-grade card is removed or a new URL is appended.
+export function assembleInvestigatedBody({ collected, investigation, body, date } = {}) {
+  const shown = investigation?.sources || collected || [];
+  const cited = selectCitedSources(shown, body);
+  const ref = buildReferenceLines(cited).join("\n");
+  const noMarkers = !/\[\d+/.test(body || "");
+  return {
+    ref,
+    posterSources: noMarkers ? shown : cited.map((c) => c.source),
+    dailyCount: countDailySources(shown, date),
+    shown,
+  };
+}
+
 export function buildReferenceLines(
   cited,
   deps = { stripMarkdown, sanitizeUrl },
+  max = 30,
 ) {
-  return (cited || []).slice(0, 30).map(({ n, source: s }, i) => {
+  return (cited || []).slice(0, max).map(({ n, source: s }, i) => {
     // Strip markdown fragments from scraped titles first (v2ex/linuxdo titles
     // can carry `[...](...)` residue and reply metadata), THEN escape what
     // remains so parens can't break the markdown link syntax.
@@ -200,14 +285,25 @@ async function gemSearch(query, config) {
 export async function aiNewsSection(
   config,
   {
-    name = "AI",
+    // 2026-09-28 weekly: the note name is the artifact's identity in the vault
+    // folder. A weekly shipped as "AI.md" would sit next to a daily of the same
+    // name — and on a manual re-run of a Friday it would overwrite the daily
+    // rather than sit beside it. An explicit name (the alt channel) still wins.
+    name = config.isWeekly ? "AI-周报" : "AI",
     model = config.synthModel,
     queryTemplate = config.aiQueryTemplate,
     title,
     synthTimeoutMs = config.synthTimeoutMs,
   } = {},
 ) {
-  const ai = (queryTemplate || "今天{date}最新的AI资讯和大模型动态").replace(/\{date\}/g, config.date);
+  // 2026-09-28 weekly: the weekly query template carries {start} ~ {end} instead
+  // of {date}, so a search that only substituted {date} would have sent the
+  // literal string "{start}" to the model. Both placeholders are substituted
+  // unconditionally — a daily template simply has no {start}/{end} to expand.
+  const ai = (queryTemplate || "今天{date}最新的AI资讯和大模型动态")
+    .replace(/\{date\}/g, config.date)
+    .replace(/\{start\}/g, config.windowStartDate ?? config.date)
+    .replace(/\{end\}/g, config.windowEndDate ?? config.date);
   let result;
   let searchError = null;
   const credErr = assertGrokCreds();
@@ -256,11 +352,12 @@ export async function aiNewsSection(
   // the report silently while stdout showed a clean ✅. Collect them here so they
   // reach the section summary line (launchd log) and the section result.
   const degradedSources = [];
+  const periodWords = reportPeriodWords(config.reportMode);
   for (const [label, arr, errKey] of [
     ["linux.do", linuxdoSources, "linuxdoError"],
     ["nodeseek", nodeseekSources, "nodeseekError"],
     ["v2ex", v2exSources, "v2exError"],
-    ["当日硬源", dailySources, "dailySourcesError"],
+    [periodWords.hard, dailySources, "dailySourcesError"],
   ]) {
     if (arr?.[errKey]) {
       degradedSources.push(`${label}（${arr[errKey].failures?.[0]?.message || "采集失败"}）`);
@@ -291,7 +388,9 @@ export async function aiNewsSection(
     // fine and the recency window emptied it, so labelling that "N 项采集失败"
     // sends the reader looking at the network instead of at the calendar. The
     // reason is carried through and named.
-    degradedSources.push(...formatDailySourceDiagnostics(arr?.dailyDiagnostics, label));
+    degradedSources.push(
+      ...formatDailySourceDiagnostics(arr?.dailyDiagnostics, label, periodWords.starved),
+    );
   }
 
   const grokCitations =
@@ -333,6 +432,7 @@ export async function aiNewsSection(
   // (Beijing) are dropped; timestamp-less sources (tavily/firecrawl) pass through.
   // The dropped count is surfaced in the report header as a material-window note.
   const { sources, dropped: recencyDropped } = filterByRecency(deduped, config.date);
+  const investigation = await investigateIfEnabled(sources, config);
   const linuxdoCount = (linuxdoSources || []).length;
   const nodeseekCount = (nodeseekSources || []).length;
   const v2exCount = (v2exSources || []).length;
@@ -380,25 +480,30 @@ export async function aiNewsSection(
     // results back -> converge). All other writers keep the one-shot synthesis.
     const geminiLoop =
       model === "gemini-3.6-flash" && config.aiAltGeminiWebSearch !== false;
-    const runOneShot = (m) =>
+    const synthSources = investigation.sources;
+    const synthQuery = investigation.preamble ? `${ai}\n\n${investigation.preamble}` : ai;
+    const runOneShot = (m, instruction) =>
       synthesizeFromSources({
-        query: ai,
+        query: synthQuery,
         date: config.date,
-        sources,
+        sources: synthSources,
         model: m,
         maxTokens: config.synthMaxTokens,
         timeoutMs: synthTimeoutMs,
+        reportMode: config.reportMode,
+        instruction,
       });
     try {
       bodyText = geminiLoop
         ? await synthesizeWithWebSearch({
-            query: ai,
+            query: synthQuery,
             date: config.date,
-            sources,
+            sources: synthSources,
             model,
             maxTokens: config.synthMaxTokens,
             timeoutMs: synthTimeoutMs,
             maxSearchRounds: config.aiAltGeminiMaxRounds,
+            reportMode: config.reportMode,
             searchImpl: (q) => gemSearch(q, config),
           })
         : await runOneShot(model);
@@ -408,6 +513,12 @@ export async function aiNewsSection(
       // gateway's ~120s Cloudflare cap). Retry the one-shot synthesis once with
       // the configured fallback model so the daily report still completes. The
       // gemini web_search loop is skipped here — it has its own bounded loop.
+      // The stdout summary only carries the error code, so the full detail
+      // (status + body snippet) must land in stderr (launchd/task log) — this
+      // was the 2026-10-02 weekly outage's diagnosability gap.
+      console.error(
+        `[ai-news] synthesis failed (writer ${model}): code=${e?.code || "?"} status=${e?.status ?? "?"} ${redactSecrets(String(e?.message || e))}`,
+      );
       const fb = config.synthFallbackModel;
       if (!geminiLoop && fb && fb !== model) {
         try {
@@ -417,6 +528,9 @@ export async function aiNewsSection(
           synthFallbackFrom = model;
           synthError = null;
         } catch (e2) {
+          console.error(
+            `[ai-news] synthesis failed (fallback ${fb}): code=${e2?.code || "?"} status=${e2?.status ?? "?"} ${redactSecrets(String(e2?.message || e2))}`,
+          );
           synthError = e2;
           // bodyText already = rawAnswerText; keep going, document the fallback.
         }
@@ -432,14 +546,22 @@ export async function aiNewsSection(
   // to replace. The ⚠️ used to live only in the stdout summary nobody reads; the
   // delivered note must self-describe the degradation.
   const synthAttemptedAndFailed = shouldSynth && synthError;
+  // Period-neutral in wording only where it must be: the daily string is
+  // asserted verbatim by the blog-draft test and is what ships today, so the
+  // branch is confined to the weekly.
   const synthFailedNote = synthAttemptedAndFailed
-    ? `> ⚠️ **综合失败（${synthError?.code || "unknown"}）**：以下为未经来源核实的模型原始回答，可能与当日事实不符，请谨慎阅读。\n\n`
+    ? `> ⚠️ **综合失败（${synthError?.code || "unknown"}）**：以下为未经来源核实的模型原始回答，可能与${config.reportMode === "weekly" ? "本周" : "当日"}事实不符，请谨慎阅读。\n\n`
     : "";
 
+  const weekly = config.reportMode === "weekly";
   const fm = frontMatter({
     date: config.date,
+    // frontMatter skips null fields, so a daily note keeps exactly the keys it
+    // shipped with. The weekly needs the span: its H1 and body describe seven
+    // days, and `date` alone (the Friday) would misdate every source in it.
+    date_range: weekly ? config.windowLabel : null,
     updated: new Date().toISOString(),
-    tags: ["日报", "AI"],
+    tags: [weekly ? "周报" : "日报", "AI"],
     days_dropped: daysDropped,
   });
 
@@ -452,26 +574,43 @@ export async function aiNewsSection(
   // made the daily card silently stop counting (2026-09-26 review).
   // 2026-09-27 review B2: recency now decides, so a same-day forum post counts
   // even when no hard source survived — see countDailySources.
-  const dailyCount = countDailySources(sources, config.date);
+  const shownSources = investigation.sources;
+  const dailyCount = countDailySources(shownSources, config.date, materialWindow(config));
   const genericCount = Math.max(0, sources.length - dailyCount);
-  let header = "";
-  if (config.reportStrictDaily !== false) {
-    const windowParts = [`当日素材 ${dailyCount} 条`, `近几日来源 ${genericCount} 条`];
-    if (recencyDropped > 0) windowParts.push(`过期已过滤 ${recencyDropped} 条`);
-    header = `> **素材窗口**：${windowParts.join("；")}。\n\n`;
-    if (dailyCount < 8) {
-      header += `> ⚠️ **低素材提示**：当日硬源不足 8 条，正文以近期趋势为主，请注意时效。\n\n`;
-    }
-  }
+  const header =
+    config.reportStrictDaily !== false
+      ? buildMaterialWindowHeader({
+          dailyCount,
+          genericCount,
+          recencyDropped,
+          mode: config.reportMode,
+        })
+      : "";
 
   // Append reference sources section at the bottom. The `[N]` markers in the body
   // index the FULL source list, so the selection carries each source's own number
   // (selectCitedSources) and the renderer prints that number rather than its own
   // position. With no [N] markers (fallback/degraded path) every source is
   // listed, numbered by position.
-  const bodyTextOrDefault = bodyText || "";
-  const citedSources = selectCitedSources(sources, bodyTextOrDefault);
-  const refLines = buildReferenceLines(citedSources);
+  // 2026-09-28: de-cluster BEFORE the citation scan, never after. The
+  // reference list is built from the same string the body is rendered from, so
+  // splitting a bullet afterwards would move text out from under a [N] the
+  // scan had already resolved. Doing it here means the markers and the prose
+  // stay in the same state.
+  const bodyTextChecked = await enforceOneTopicPerBullet(bodyText || "", {
+    topics: investigation.topics,
+    sources: shownSources,
+    retry: investigation.topics?.length
+      ? (bullet) => retryBullet(bullet, (instruction) => runOneShot(model, instruction))
+      : undefined,
+  });
+  const bodyTextTightened = splitOverMergedBullets(bodyTextChecked);
+  // 2026-09-28 weekly: the cap of 30 is a reading-budget sized for a day's
+  // worth of citations. A week's body cites proportionally more, and truncating
+  // the tail would drop the very sources a later [N] points at — the reference
+  // list would stop resolving mid-note. Weekly doubles it.
+  const citedSources = selectCitedSources(shownSources, bodyTextTightened);
+  const refLines = buildReferenceLines(citedSources, undefined, weekly ? 60 : 30);
   const refSection = refLines.length
     ? `\n\n---\n\n### 参考来源\n\n${refLines.join("\n")}`
     : "";
@@ -479,11 +618,11 @@ export async function aiNewsSection(
   const body = [
     fm,
     "",
-    title ?? `# AI 热点 · ${config.date}`,
+    title ?? (weekly ? `# AI 热点周报 · ${config.windowLabel}` : `# AI 热点 · ${config.date}`),
     "",
     header,
     synthFailedNote,
-    bodyText || "（模型未返回正文内容）",
+    bodyTextTightened || "（模型未返回正文内容）",
     refSection,
     "",
   ].join("\n");
@@ -499,7 +638,7 @@ export async function aiNewsSection(
     synthesized,
     synthAttemptedAndFailed,
     zeroCitation,
-    sourceCount: sources.length,
+    sourceCount: shownSources.length,
     recencyDropped,
     dailySourceCount: dailyCount,
     linuxdoCount,
@@ -516,9 +655,10 @@ export async function aiNewsSection(
 
   // Degraded collectors must be visible where operators actually look (the
   // launchd summary line), not only in non-enumerable metadata.
-  const summaryLine = degradedSources.length
-    ? `${summary}；⚠️ 部分来源不可用：${degradedSources.join("、")}`
-    : summary;
+  const investigationNote = investigation.note ? `；${investigation.note}` : "";
+  const summaryLine = `${summary}${investigationNote}${
+    degradedSources.length ? `；⚠️ 部分来源不可用：${degradedSources.join("、")}` : ""
+  }`;
 
   return {
     ok,
@@ -530,23 +670,121 @@ export async function aiNewsSection(
     zeroCitation,
     synthesized,
     synthFailed: synthAttemptedAndFailed,
-    sourceCount: sources.length,
+    sourceCount: shownSources.length,
     linuxdoCount,
     nodeseekCount,
     v2exCount,
     // Reuse the sanitized source set for the AI poster headlines.
-    sources,
+    sources: shownSources,
     // Poster/mirror alignment: the poster renders the sources the article
     // actually cited, so the poster is a visualization of the article rather
-    // than a different (forum-first) source set. Falls back to all sources
-    // when the body carried no [N] citations (fallback/degraded path).
+    // than a different (forum-first) source set. Falls back to the list the
+    // model was shown when the body carried no [N] citations.
     // NOTE: plain source objects, not the {n, source} pairs — collectAiHeadlines
     // in image-gen.mjs reads `source.title` directly, so wrapping them would
     // silently empty the poster. The poster renders rows positionally and never
     // prints a [N] of its own, so it does not need the numbers.
-    posterSources: citedSources.length ? citedSources.map((c) => c.source) : sources,
+    posterSources: citedSources.length ? citedSources.map((c) => c.source) : shownSources,
     // Raw linuxdo news/34 cards for auxiliary materials (all today's posts, no
     // AI filter, no cap). Written to a separate file by run.mjs.
     linuxdoRaw: linuxdoSources?.linuxdoRaw || [],
+    investigation: investigation.stats,
   };
+}
+
+// Off by default. When on, A/B topics are investigated and D-grade cards leave
+// the synthesis input. A thrown search returns the original cards with ok:false,
+// so the summary cannot stay a clean success.
+export async function investigateIfEnabled(sources, config, deps = {}) {
+  if (!config?.topicInvestigation) {
+    // Still group by URL/cluster so a merged [1, 2, 3] can be split even when
+    // nobody investigated. Search is not called.
+    return { sources, preamble: "", note: "", stats: null, topics: topicize(sources), ok: true };
+  }
+  const graded = gradeTopics(topicize(sources), { date: config.date });
+  const { topics, capped } = applyGradeCap(graded, { mode: config.reportMode });
+  const search = deps.search || defaultSearch(config);
+  const run = deps.investigate || investigateTopics;
+  let result;
+  try {
+    result = await run(topics, {
+      search,
+      date: config.date,
+      cacheDir: config.cacheDir,
+    });
+  } catch {
+    return {
+      sources,
+      preamble: "",
+      note: "⚠️ 主题调查失败，已退回卡片综合",
+      stats: null,
+      topics: null,
+      ok: false,
+    };
+  }
+  const added = [];
+  const seen = new Set(sources.map((s) => s.url).filter(Boolean));
+  for (const topic of result.topics) {
+    for (const extra of topic.memo?.addedSources || []) {
+      if (!extra?.url || seen.has(extra.url)) continue;
+      seen.add(extra.url);
+      added.push({ url: extra.url, title: extra.title || extra.url, provider: "topic-investigation" });
+    }
+  }
+  const bodyCards = result.topics
+    .filter((t) => t.grade !== "D")
+    .flatMap((t) => t.cards);
+  const demotedBudget = result.topics.filter((t) => t.demoted === "investigate-budget").length;
+  const invalid = result.topics.filter((t) => t.demoted === "investigate-invalid-json").length;
+  const counts = countGrades(result.topics);
+  const note = [
+    `topics: ${result.topics.length}（A${counts.A} B${counts.B} C${counts.C} D${counts.D}）`,
+    `investigated: ${result.stats.investigated}/${result.stats.eligible}，搜索 ${result.stats.searches} 次`,
+    capped.length ? `topic-cap: ${capped.length}` : "",
+    demotedBudget ? `investigate-budget: ${demotedBudget}` : "",
+    invalid ? `investigate-invalid-json: ${invalid}` : "",
+  ].filter(Boolean).join("；");
+  return {
+    sources: [...(bodyCards.length ? bodyCards : sources), ...added],
+    preamble: renderInvestigationInput(result.topics),
+    note,
+    stats: result.stats,
+    topics: result.topics,
+    ok: true,
+  };
+}
+
+async function retryBullet(bullet, runOneShot) {
+  // No second gateway call with a fabricated source. The same synthesizer that
+  // wrote the body is asked to keep one topic; if it is unavailable, or it
+  // returns the same crossing bullet, the caller drops the bullet.
+  if (typeof runOneShot !== "function") return "";
+  try {
+    return await runOneShot(
+      `下面这一条要点写了两件事。改写成一条，只留其中一件，引用只保留这件事的编号。\n\n${bullet}`,
+    );
+  } catch {
+    return "";
+  }
+}
+
+function defaultSearch(config) {
+  return async (query) => {
+    const result = await runSearch(query, config, { days: config.days, extra: config.extra });
+    const cards = result?.sources?.extra?.length ? result.sources.extra : result?.sources?.merged || [];
+    if (!Array.isArray(cards)) {
+      const err = new Error("topic search returned a non-list");
+      err.code = "investigate-invalid-json";
+      throw err;
+    }
+    return cards
+      .filter((c) => c && c.url && c.title)
+      .map((c) => ({ value: c.title, url: c.url, title: c.title }));
+  };
+}
+
+function countGrades(topics) {
+  const counts = { A: 0, B: 0, C: 0, D: 0 };
+  for (const topic of topics) if (topic.grade in counts) counts[topic.grade] += 1;
+  return counts;
 }

@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import {
   runFetch,
@@ -10,9 +9,10 @@ import {
   truncateRawForParseError,
   balancedJsonObjects,
 } from "../src/grok-cli.mjs";
+import { tmpDir, tmpDirSync } from "./helpers/tmp.mjs";
 
 async function fixtureSearchDir() {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-"));
+  const root = await tmpDir("dally-grok-");
   const scripts = path.join(root, "scripts");
   await fs.mkdir(scripts, { recursive: true });
   await fs.writeFile(
@@ -24,7 +24,7 @@ async function fixtureSearchDir() {
 }
 
 test("runFetch: cache hit reports cache provider, file, and fromCache", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-cache-"));
+  const root = await tmpDir("dally-grok-cache-");
   const cacheFile = path.join(root, "page.txt");
   await fs.writeFile(cacheFile, "cached body", "utf8");
 
@@ -44,7 +44,7 @@ test("runFetch: cache hit reports cache provider, file, and fromCache", async ()
 
 test("runFetch: live fetch remains successful when cache write fails", async () => {
   const grokSearchDir = await fixtureSearchDir();
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-write-"));
+  const root = await tmpDir("dally-grok-write-");
   const cacheFile = path.join(root, "cache-is-a-directory");
   await fs.mkdir(cacheFile);
 
@@ -66,7 +66,7 @@ test("runFetch: live fetch remains successful when cache write fails", async () 
 // real content — non-empty, so without a content gate it would be written to cache and
 // replayed as a "successful" empty page on every rerun that day.
 async function fixtureSearchDirBody(bodyText) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-"));
+  const root = await tmpDir("dally-grok-");
   const scripts = path.join(root, "scripts");
   await fs.mkdir(scripts, { recursive: true });
   await fs.writeFile(
@@ -79,7 +79,7 @@ async function fixtureSearchDirBody(bodyText) {
 
 test("runFetch: invalid body (cachePredicate false) is NOT written to cache and flags cacheSkipped", async () => {
   const grokSearchDir = await fixtureSearchDirBody("<html>error 533 from Cloudflare</html>");
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-poison-"));
+  const root = await tmpDir("dally-grok-poison-");
   const cacheFile = path.join(root, "page.txt");
   // No prior cache.
   const result = await runFetch(
@@ -111,7 +111,7 @@ test("truncateRawForParseError: small raw passes through; huge raw keeps head+ta
 // A fetch fixture whose child dumps `bytes` bytes of non-JSON garbage on stdout —
 // exercises the runScript accumulation cap end-to-end (single repeat(), fast).
 async function fixtureSearchDirBigStdout(bytes) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-big-"));
+  const root = await tmpDir("dally-grok-big-");
   const scripts = path.join(root, "scripts");
   await fs.mkdir(scripts, { recursive: true });
   await fs.writeFile(
@@ -153,7 +153,7 @@ async function fixtureScript(root, name, body) {
 }
 
 test("runFetch: a hung child is killed at the timeout and the call returns", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-timeout-"));
+  const root = await tmpDir("dally-grok-timeout-");
   // Ignores SIGTERM, so only the SIGKILL backstop stops it.
   await fixtureScript(
     root,
@@ -183,7 +183,7 @@ test("runFetch: a hung child is killed at the timeout and the call returns", asy
 });
 
 test("runFetch: a grandchild holding stdout cannot keep the call pending forever", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-orphan-"));
+  const root = await tmpDir("dally-grok-orphan-");
   // The child exits immediately but leaves a detached grandchild holding the
   // inherited stdout pipe open. Node emits `close` only when every stdio pipe is
   // closed, so a promise settled solely on `close` would never resolve.
@@ -216,7 +216,7 @@ test("runFetch: a grandchild holding stdout cannot keep the call pending forever
 });
 
 test("runFetch: noisy stdout around the JSON payload is tolerated", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-noisy-"));
+  const root = await tmpDir("dally-grok-noisy-");
   await fixtureScript(
     root,
     "fetch.js",
@@ -229,7 +229,7 @@ test("runFetch: noisy stdout around the JSON payload is tolerated", async () => 
 });
 
 test("runFetch: a child error message does not carry a secret through", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-secret-"));
+  const root = await tmpDir("dally-grok-secret-");
   await fixtureScript(
     root,
     "fetch.js",
@@ -254,7 +254,7 @@ test("runFetch: a child error message does not carry a secret through", async ()
 // ---------------------------------------------------------------------------
 
 test("runFetch: multibyte stderr survives chunk boundaries intact", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-mb-"));
+  const root = await tmpDir("dally-grok-mb-");
   // One character per write forces the pipe to deliver many small chunks, so
   // multi-byte sequences are split across chunk edges.
   await fixtureScript(
@@ -342,7 +342,7 @@ test("redactSecrets: does not destroy useful diagnostics", () => {
 test("runFetch: a secret echoed to stderr does not reach the thrown Error", async () => {
   // End-to-end, through the real child: the property that actually matters is
   // not "redactSecrets works" but "no secret reaches the error a caller holds".
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-secret-"));
+  const root = await tmpDir("dally-grok-secret-");
   const key = "sk-image-E2ELEAK99887766554433";
   await fixtureScript(
     root,
@@ -394,8 +394,8 @@ async function readPid(file) {
   return Number((await fs.readFile(file, "utf8")).trim());
 }
 
-test("runFetch: the timeout kills the whole process group, not just the direct child", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-group-"));
+test("runFetch: the timeout kills the whole process group, not just the direct child", { skip: process.platform === "win32" ? "POSIX process-group kill; Windows uses taskkill /T" : false }, async () => {
+  const root = await tmpDir("dally-grok-group-");
   const gcPidFile = path.join(root, "gc.pid");
   // The child records ITS OWN pid from inside a grandchild, so what we check is
   // genuinely a grandchild of the node process under test.
@@ -447,7 +447,7 @@ test("runFetch: child stderr is capped like stdout", async () => {
   // against MAX_STDOUT_BYTES = 8 MiB for stdout. stdout is capped precisely
   // because "a child can print without bound"; stderr was exempt for no reason
   // that survives a child that loops on a warning.
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-errcap-"));
+  const root = await tmpDir("dally-grok-errcap-");
   await fixtureScript(
     root,
     "fetch.js",
@@ -490,7 +490,7 @@ test("runFetch: child stderr is capped like stdout", async () => {
 // ---------------------------------------------------------------------------
 
 test("runFetch: a trailing debug line with braces does not hijack the payload", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-json-"));
+  const root = await tmpDir("dally-grok-json-");
   await fixtureScript(
     root,
     "fetch.js",
@@ -503,7 +503,7 @@ test("runFetch: a trailing debug line with braces does not hijack the payload", 
 
 test("runFetch: a leading debug line with braces does not hijack the payload", async () => {
   // The direction the original function was written for — both must hold.
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-json2-"));
+  const root = await tmpDir("dally-grok-json2-");
   await fixtureScript(
     root,
     "fetch.js",
@@ -549,7 +549,7 @@ test("balancedJsonObjects: a backslash in noise text does not desync the scan", 
 });
 
 test("runFetch: noise containing a stray backslash before the payload does not fail the fetch", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-bs2-"));
+  const root = await tmpDir("dally-grok-bs2-");
   await fixtureScript(
     root,
     "fetch.js",
@@ -571,7 +571,7 @@ test("runFetch: noise containing a stray backslash before the payload does not f
 // ---------------------------------------------------------------------------
 
 test("runFetch: a trailing VALID json log line does not hijack the payload", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-json3-"));
+  const root = await tmpDir("dally-grok-json3-");
   await fixtureScript(
     root,
     "fetch.js",
@@ -584,7 +584,7 @@ test("runFetch: a trailing VALID json log line does not hijack the payload", asy
 
 test("runFetch: the payload is still found when the diagnostic line comes FIRST", async () => {
   // Contrast direction — shape scoring must work in both orders.
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-grok-json4-"));
+  const root = await tmpDir("dally-grok-json4-");
   await fixtureScript(
     root,
     "fetch.js",

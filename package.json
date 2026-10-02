@@ -13,7 +13,7 @@
     "ai": "node src/run.mjs --section ai",
     "github": "node src/run.mjs --section github",
     "blog:draft": "node src/export-blog-draft.mjs",
-    "test": "node --test test/"
+    "test": "node --test \"test/*.test.mjs\""
   },
   "dependencies": {
     "dotenv": "^16.4.5"

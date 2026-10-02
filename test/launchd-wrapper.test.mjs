@@ -14,7 +14,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WRAPPER = path.join(ROOT, "scripts", "run-daily-wrapper.sh");
 const INSTALLER = path.join(ROOT, "scripts", "install-launchd.mjs");
 
-test("run-daily-wrapper.sh: passes bash -n syntax check", () => {
+test("run-daily-wrapper.sh: passes bash -n syntax check", { skip: process.platform === "win32" ? "launchd wrapper is a macOS bash script" : false }, () => {
   const res = spawnSync("/bin/bash", ["-n", WRAPPER], { encoding: "utf8" });
   assert.equal(res.status, 0, `bash -n failed: ${res.stderr}`);
 });

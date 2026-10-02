@@ -3,6 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { resolveMode, windowRange } from "./report-window.mjs";
 
 // project dir regardless of cwd (running from elsewhere wouldn't re-hit the net or
 // split caches across directories).
@@ -186,16 +187,63 @@ export function assertGrokCreds() {
   return null;
 }
 
-export function loadConfig({ date = null } = {}) {
+export function loadConfig({ date = null, mode = null } = {}) {
   const imageEnabled = (() => {
     const raw = val("IMAGE_ENABLED");
     if (raw == null) return true;
     return raw === "1" || raw.toLowerCase() === "true";
   })();
+  // How the poster PNG is produced.
+  //
+  //   layout (default) — lay the poster out as HTML and screenshot it with a
+  //                      headless browser. Deterministic: the glyphs are the
+  //                      ones we asked for, the numbers are the ones we scraped,
+  //                      and the result is assertable in a unit test.
+  //   image             — the previous path: ask gpt-image-2 to paint the poster
+  //                      from a prompt plus a reference image. Kept working and
+  //                      kept selectable, because it is the only way to get the
+  //                      old look back without a code change.
+  //
+  // The default moved to `layout` on 2026-09-28. The delivered weekly posters
+  // from the image path carry glyphs that OCR identically wrong at 2x and 4x
+  // (教据源, 记亿系统, 框织, 网里巴巴规下), a Fork column with figures GitHub
+  // never published, "今日 Star" printed on ten rows of weekly data, and two
+  // briefed stories missing from the AI poster entirely.
+  const posterRenderer = (() => {
+    const raw = (val("POSTER_RENDERER") || "layout").toLowerCase();
+    return raw === "image" ? "image" : "layout";
+  })();
+  // 2026-09-28 weekly report. `auto` picks weekly on a Beijing Friday and daily
+  // everywhere else, so launchd keeps ONE 09:00 job and the Friday branch lives
+  // in a pure, testable function instead of plist gymnastics. Every capacity
+  // default below is then read off `weekly`, because a 7-day window holds
+  // roughly 7x the material and the daily defaults would silently truncate it
+  // to a fraction of a week.
+  // The CLI --mode wins over REPORT_MODE in the environment, so a backfill or a
+  // one-off weekly needs no .env edit. An absent flag (null) is "not set" and
+  // falls through to the env, then to the Beijing-weekday rule.
+  const modeOverride = mode == null ? val("REPORT_MODE") : mode;
+  const reportMode = resolveMode(date || beijingDateFor(Date.now()), modeOverride);
+  const window = windowRange(date || beijingDateFor(Date.now()), reportMode);
+  const weekly = reportMode === "weekly";
   const config = {
     grokSearchDir: val("GROK_SEARCH_DIR") || DEFAULT_GROK_SEARCH_DIR,
     obsidianDir: val("OBSIDIAN_DIR") || DEFAULT_OBSIDIAN_DIR,
-    days: int("GROK_DAYS", 1),
+    // --- material window (see report-window.mjs) ---
+    // Every collector and every recency gate reads these two numbers. Nothing
+    // downstream recomputes a date, so a weekly is exactly a wider window rather
+    // than a parallel code path.
+    reportMode,
+    isWeekly: weekly,
+    materialWindowDays: window.days,
+    windowStartMs: window.startMs,
+    windowEndMs: window.endMs,
+    windowStartDate: window.startDate,
+    windowEndDate: window.endDate,
+    windowLabel: window.label,
+    // grok-search's own result window, in days. The daily default of 1 would
+    // make a weekly report's web-search step contradict the collected material.
+    days: int("GROK_DAYS", weekly ? window.days : 1),
     // Report in strict-daily mode: when true, tavily/firecrawl sources without
     // timestamps are still included, but the report header annotates the material
     // window (today-only vs broader). Also enables the "来源不足" anti-hallucination
@@ -205,12 +253,15 @@ export function loadConfig({ date = null } = {}) {
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
+    // Topic investigation sits between recency filtering and synthesis. Off
+    // (the default) keeps the one-shot synthesis of every surviving card.
+    topicInvestigation: (val("TOPIC_INVESTIGATION") || "off").toLowerCase() === "on",
     // --- daily hard sources (HN/36kr/arXiv, zero-config public APIs) ---
     // These provide a stable baseline of ≥10 same-day sources so the model never
     // has to hallucinate from memory on quiet days. Each has an independent
     // enable/disable switch and a per-source limit.
     // aggregateDailySources: total limit for combined daily sources (capped).
-    aggregateDailySourceLimit: int("AGGREGATE_DAILY_SOURCE_LIMIT", 15),
+    aggregateDailySourceLimit: int("AGGREGATE_DAILY_SOURCE_LIMIT", weekly ? 60 : 15),
     hnDailyEnabled: (() => {
       const raw = val("HN_DAILY_ENABLED");
       if (raw == null) return true;
@@ -219,32 +270,32 @@ export function loadConfig({ date = null } = {}) {
     // Default 5, not 12: the declared 12 never reached the fetcher, so 5 is what
     // production has actually been producing. Wiring the knob must not silently
     // change the report — an operator who wants 12 sets HN_DAILY_LIMIT=12.
-    hnDailyLimit: int("HN_DAILY_LIMIT", 5),
+    hnDailyLimit: int("HN_DAILY_LIMIT", weekly ? 12 : 5),
     // 2026-08-11 硬关：36kr 经 Firecrawl 的 URL 被重写为 feed 首页，所有条目 URL
     // 相同导致去重合并。待稳定 provider 或 raw RSS 绕过 WAF 后再恢复。
     // （原 KR36_DAILY_ENABLED 环境变量分支位于 `if (true)` 之后，永不可达——
     // 假开关已于 2026-09-25 review 删除，避免误导。）
     kr36DailyEnabled: false,
-    kr36DailyLimit: int("KR36_DAILY_LIMIT", 5),
+    kr36DailyLimit: int("KR36_DAILY_LIMIT", weekly ? 12 : 5),
     arxivDailyEnabled: (() => {
       const raw = val("ARXIV_DAILY_ENABLED");
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    arxivDailyLimit: int("ARXIV_DAILY_LIMIT", 5),
+    arxivDailyLimit: int("ARXIV_DAILY_LIMIT", weekly ? 12 : 5),
     // --- official vendor blog RSS sources (OpenAI / HF) ---
     openaiDailyEnabled: (() => {
       const raw = val("OPENAI_DAILY_ENABLED");
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    openaiDailyLimit: int("OPENAI_DAILY_LIMIT", 4),
+    openaiDailyLimit: int("OPENAI_DAILY_LIMIT", weekly ? 12 : 4),
     hfDailyEnabled: (() => {
       const raw = val("HF_DAILY_ENABLED");
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    hfDailyLimit: int("HF_DAILY_LIMIT", 4),
+    hfDailyLimit: int("HF_DAILY_LIMIT", weekly ? 12 : 4),
     // 2026-09-26 review: the two Google feeds were gated on
     // `config.googleAiDailyEnabled !== false` against keys that did not exist in
     // this object, so they were permanently on with no kill switch (undefined !==
@@ -255,13 +306,13 @@ export function loadConfig({ date = null } = {}) {
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    googleAiDailyLimit: int("GOOGLE_AI_DAILY_LIMIT", 4),
+    googleAiDailyLimit: int("GOOGLE_AI_DAILY_LIMIT", weekly ? 12 : 4),
     googleResearchDailyEnabled: (() => {
       const raw = val("GOOGLE_RESEARCH_DAILY_ENABLED");
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    googleResearchDailyLimit: int("GOOGLE_RESEARCH_DAILY_LIMIT", 4),
+    googleResearchDailyLimit: int("GOOGLE_RESEARCH_DAILY_LIMIT", weekly ? 12 : 4),
     // 2026-09-28 review H2: the daily-publishing half of the hard-source
     // baseline. The five vendor blogs above are high-signal but publish
     // weekly-ish; measured 2026-09-28 all five returned 0 items inside the
@@ -273,25 +324,25 @@ export function loadConfig({ date = null } = {}) {
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    techcrunchAiLimit: int("TECHCRUNCH_AI_DAILY_LIMIT", 5),
+    techcrunchAiLimit: int("TECHCRUNCH_AI_DAILY_LIMIT", weekly ? 12 : 5),
     vergeAiEnabled: (() => {
       const raw = val("VERGE_AI_DAILY_ENABLED");
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    vergeAiLimit: int("VERGE_AI_DAILY_LIMIT", 5),
+    vergeAiLimit: int("VERGE_AI_DAILY_LIMIT", weekly ? 12 : 5),
     qbitaiEnabled: (() => {
       const raw = val("QBITAI_DAILY_ENABLED");
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    qbitaiLimit: int("QBITAI_DAILY_LIMIT", 5),
+    qbitaiLimit: int("QBITAI_DAILY_LIMIT", weekly ? 12 : 5),
     infoqCnEnabled: (() => {
       const raw = val("INFOQ_CN_DAILY_ENABLED");
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    infoqCnLimit: int("INFOQ_CN_DAILY_LIMIT", 5),
+    infoqCnLimit: int("INFOQ_CN_DAILY_LIMIT", weekly ? 12 : 5),
     // -- search model override (default: use GROK_MODEL = synthModel) ---
     // When set, grok-cli.mjs passes this model to grok-search search.js instead
     // of GROK_MODEL, allowing the search step to use a cheaper/faster model while
@@ -300,6 +351,11 @@ export function loadConfig({ date = null } = {}) {
     extra: int("GROK_EXTRA", 10),
     fetchMaxChars: int("GROK_FETCH_MAX_CHARS", 80000),
     aiQueryTemplate: val("AI_QUERY") || "今天{date}最新的AI资讯和大模型动态",
+    // The weekly needs a RANGE, not a day. "{date}" would tell the model to
+    // report on the Friday alone while the collectors hand it a week of
+    // material — and it would faithfully obey the wrong instruction.
+    aiWeeklyQueryTemplate:
+      val("AI_WEEKLY_QUERY") || "最近一周（{start} ~ {end}）的 AI 资讯与大模型动态",
     date,
     // --- linux.do forum AI source prioritization ---
     // When enabled (default), ai-news also scrapes linux.do 前沿快讯 + 人工智能 tag
@@ -378,7 +434,7 @@ export function loadConfig({ date = null } = {}) {
     // 0 = no ceiling (the crawl still runs, it just may extend the run).
     linuxdoEnrichBudgetMs: int("LINUXDO_ENRICH_BUDGET_MS", 120000),
     // Cap on total sources fed to synthesis after merge (community first).
-    sourceMaxTotal: int("AI_SOURCE_MAX_TOTAL", 18),
+    sourceMaxTotal: int("AI_SOURCE_MAX_TOTAL", weekly ? 40 : 18),
     // --- nodeseek.com community AI sources (nodeseek.mjs) ---
     nodeseekEnabled: (() => {
       const raw = val("NODESEEK_ENABLED");
@@ -411,8 +467,8 @@ export function loadConfig({ date = null } = {}) {
     // the child via childEnv) AND the llm-synthesize synthesis call. If you ever want
     // them independent, split into GROK_SEARCH_MODEL / SYNTH_MODEL here.
     synthModel: val("GROK_MODEL") || DEFAULT_SYNTH_MODEL,
-    synthMaxTokens: positiveInt("GROK_SYNTH_MAX_TOKENS", DEFAULT_SYNTH_MAX_TOKENS),
-    synthTimeoutMs: positiveInt("GROK_SYNTH_TIMEOUT_MS", DEFAULT_SYNTH_TIMEOUT_MS),
+    synthMaxTokens: positiveInt("GROK_SYNTH_MAX_TOKENS", weekly ? 10000 : DEFAULT_SYNTH_MAX_TOKENS),
+    synthTimeoutMs: positiveInt("GROK_SYNTH_TIMEOUT_MS", weekly ? 300000 : DEFAULT_SYNTH_TIMEOUT_MS),
     // Optional backstop for the main-writer synthesis call. The main channel's
     // configured writer (e.g. gpt-5.6-luna) can be slow/flaky on some gateways
     // (Cloudflare ~120s cap → 524), which would otherwise degrade the report to a
@@ -476,6 +532,7 @@ export function loadConfig({ date = null } = {}) {
     // When true, generate the poster after the GitHub section and embed it in
     // GitHub.md. Set IMAGE_ENABLED=false to skip entirely (e.g. offline runs).
     imageEnabled,
+    posterRenderer,
     // AI poster defaults to the global image switch, but can be disabled alone.
     aiImageEnabled: (() => {
       const raw = val("AI_IMAGE_ENABLED");
@@ -506,6 +563,21 @@ export function modelSlug(model) {
 // Resolve the alt-channel wiring from config. Returns null when the channel is
 // disabled (single-channel mode). queryTemplate defaults to the main AI query so
 // the alt channel searches the same topic; name/title default from the model slug.
+// 2026-09-28 weekly: a forced weekly for a past date writes into that date's
+// folder, which already holds the shipped daily. Without a period suffix the
+// alt note would overwrite that daily's AI-Gemini.md. Note that a WEEKLY run
+// with no explicit aiAltFile still has to differ from the main channel, which
+// owns "AI-周报" — hence the "-<slug>" form in that case.
+export function altChannelNoteName(config, slug) {
+  const raw = (config?.aiAltFile || (config?.reportMode === "weekly" ? `周报-${slug || "<slug>"}` : `AI-${slug}`))
+    .replace(/\.md$/i, "");
+  return config?.reportMode === "weekly" && !config?.aiAltFile
+    ? `AI-${raw}`
+    : config?.reportMode === "weekly"
+      ? `${raw}-周报`
+      : raw;
+}
+
 export function resolveAltChannel(config) {
   if (!config.aiAltChannel) return null;
   const model = config.aiAltModel || "gemini-3.6-flash";
@@ -515,15 +587,18 @@ export function resolveAltChannel(config) {
   // (the .env.example even shows "AI-Luna.md") so we don't write
   // "AI-Luna.md.md" while linking to "[[AI-Luna.md]]" (2026-09-25 Copilot
   // review).
-  const raw = config.aiAltFile || `AI-${slug}`;
   return {
-    name: raw.replace(/\.md$/i, ""),
+    name: altChannelNoteName(config, slug),
     model,
     queryTemplate: config.aiAltQueryTemplate || config.aiQueryTemplate,
     // Alt writers are slower than grok-4.5 on /chat/completions, so they get a
     // dedicated, larger synthesis budget (default 5min) instead of the shared one.
     synthTimeoutMs: config.aiAltSynthTimeoutMs,
-    title: `# AI 热点（${slug}）· ${config.date}`,
+    // A weekly alt note is a different artefact covering a different span, so
+    // it gets the same period suffix as the main channel.
+    title: config.reportMode === "weekly"
+      ? `# AI 热点周报（${slug}）· ${config.windowLabel}`
+      : `# AI 热点（${slug}）· ${config.date}`,
   };
 }
 

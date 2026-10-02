@@ -1,17 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { acquireSingletonLock, isPidAlive } from "../src/lock.mjs";
-
-// Helper: a temp directory for lock files.
-function tmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "dally-lock-"));
-}
+import { tmpDirSync } from "./helpers/tmp.mjs";
 
 test("acquireSingletonLock: free path -> success, lock file exists, release removes it", () => {
-  const dir = tmpDir();
+  const dir = tmpDirSync("dally-lock-");
   const lp = path.join(dir, "run.lock");
   const lock = acquireSingletonLock(lp);
   assert.equal(lock.error, undefined, "no error on free acquire");
@@ -29,7 +24,7 @@ test("acquireSingletonLock: release does NOT remove a lock another PID now owns"
   // After an age-based takeover the file holds a different PID. Our release must
   // leave that lock alone (its holder is still running); deleting it would let a
   // third process in.
-  const dir = tmpDir();
+  const dir = tmpDirSync("dally-lock-");
   const lp = path.join(dir, "run.lock");
   const lock = acquireSingletonLock(lp);
   assert.equal(lock.error, undefined);
@@ -40,7 +35,7 @@ test("acquireSingletonLock: release does NOT remove a lock another PID now owns"
 });
 
 test("acquireSingletonLock: held by another live PID -> error", () => {
-  const dir = tmpDir();
+  const dir = tmpDirSync("dally-lock-");
   const lp = path.join(dir, "run.lock");
   // Write a lock file holding a PID that is NOT our own, and inject isAlive that
   // confirms it lives. (Writing our own PID would be treated as "us" and taken
@@ -56,7 +51,7 @@ test("acquireSingletonLock: held by another live PID -> error", () => {
 });
 
 test("acquireSingletonLock: stale lock (dead PID) -> taken over", () => {
-  const dir = tmpDir();
+  const dir = tmpDirSync("dally-lock-");
   const lp = path.join(dir, "run.lock");
   // Write a lock with a nonexistent PID (999999 is unrealistically high).
   fs.writeFileSync(lp, "999999\n2026-08-09T00:00:00.000Z\n");
@@ -73,7 +68,7 @@ test("acquireSingletonLock: our own PID in the lock file -> taken over (no crash
   // Edge case: if the lock file from a previous run still exists and holds
   // our PID (e.g., was already here when we started), we should take over
   // rather than refuse ourselves.
-  const dir = tmpDir();
+  const dir = tmpDirSync("dally-lock-");
   const lp = path.join(dir, "run.lock");
   fs.writeFileSync(lp, `${process.pid}\n2026-08-09T00:00:00.000Z\n`);
   const lock = acquireSingletonLock(lp, { isAlive: () => true });
@@ -89,7 +84,7 @@ test("acquireSingletonLock: very old lock with a live PID -> taken over (age-bas
   // 24h ago gives huge margin over the default 30min ceiling. (A timestamp exactly
   // on the boundary is flaky: if write and check land in the same millisecond, age
   // == MAX and the strict `>` fails — a near-boundary fixture, not a staleness case.)
-  const dir = tmpDir();
+  const dir = tmpDirSync("dally-lock-");
   const lp = path.join(dir, "run.lock");
   fs.writeFileSync(lp, `424242\n${new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()}\n`);
   const lock = acquireSingletonLock(lp, { isAlive: () => true });
@@ -104,7 +99,7 @@ test("acquireSingletonLock: empty lock file (no PID written) -> taken over", () 
   // is empty. Number('') is 0, and process.kill(0, 0) probes the process GROUP
   // (which always exists) — so a 0 PID must be handled as stale, never as a live
   // holder. Uses the real isAlive to prove the guard beats process.kill(0, 0).
-  const dir = tmpDir();
+  const dir = tmpDirSync("dally-lock-");
   const lp = path.join(dir, "run.lock");
   fs.writeFileSync(lp, "");
   const lock = acquireSingletonLock(lp);
@@ -117,7 +112,7 @@ test("acquireSingletonLock: empty lock file (no PID written) -> taken over", () 
 test("acquireSingletonLock: no timestamp + live PID -> refused (conservative)", () => {
   // A lock with no readable timestamp (old/corrupt format) can't be age-bounded, so
   // we fall back to the PID probe: a live holder refuses, a dead one is taken over.
-  const dir = tmpDir();
+  const dir = tmpDirSync("dally-lock-");
   const lp = path.join(dir, "run.lock");
   fs.writeFileSync(lp, "424242\n\n");
   const lock = acquireSingletonLock(lp, { isAlive: () => true });
@@ -130,7 +125,7 @@ test("acquireSingletonLock: live PID + fresh heartbeat -> refused (never steal f
   // take over a LIVE run once the run outlasted the ceiling. A fresh heartbeat
   // proves the holder is alive and working — refusal is unconditional while the
   // beat is fresh, regardless of how long the run has been going.
-  const dir = tmpDir();
+  const dir = tmpDirSync("dally-lock-");
   const lp = path.join(dir, "run.lock");
   const now = new Date().toISOString();
   fs.writeFileSync(lp, `424242\n${now}\n${now}\n`);
@@ -143,7 +138,7 @@ test("acquireSingletonLock: live PID + stale heartbeat -> taken over (crashed ru
   // The heartbeat is the freshest evidence the holder lived. 10 minutes of
   // silence (> the 5min default ceiling) means the holder's heart stopped —
   // a crash leftover whose PID may now belong to an unrelated process.
-  const dir = tmpDir();
+  const dir = tmpDirSync("dally-lock-");
   const lp = path.join(dir, "run.lock");
   fs.writeFileSync(
     lp,
@@ -155,7 +150,7 @@ test("acquireSingletonLock: live PID + stale heartbeat -> taken over (crashed ru
 });
 
 test("acquireSingletonLock: heartbeat refreshes the lock file while held", async () => {
-  const dir = tmpDir();
+  const dir = tmpDirSync("dally-lock-");
   const lp = path.join(dir, "run.lock");
   const prev = process.env.LOCK_HEARTBEAT_INTERVAL_MS;
   process.env.LOCK_HEARTBEAT_INTERVAL_MS = "20";
@@ -177,7 +172,7 @@ test("acquireSingletonLock: heartbeat refreshes the lock file while held", async
 test("acquireSingletonLock: heartbeat stops itself once the lock no longer holds our PID", async () => {
   // After another launcher takes the lock over, our interval must not clobber
   // THEIR lock file with our PID — the ownership re-check stops the interval.
-  const dir = tmpDir();
+  const dir = tmpDirSync("dally-lock-");
   const lp = path.join(dir, "run.lock");
   const prev = process.env.LOCK_HEARTBEAT_INTERVAL_MS;
   process.env.LOCK_HEARTBEAT_INTERVAL_MS = "20";
@@ -215,7 +210,7 @@ test("isPidAlive: returns false for a nonexistent PID", () => {
 // run.mjs can report.
 
 test("acquireSingletonLock: a lock created as a DIRECTORY throws instead of spinning", () => {
-  const dir = tmpDir();
+  const dir = tmpDirSync("dally-lock-");
   const lp = path.join(dir, "run.lock");
   // A directory where the lock file should be: openSync("wx") throws EISDIR, and
   // readFileSync/unlinkSync on a directory also throw on every iteration.
@@ -233,10 +228,10 @@ test("acquireSingletonLock: a lock created as a DIRECTORY throws instead of spin
   assert.ok(Date.now() - t0 < 2000, "fails fast (no 100% CPU spin)");
 });
 
-test("acquireSingletonLock: an unremovable stale lock throws after bounded retries", () => {
+test("acquireSingletonLock: an unremovable stale lock throws after bounded retries", { skip: process.platform === "win32" ? "chmod 0o500 does not deny unlink on Windows" : false }, () => {
   // Readable + stale (dead PID), but the parent directory denies unlink, so the
   // guarded unlink never takes effect. The loop must give up, not spin.
-  const dir = tmpDir();
+  const dir = tmpDirSync("dally-lock-");
   const lp = path.join(dir, "run.lock");
   // A PID that cannot be alive, plus an ancient timestamp -> unambiguously stale.
   fs.writeFileSync(lp, `999999\n2020-01-01T00:00:00.000Z\n2020-01-01T00:00:00.000Z\n`);
@@ -254,7 +249,7 @@ test("acquireSingletonLock: an unremovable stale lock throws after bounded retri
 test("acquireSingletonLock: an unreadable lock throws instead of spinning", () => {
   // chmod 000: readFileSync throws, so `observed` stays null and the guarded
   // unlink can never match -> previously an infinite loop.
-  const dir = tmpDir();
+  const dir = tmpDirSync("dally-lock-");
   const lp = path.join(dir, "run.lock");
   fs.writeFileSync(lp, `999999\n2020-01-01T00:00:00.000Z\n2020-01-01T00:00:00.000Z\n`);
   fs.chmodSync(lp, 0o000);
@@ -278,7 +273,7 @@ test("acquireSingletonLock: an unreadable lock throws instead of spinning", () =
 
 test("acquireSingletonLock: a stale lock that CAN be removed is still taken over", () => {
   // The bounded-retry guard must not break the normal crash-leftover takeover.
-  const dir = tmpDir();
+  const dir = tmpDirSync("dally-lock-");
   const lp = path.join(dir, "run.lock");
   fs.writeFileSync(lp, `999999\n2020-01-01T00:00:00.000Z\n2020-01-01T00:00:00.000Z\n`);
   const lock = acquireSingletonLock(lp);

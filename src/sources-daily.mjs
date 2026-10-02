@@ -9,6 +9,8 @@
 
 import { runFetch } from "./grok-cli.mjs";
 import { AI_TITLE_RE } from "./community.mjs";
+import { materialWindow, cacheKeyFor } from "./report-window.mjs";
+import { sanitizeSnippet } from "./snippet-hygiene.mjs";
 
 // Attach per-source failure diagnostics to a source array WITHOUT making them
 // enumerable, so the array still behaves like a plain list everywhere it is
@@ -28,8 +30,32 @@ function attachDailyDiagnostics(sources, provider, failures) {
   return sources;
 }
 
-/** Merge the per-source diagnostics of several collector arrays into one object. */
-function collectDailyDiagnostics(arrays) {
+// 2026-09-28 smoke test: "fetched fine, produced nothing" was the one hard-source
+// outcome still invisible. A fetcher that reaches the network, parses a
+// well-formed body and ends up with [] returned a bare array, and
+// attachDailyDiagnostics' `!failures.length` early-return then skipped it — so
+// 36kr, arXiv and HN could go completely quiet and the report still printed a
+// clean ✅ over forum chatter. The vendor RSS path already named this case
+// (H1, 2026-09-28); this brings the remaining three onto the same footing.
+//
+// `parsed` is how many entries the body actually yielded, so the diagnostic can
+// distinguish "the feed is empty" from "the feed had entries and the window
+// emptied them" — the reader is sent to the calendar, not the network.
+function reportEmpty(sources, provider, parsed) {
+  if (!Array.isArray(sources)) return sources;
+  if (sources.length > 0) return sources;
+  // Never overwrite an explanation that is already there. A run that produced
+  // zero sources AND recorded per-item transport failures is better described
+  // by those failures than by a generic "the window emptied it" — the window
+  // never got a chance. Reusing the same array (rather than a fresh []) keeps
+  // the original diagnostics attached.
+  if (sources.dailyDiagnostics?.failureCount > 0) return sources;
+  return attachDailyDiagnostics(sources, provider, [
+    { reason: "no-fresh-items-in-window", parsed: Number(parsed) || 0 },
+  ]);
+}
+
+/** Merge the per-source diagnostics of several collector arrays into one object. */function collectDailyDiagnostics(arrays) {
   const out = {};
   for (const arr of arrays) {
     const d = arr && arr.dailyDiagnostics;
@@ -76,6 +102,42 @@ async function mapWithConcurrency(items, concurrency, fn) {
 }
 
 /**
+ * The one-line summary for a Hacker News card, taken from what HN itself says.
+ *
+ * HN's `text` field holds HTML and only exists for self-posts (Ask HN, text
+ * submissions); a link post has a title and nothing else. So the honest answer
+ * for most HN cards is the empty string.
+ *
+ * This deliberately does NOT fall back to the title. A summary that restates
+ * the headline is not a summary: the poster brief asks for one line of context
+ * per item, and an echoed title makes the renderer print the story twice, which
+ * is exactly the "same stories reprinted across panels" defect the shipped
+ * 2026-09-25 AI poster exhibited. HN's score is likewise excluded — it is
+ * forum chrome, it stays on the card as a `score` field for ranking, and it
+ * must never reach a poster or a paragraph of prose.
+ */
+function hnSummary(item) {
+  const raw = typeof item?.text === "string" ? item.text : "";
+  if (!raw.trim()) return "";
+  const text = raw
+    // <p> is HN's paragraph separator; dropping the tags leaves the words.
+    .replace(/<\/?p>/gi, " ")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;|&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  if (!text) return "";
+  // The same hygiene every other snippet in the pipeline gets, so an HN card
+  // cannot smuggle prompt-shaped text past the collectors that do run it.
+  return sanitizeSnippet(text, { maxChars: 300 });
+}
+
+/**
  * Fetch today's top Hacker News stories, filter by AI relevance via keyword,
  * return same-day source cards. Uses firebase REST API — zero config, no auth.
  * Merges topstories + beststories (dedup by id) for broader coverage.
@@ -103,11 +165,14 @@ export async function fetchHackerNewsDaily(config, { limit = 5, fetchImpl = fetc
       unique.push(id);
     }
 
-    // Get today's Beijing start time in epoch ms
-    const todayStart = beijingMidnightMs(config.date);
+    // 2026-09-28 weekly: the window comes from config, not from a local
+    // recomputation. A week of top+best is ~7x a day's, so HN_BATCH has to grow
+    // with the window or the scan truncates at the page cap long before the
+    // window's own lower bound.
+    const win = materialWindow(config);
 
     // Fetch item details with bounded concurrency, cap at HN_BATCH.
-    const batch = unique.slice(0, HN_BATCH);
+    const batch = unique.slice(0, Math.max(HN_BATCH, win.days * HN_BATCH));
     const items = await mapWithConcurrency(batch, HN_ITEM_CONCURRENCY, async (id) => {
       try {
         const r = await fetchImpl(HN_ITEM(id), {
@@ -128,7 +193,9 @@ export async function fetchHackerNewsDaily(config, { limit = 5, fetchImpl = fetc
       if (!item || !item.title || !item.url) continue;
       if (item.type !== "story") continue;
       const publishedAt = (item.time || 0) * 1000; // HN time is unix seconds
-      if (publishedAt < todayStart) continue; // not today
+      // Both bounds: a lower-bound-only gate would admit a story whose `time`
+      // is in the future (clock skew on HN's side, or a bad import).
+      if (publishedAt < win.startMs || publishedAt >= win.endMs) continue;
 
       // AI-relevance keyword filter (same as community.mjs AI_TITLE_RE style)
       if (!isAiRelevant(item.title, item.url)) continue;
@@ -136,16 +203,34 @@ export async function fetchHackerNewsDaily(config, { limit = 5, fetchImpl = fetc
       sources.push({
         url: item.url,
         title: String(item.title).slice(0, 300),
-        snippet:
-          String(item.title).slice(0, 500) +
-          (item.score ? ` (score: ${item.score})` : ""),
+        // The summary is whatever HN actually says about the story, and nothing
+        // else. It used to be `title + " (score: N)"`, which put forum chrome
+        // into user-visible text (the score was painted straight onto the
+        // poster) and handed the poster a "summary" that was a copy of the
+        // headline. A link post carries no body, so it gets no summary — an
+        // honest blank the renderer can skip, instead of a duplicate to print.
+        snippet: hnSummary(item),
         provider: "hackernews",
         score: item.score || 0,
         publishedAt,
       });
       if (sources.length >= limit) break;
     }
-    return attachDailyDiagnostics(sources, "hackernews", failures);
+    // How many item bodies actually came back. Feeds only the "fetched fine,
+    // kept nothing" diagnostic below, so an operator can tell whether the
+    // window emptied a real result set or the detail fetch itself came back
+    // empty. reportEmpty is a no-op when sources is non-empty OR when failures
+    // is already populated, so a healthy run and a run with per-item errors
+    // both keep exactly the diagnostics they had before.
+    const parsedBodies = items.reduce(
+      (n, r) => n + (r.status === "fulfilled" && r.value ? 1 : 0),
+      0,
+    );
+    return reportEmpty(
+      attachDailyDiagnostics(sources, "hackernews", failures),
+      "hackernews",
+      parsedBodies,
+    );
   } catch (err) {
     return attachDailyDiagnostics([], "hackernews", [
       { reason: err?.code || err?.name || "error" },
@@ -221,13 +306,13 @@ export async function fetch36krDaily(config, { limit = 5, runFetch: doFetch } = 
       maxChars: 20000,
       provider: "auto",
       cacheFile: config.cacheDir
-        ? `${config.cacheDir}/${config.date}-36kr-feed.txt`
+        ? `${config.cacheDir}/${cacheKeyFor(config)}-36kr-feed.txt`
         : undefined,
     });
     const text = res?.text || "";
     if (!text) return [];
 
-    const todayStart = beijingMidnightMs(config.date);
+    const win = materialWindow(config);
 
     // 1) Firecrawl/Tavily markdown style: `### [Title](url)` lines
     const items = [];
@@ -261,7 +346,7 @@ export async function fetch36krDaily(config, { limit = 5, runFetch: doFetch } = 
         item.pubDate && new Date(item.pubDate).getTime()
           ? new Date(item.pubDate).getTime()
           : Date.now();
-      if (item.pubDate && publishedAt < todayStart) continue;
+      if (item.pubDate && (publishedAt < win.startMs || publishedAt >= win.endMs)) continue;
 
       sources.push({
         url,
@@ -273,7 +358,7 @@ export async function fetch36krDaily(config, { limit = 5, runFetch: doFetch } = 
       });
       if (sources.length >= limit) break;
     }
-    return sources;
+    return reportEmpty(sources, "36kr", items.length);
   } catch (err) {
     return attachDailyDiagnostics([], "36kr", [{ reason: err?.code || err?.name || "error" }]);
   }
@@ -407,7 +492,7 @@ export async function fetchOfficialBlogRss(
     const res = await fetch(url, config, {
       maxChars: 60000,
       provider: "direct",
-      cacheFile: config.cacheDir ? `${config.cacheDir}/${config.date}-${site}-feed.txt` : undefined,
+      cacheFile: config.cacheDir ? `${config.cacheDir}/${cacheKeyFor(config)}-${site}-feed.txt` : undefined,
     });
     const text = res?.text || "";
     if (!text) return attachDailyDiagnostics([], site, [{ reason: "empty-response" }]);
@@ -416,20 +501,25 @@ export async function fetchOfficialBlogRss(
       return attachDailyDiagnostics([], site, [{ reason: "no-rss-items" }]);
     }
 
-    const todayStart = beijingMidnightMs(config.date);
-    // Official blogs don't publish daily; grace 1 day so yesterday's posts are
-    // still treated as "today" for the material window.
+    // Official blogs don't publish daily; grace 1 day so yesterday's post is
+    // still inside a DAILY run's window.
     //
     // 2026-09-27 review C1: the gate used to be a strict `pubDateMs < todayStart`
     // and the grace was attached only to the card that had already survived it —
     // so the field downstream honours was dead code and the comment above was
     // false. A Beijing-yesterday post measured as dropped. The cutoff now
     // expresses the window this source is actually given.
+    //
+    // 2026-09-28 weekly: the grace is an ADDITIONAL widening on top of the
+    // material window, not a replacement for it. Under weekly the window is
+    // already 7 days, so widening it by another day is what the constant has
+    // always meant — "a bit more than the window", applied uniformly.
     const BLOG_GRACE_DAYS = 1;
-    const windowStart = todayStart - BLOG_GRACE_DAYS * 24 * 60 * 60 * 1000;
+    const win = materialWindow(config);
+    const windowStart = win.startMs - BLOG_GRACE_DAYS * 24 * 60 * 60 * 1000;
     const sources = [];
     for (const item of items) {
-      if (item.pubDateMs != null && item.pubDateMs < windowStart) continue;
+      if (item.pubDateMs != null && (item.pubDateMs < windowStart || item.pubDateMs >= win.endMs)) continue;
       if (!isAiRelevant(item.title, item.url)) continue;
       sources.push({
         url: item.url,
@@ -571,15 +661,17 @@ export async function fetchArxivDaily(config, { limit = 5, runFetch: doFetch } =
       maxChars: 80000,
       provider: "direct",
       cacheFile: config.cacheDir
-        ? `${config.cacheDir}/${config.date}-arxiv-feed.txt`
+        ? `${config.cacheDir}/${cacheKeyFor(config)}-arxiv-feed.txt`
         : undefined,
     });
     const text = res?.text || "";
     if (!text) return [];
 
-    const todayStart = beijingMidnightMs(config.date);
     const ARXIV_GRACE_DAYS = 2;
-    const arxivWindowStart = todayStart - ARXIV_GRACE_DAYS * 24 * 60 * 60 * 1000;
+    // Same relationship as BLOG_GRACE_DAYS: an extra widening layered on the
+    // material window, applied identically in both modes.
+    const arxivWin = materialWindow(config);
+    const arxivWindowStart = arxivWin.startMs - ARXIV_GRACE_DAYS * 24 * 60 * 60 * 1000;
 
     // Parse Atom entries via regex
     const entryRegex = /<entry>([\s\S]*?)<\/entry>/gi;
@@ -606,7 +698,7 @@ export async function fetchArxivDaily(config, { limit = 5, runFetch: doFetch } =
       // the field was dead code. On a 09:00 Beijing run this dropped the whole
       // previous Beijing day's batch — measured empty. The window is now
       // expressed in the cutoff itself.
-      if (publishedAt < arxivWindowStart) continue;
+      if (publishedAt < arxivWindowStart || publishedAt >= arxivWin.endMs) continue;
 
       // arXiv abstracts are often very technical; always include them
       sources.push({
@@ -624,7 +716,7 @@ export async function fetchArxivDaily(config, { limit = 5, runFetch: doFetch } =
       });
       if (sources.length >= limit) break;
     }
-    return sources;
+    return reportEmpty(sources, "arxiv", entries.length);
   } catch (err) {
     return attachDailyDiagnostics([], "arxiv", [{ reason: err?.code || err?.name || "error" }]);
   }

@@ -47,6 +47,28 @@ export function trackChild(child, { detached = false } = {}) {
 
 // Synchronous, best-effort reap of every tracked child. Safe to call from
 // process.on('exit') and from SIGINT/SIGTERM handlers.
+function killOne(child) {
+  try {
+    // No signal string on win32: child.kill("SIGKILL") is not a portable kill.
+    if (process.platform === "win32") child.kill();
+    else child.kill("SIGKILL");
+  } catch {
+    /* already gone */
+  }
+}
+
+// POSIX group kill is `process.kill(-pid)`. This runs from process.on("exit"),
+// which cannot start a process, so Windows cannot call taskkill here — the
+// single-pid kill is the only synchronous option. grok-cli's timeout path does
+// the tree kill (taskkill /T) while the event loop is still alive.
+function killGroup(pid) {
+  if (process.platform === "win32") {
+    throw new Error("no process groups on win32");
+  }
+  process.kill(-pid, "SIGKILL");
+  return true;
+}
+
 export function killAllChildren() {
   for (const child of children) {
     const pid = child.pid;
@@ -54,8 +76,7 @@ export function killAllChildren() {
     let done = false;
     if (group) {
       try {
-        process.kill(-pid, "SIGKILL");
-        done = true;
+        done = killGroup(pid);
       } catch {
         /* group already gone — fall back to the single pid */
       }
@@ -64,11 +85,7 @@ export function killAllChildren() {
       detachedChildren.delete(pid);
       continue;
     }
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      /* already gone */
-    }
+    killOne(child);
   }
   children.clear();
   detachedChildren.clear();

@@ -171,7 +171,10 @@ try {
 
   console.log(`已注册 launchd 定时任务:`);
   console.log(`  label: ${LABEL}`);
-  console.log(`  触发:  每天 09:00（本地时区）`);
+  // The plist stays a single unconditional 09:00 job: the Friday branch lives in
+  // run.mjs (resolveMode reads the Beijing weekday), so there is no second
+  // LaunchAgent and no new boot-out/replace step to reason about at upgrade.
+  console.log(`  触发:  每天 09:00（本地时区），周五自动跑周报`);
   console.log(`  日志:  ${LOG_DIR}/launchd.{out,err}.log`);
   console.log(`  卸载:  node scripts/uninstall-launchd.mjs`);
   // Note: macOS may sleep through the scheduled time; use pmset wake schedule if

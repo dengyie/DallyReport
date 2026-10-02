@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { trackChild } from "./child-tracker.mjs";
@@ -49,6 +49,23 @@ export function truncateRawForParseError(raw) {
 // fallback is not optional.
 function killGroup(child, sig) {
   if (typeof child?.pid === "number" && child.pid > 0) {
+    if (process.platform === "win32") {
+      // No process groups and no SIGKILL. `/T` is the tree kill; `/F` is the
+      // backstop whether the caller asked for SIGTERM or SIGKILL — Windows has
+      // no graceful signal to send a console-less node child.
+      try {
+        const res = spawnSync("taskkill", ["/T", "/F", "/PID", String(child.pid)], { stdio: "ignore" });
+        if (res.status === 0) return;
+      } catch {
+        /* fall through */
+      }
+      try {
+        child.kill();
+      } catch {
+        /* already gone */
+      }
+      return;
+    }
     try {
       process.kill(-child.pid, sig);
       return;

@@ -15,10 +15,23 @@ import {
   generateAiPoster,
   hasAiPosterHeadlines,
 } from "./image-gen.mjs";
+import {
+  aiPosterFileName,
+  githubPosterFileName,
+  githubPosterPeriod,
+  aiPosterPeriod,
+} from "./poster/period.mjs";
+import {
+  renderGithubPoster,
+  renderAiPoster,
+  buildStories,
+  buildStoriesFromBody,
+} from "./poster/index.mjs";
 import { writeSection, rescueMarkdown } from "./obsidian.mjs";
 import { enrichLinuxdoPosts } from "./linuxdo.mjs";
 import { acquireSingletonLock } from "./lock.mjs";
 import { killAllChildren } from "./child-tracker.mjs";
+import { REPORT_MODES } from "./report-window.mjs";
 
 // Render the raw linux.do news/34 posts (all of today's, verbatim) as a self-contained
 // 辅助资料 (auxiliary materials) note. Pure markdown, no pollution: it lists titles,
@@ -69,20 +82,34 @@ function parseArgs(argv) {
   const args = [...argv];
   let section = null;
   let date = null;
+  let mode = null;
   while (args.length) {
     const a = args.shift();
     if (a === "--section") section = args.shift();
     else if (a === "--date") date = args.shift();
+    else if (a === "--mode") mode = args.shift();
     else if (a === "--help" || a === "-h") return { help: true };
   }
-  return { section, date };
+  return { section, date, mode };
 }
 
 async function run() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
-    console.log("Usage: node src/run.mjs [--section ai|ai-alt|github] [--date YYYY-MM-DD]");
+    console.log(
+      "Usage: node src/run.mjs [--section ai|ai-alt|github] [--date YYYY-MM-DD] [--mode daily|weekly|auto]",
+    );
+    console.log("  --mode auto(默认)  北京时间周五自动跑周报，其余日期跑日报");
     process.exit(0);
+  }
+
+  // 2026-09-28 weekly: validate --mode BEFORE the lock, config load and any
+  // section, so an operator typo costs a message and nothing else. A mode that
+  // reached config.mjs would otherwise throw from deep inside loadConfig, after
+  // the lock was taken.
+  if (opts.mode != null && !REPORT_MODES.includes(opts.mode)) {
+    console.error(`未知 mode: ${opts.mode}（可选: ${REPORT_MODES.join(", ")}）`);
+    process.exit(2);
   }
 
   // Default to today's Beijing date; --date overrides it for backfill — e.g. run
@@ -108,7 +135,10 @@ async function run() {
     date = opts.date;
   }
 
-  const config = loadConfig({ date });
+  // The CLI flag wins over REPORT_MODE in the environment, so a backfill or a
+  // one-off weekly does not require editing .env. Omitted, loadConfig falls back
+  // to the env and then to the Beijing-weekday rule (Friday = weekly).
+  const config = loadConfig({ date, mode: opts.mode });
 
   // Single-instance guard: refuse to start if another run is already in flight (a
   // double-fired cron, or a manual run while the scheduled one is in image-gen).
@@ -188,7 +218,13 @@ async function run() {
       // into synthesis is recorded verbatim. Best-effort: never blocks the section.
       // Full-body enrichment runs once, after the poster steps, in the shared
       // post-pass below — not here, so a dual-channel day crawls each topic once.
-      if (Array.isArray(res?.linuxdoRaw) && res.linuxdoRaw.length) {
+      //
+      // 2026-09-28 weekly: skipped. The file is a verbatim per-post archive of
+      // what the section consumed; a week's haul is hundreds of posts, which
+      // would be an unreadable wall of text in the vault and would then be
+      // enriched (a full-body crawl per topic) at 7x the cost, for an artifact
+      // nobody reads. The cache still holds the same material.
+      if (!config.isWeekly && Array.isArray(res?.linuxdoRaw) && res.linuxdoRaw.length) {
         const aux = renderLinuxDoPostAuxiliary(res.linuxdoRaw, config.date);
         const auxWritten = await writeSection(config, `${res.name}-辅助资料`, aux);
         if (auxWritten.error) {
@@ -242,11 +278,27 @@ async function run() {
     const gv = gr.status === "fulfilled" ? gr.value : null;
     if (gv && gv.ok && gv.repos && gv.repos.length > 0) {
       try {
-        const poster = await generateGithubPoster(config, gv.repos, {});
+        // POSTER_RENDERER picks the producer. Both return the same {ok, file}
+        // shape, so everything below — the embed, the rewrite, the summary line
+        // — is identical either way.
+        const poster =
+          config.posterRenderer === "image"
+            ? await generateGithubPoster(config, gv.repos, {})
+            : await renderGithubPoster({
+                config,
+                repos: gv.repos,
+                deps: {
+                  period: githubPosterPeriod(config),
+                  outputFile: githubPosterFileName(config),
+                },
+              });
         if (poster.ok && poster.file) {
           // Embed the poster into GitHub.md (Obsidian embed via bare filename,
           // same-folder, so it survives vault moves). Rebuild markdown + rewrite.
-          const embedded = embedPosterInMarkdown(gv.markdown, "GitHub.png");
+          // Must be the SAME name the poster was written under — a weekly writes
+          // GitHub-周报.png, and embedding [[GitHub.png]] would silently point at
+          // the daily's poster instead.
+          const embedded = embedPosterInMarkdown(gv.markdown, githubPosterFileName(config));
           const written2 = await writeSection(config, gv.name, embedded);
           if (written2.error) {
             // Text report is already on disk from the first write; embedding just
@@ -278,14 +330,36 @@ async function run() {
     const aiIndex = names.indexOf("ai");
     const ar = results[aiIndex];
     const av = ar.status === "fulfilled" ? ar.value : null;
-    // Poster/alignment: render the sources the article actually cited so the
-    // poster visualizes the article instead of a different source set.
+    // Poster input. Two candidates, and the note body wins: the cited source
+    // cards carry raw third-party headlines (mostly English, often forum
+    // register), while the body already states each event as a finished
+    // Chinese sentence and is the text de-clustering actually shaped. The
+    // source cards remain the fallback for a degraded body, which is the one
+    // case where there are no bullets to render.
     const posterSources = av?.posterSources?.length ? av.posterSources : av?.sources;
-    if (av && av.ok && hasAiPosterHeadlines(posterSources)) {
+    const posterPeriod = aiPosterPeriod(config);
+    const bodyStories =
+      config.posterRenderer === "layout" ? buildStoriesFromBody(av?.markdown, { period: posterPeriod }) : [];
+    // 3 is not a tuned number: two bullets make a two-item poster that looks
+    // broken next to a full note, so below that the cited cards are the better
+    // artefact even though their prose is worse.
+    const useBody = bodyStories.length >= 3;
+    const posterStories = useBody ? bodyStories : buildStories(posterSources, { period: posterPeriod });
+    if (av && av.ok && (useBody || hasAiPosterHeadlines(posterSources))) {
       try {
-        const poster = await generateAiPoster(config, posterSources, {});
+        const poster =
+          config.posterRenderer === "image"
+            ? await generateAiPoster(config, posterSources, {})
+            : await renderAiPoster({
+                config,
+                stories: posterStories,
+                deps: {
+                  period: posterPeriod,
+                  outputFile: aiPosterFileName(config),
+                },
+              });
         if (poster.ok && poster.file) {
-          const embedded = embedPosterInMarkdown(av.markdown, "AI.png");
+          const embedded = embedPosterInMarkdown(av.markdown, aiPosterFileName(config));
           const written2 = await writeSection(config, av.name, embedded);
           if (written2.error) {
             poster.embedError = written2.error;
@@ -317,10 +391,16 @@ async function run() {
   // bounds itself to LINUXDO_ENRICH_BUDGET_MS and RETURNS the partial results
   // instead of throwing, so a slow browser can't stall the summary and everything
   // archived is linked (nothing on disk goes unreferenced).
-  const cardSections = results
-    .filter((r) => r.status === "fulfilled")
-    .map((r) => r.value)
-    .filter((v) => Array.isArray(v?.linuxdoRaw) && v.linuxdoRaw.length && !v.auxError);
+  //
+  // 2026-09-28 weekly: skipped entirely for the same reason the aux write is —
+  // there is no aux file to enrich, and crawling a week of topics is 7x the
+  // browser time for an artifact that is not produced.
+  const cardSections = (config.isWeekly
+    ? []
+    : results
+        .filter((r) => r.status === "fulfilled")
+        .map((r) => r.value)
+        .filter((v) => Array.isArray(v?.linuxdoRaw) && v.linuxdoRaw.length && !v.auxError));
   let posts = [];
   if (cardSections.length) {
     try {
@@ -378,7 +458,13 @@ async function run() {
     return `❌ ${n}: ${r.reason?.message || r.reason}`;
   });
   if (posterLines.length) summary.push(...posterLines);
-  const text = `\nDallyReport ${config.date}\n` + summary.join("\n") + "\n";
+  // 2026-09-28 weekly: the launchd log is where an operator checks "what ran".
+  // A weekly headlined with the bare Friday would be indistinguishable from a
+  // daily in the log tail, so the span travels with it.
+  const runHeader = config.isWeekly
+    ? `DallyReport 周报 ${config.windowLabel}`
+    : `DallyReport ${config.date}`;
+  const text = `\n${runHeader}\n` + summary.join("\n") + "\n";
   // Flush stdout, then exit(0) deterministically. Forcing the exit releases every
   // handle (undici keep-alive sockets, CDP connections, child processes) instead of
   // letting the process hang a few seconds on background connections after the

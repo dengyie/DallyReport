@@ -17,8 +17,9 @@ test("trackChild + killAllChildren: kills every tracked child with SIGKILL", () 
   trackChild(a);
   trackChild(b);
   killAllChildren();
-  assert.deepEqual(a.signals, ["SIGKILL"]);
-  assert.deepEqual(b.signals, ["SIGKILL"]);
+  const sig = process.platform === "win32" ? undefined : "SIGKILL";
+  assert.deepEqual(a.signals, [sig]);
+  assert.deepEqual(b.signals, [sig]);
   // killAllChildren clears the registry, so a second call sends nothing new.
   a.signals.length = 0;
   killAllChildren();
@@ -88,7 +89,7 @@ test("trackChild: a detached child's pid is pruned when it exits, never reused a
       [],
       "a recycled pid must never receive a group kill — it could hit the report itself",
     );
-    assert.deepEqual(second.signals, ["SIGKILL"], "the new child is still reaped by its single pid");
+    assert.deepEqual(second.signals, [process.platform === "win32" ? undefined : "SIGKILL"], "the new child is still reaped by its single pid");
   } finally {
     process.kill = original;
   }
@@ -112,7 +113,7 @@ test("trackChild: a detached child's pid is pruned on 'error' as well", () => {
     killAllChildren();
 
     assert.deepEqual(groupSignals, [], "error path must prune the detached pid too");
-    assert.deepEqual(second.signals, ["SIGKILL"]);
+    assert.deepEqual(second.signals, [process.platform === "win32" ? undefined : "SIGKILL"]);
   } finally {
     process.kill = original;
   }
@@ -129,9 +130,61 @@ test("trackChild: a still-live detached child IS group-killed (the original beha
     c.pid = 313131;
     trackChild(c, { detached: true });
     killAllChildren();
-    assert.deepEqual(groupSignals, [{ pid: -313131, sig: "SIGKILL" }], "grandchildren are reaped");
-    assert.deepEqual(c.signals, [], "no redundant single-pid kill when the group kill worked");
+    if (process.platform === "win32") {
+      // process.on("exit") cannot spawn taskkill, and there is no process group.
+      assert.deepEqual(groupSignals, [], "win32 does not signal a negative pid");
+      assert.deepEqual(c.signals, [undefined], "falls back to a single-pid kill");
+    } else {
+      assert.deepEqual(groupSignals, [{ pid: -313131, sig: "SIGKILL" }], "grandchildren are reaped");
+      assert.deepEqual(c.signals, [], "no redundant single-pid kill when the group kill worked");
+    }
   } finally {
     process.kill = original;
   }
+});
+
+test("every module that can spawn a child registers it for reaping", async () => {
+  // The invariant child-tracker.mjs exists to hold: macOS does not propagate a
+  // signal to children, so a spawn that skips trackChild leaves an orphan when
+  // the 09:00 job is interrupted. The shot.mjs Chrome launch was the one that
+  // did — a headless browser held a profile lock and left its temp dir behind,
+  // because the `finally` that cleans it never runs inside a signal handler.
+  //
+  // This is a source-level scan on purpose: the failure mode has no runtime
+  // symptom until a signal arrives, so there is nothing to assert against from
+  // outside. A directory scan (rather than a check on one file) also catches
+  // the NEXT module that adds a spawn.
+  //
+  // The trigger is the IMPORT, not a call-site regex. An earlier version
+  // matched /\bspawn(Sync)?\(/, which was quietly narrower than the test's name:
+  // execFile, exec, execSync and fork produce children that macOS will not
+  // signal either, and a module using one would have passed. Widening the regex
+  // is not the fix — `re.exec(text)` in linuxdo.mjs and eight other modules
+  // matches any plausible \bexec\(, because a dot before `e` is still a word
+  // boundary. Importing node:child_process is the honest precondition: every
+  // such module here is a spawning module, and none of them imports it for
+  // anything else.
+  const { readdir, readFile } = await import("node:fs/promises");
+  const { fileURLToPath } = await import("node:url");
+  const path = await import("node:path");
+  // fileURLToPath, not `.pathname`: a percent-encoded pathname breaks on any
+  // checkout path containing a space.
+  const root = fileURLToPath(new URL("../src/", import.meta.url));
+
+  const spawning = [];
+  async function walk(dir) {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (entry.name.endsWith(".mjs")) {
+        const src = await readFile(full, "utf8");
+        if (/from\s+["']node:child_process["']/.test(src)) spawning.push({ file: path.relative(root, full), src });
+      }
+    }
+  }
+  await walk(root);
+
+  assert.ok(spawning.length > 0, "the scan found nothing; it is not looking at the right tree");
+  const untracked = spawning.filter((m) => !/trackChild\s*\(/.test(m.src)).map((m) => m.file);
+  assert.deepEqual(untracked, [], `these modules can spawn a child they never register: ${untracked.join(", ")}`);
 });

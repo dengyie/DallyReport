@@ -1,10 +1,9 @@
-import { test, after } from "node:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
-import os from "node:os";
+import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import {
   generateGithubPoster,
@@ -20,6 +19,7 @@ import {
   readVaultFileRetry,
   POSTER_TEMPLATE_VERSION,
 } from "../src/image-gen.mjs";
+import { tmpDir, tmpDirSync } from "./helpers/tmp.mjs";
 
 // 行为测试全部注入 stub fetch、从不碰网；凭证门只查环境变量存在性。给无 .env 的
 // 机器也提供一次性凭证，保证套件在所有主机上全绿（node:test 每个测试文件独立
@@ -45,14 +45,8 @@ const PNG_1x1 = Buffer.from(
 );
 
 // Minimal config object (loadConfig shape, subset image-gen uses).
-const tmpDirs = [];
-after(() => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-});
-
 function cfg(over = {}) {
-  const tmp = mkdtempSync(path.join(os.tmpdir(), "dally-img-"));
-  tmpDirs.push(tmp);
+  const tmp = tmpDirSync("dally-img-");
   const promptFile = path.join(tmp, "prompt.md");
   writeFileSync(
     promptFile,
@@ -171,7 +165,7 @@ test("decodeImageBuffer: still rejects whitespace-laden non-PNG bytes", async ()
 });
 
 test("sipsDownscale: timeout terminates child and cleans temporary output", async () => {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "dally-sips-timeout-"));
+  const dir = tmpDirSync("dally-sips-timeout-");
   const tmpOut = path.join(dir, "downscaled.jpg");
   const child = new EventEmitter();
   const signals = [];
@@ -195,7 +189,7 @@ test("sipsDownscale: timeout terminates child and cleans temporary output", asyn
 });
 
 test("sipsDownscale: reads successful output and removes temporary file", async () => {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "dally-sips-success-"));
+  const dir = tmpDirSync("dally-sips-success-");
   const tmpOut = path.join(dir, "downscaled.jpg");
   const child = new EventEmitter();
   const output = Buffer.from("fake jpeg bytes");
@@ -249,10 +243,17 @@ test("buildContextualPrompt: injects raw description + Chinese-render instructio
   });
   assert.ok(!out.includes("{date}"), "date placeholder replaced");
   // One-sentence truncation: only the first sentence of the raw desc is passed.
-  assert.match(out, /a\/b — 今日 Star \+5，总 Star 10，Fork —（原始简介：First sentence\.）/);
-  assert.match(out, /c\/d — 今日 Star \+1，总 Star 2，Fork —（原始简介：中文单句介绍。）/);
+  // CHANGED 2026-09-28 (H3b): these three expectations used to end in "Fork —"
+  // and "总 Star —". An absent metric is now OMITTED rather than rendered as an
+  // em-dash, because a dash in a numeric cell is an instruction to the image
+  // model to paint a number, and the shipped 2026-09-25 poster duly carried ten
+  // Fork figures that were not all GitHub's. The subject of the test is
+  // unchanged — one-sentence truncation, and a repo with no description getting
+  // no 原始简介 suffix — only the placeholder policy moved.
+  assert.match(out, /a\/b — 今日 Star \+5，总 Star 10（原始简介：First sentence\.）/);
+  assert.match(out, /c\/d — 今日 Star \+1，总 Star 2（原始简介：中文单句介绍。）/);
   // A repo with no description renders the data head with no 原始简介 suffix.
-  assert.match(out, /e\/f — 今日 Star \+0，总 Star —，Fork —/);
+  assert.match(out, /e\/f — 今日 Star \+0/);
   assert.doesNotMatch(out, /e\/f[^\n]*原始简介/);
   // The prompt must instruct the model to render descriptions in Chinese.
   assert.match(out, /翻译成\*\*中文\*\*/);
@@ -262,7 +263,12 @@ test("buildContextualPrompt: injects raw description + Chinese-render instructio
 
 test("buildContextualPrompt: fork counts are injected when parsed", () => {
   // 2026-09-25 Copilot review: the prompt asserts Fork figures, so they must
-  // come from parsed data (never invented); missing forks render as —.
+  // come from parsed data (never invented). CHANGED 2026-09-28 (H3b): the
+  // original rule was "missing forks render as —", and that rule is what made
+  // the model invent them. A blank cell in a numeric column is not a neutral
+  // placeholder to a diffusion renderer, it is a slot to fill. The stated goal
+  // ("never invented") is kept; the mechanism is inverted — omit the metric
+  // instead of printing a dash, so there is nothing to fill.
   const out = buildContextualPrompt("base {date}", {
     date: "2026-07-31",
     repos: [
@@ -271,7 +277,7 @@ test("buildContextualPrompt: fork counts are injected when parsed", () => {
     ],
   });
   assert.match(out, /a\/b — 今日 Star \+5，总 Star 1,000，Fork 3,903/);
-  assert.match(out, /c\/d — 今日 Star \+1，总 Star 2，Fork —/);
+  assert.match(out, /c\/d — 今日 Star \+1，总 Star 2$/m, "the unparsed fork is left out, not dashed");
 });
 
 test("buildContextualPrompt: description without a terminator is kept whole (raw)", () => {
@@ -657,7 +663,13 @@ test("image-gen: AI poster missing prompt -> IMG_BAD_PROMPT", async () => {
 });
 
 test("image-gen: write failure -> IMG_WRITE_FAILED", async () => {
-  const c = cfg({ obsidianDir: "/no/such/root/dir/that/cannot/exist/out" });
+  // A leading `/` is a root only on POSIX. On Windows it is the current drive
+  // (`E:\no\such\...`), and mkdir creates it, so the write succeeds and this
+  // assertion never sees IMG_WRITE_FAILED.
+  const unwritable = process.platform === "win32"
+    ? "\\\\?\\NUL\\dally-unwritable\\out"
+    : "/no/such/root/dir/that/cannot/exist/out";
+  const c = cfg({ obsidianDir: unwritable });
   const fetchStub = stubFetch([
     { status: 200, ct: "application/json", body: { data: [{ b64_json: B64_IMG }] } },
   ]);
@@ -670,7 +682,7 @@ test("image-gen: write failure -> IMG_WRITE_FAILED", async () => {
 });
 
 test("image-gen: injected fs preserves existing poster when atomic rename fails", async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "dally-img-fs-"));
+  const root = tmpDirSync("dally-img-fs-");
   const c = cfg({ obsidianDir: root });
   const outDir = path.join(root, c.date);
   const outFile = path.join(outDir, "GitHub.png");
@@ -704,7 +716,7 @@ test("image-gen: injected fs preserves existing poster when atomic rename fails"
 });
 
 test("image-gen: injected fs supports Windows target replacement", async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "dally-img-win-"));
+  const root = tmpDirSync("dally-img-win-");
   const c = cfg({ obsidianDir: root });
   const outDir = path.join(root, c.date);
   const outFile = path.join(outDir, "GitHub.png");
@@ -937,4 +949,140 @@ test("image-gen: prompt file transient EIO is retried via deps.readImpl, poster 
   );
   assert.equal(res.ok, true, "one transient EIO must not fail the poster");
   assert.equal(promptReads, 2, "exactly one retry on the prompt file");
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-28 review H3: the GitHub poster prompt described a DAY while
+// rendering a WEEK's numbers.
+//
+// `buildContextualPrompt` hardcoded the daily vocabulary — "今日 Star",
+// "按今日新增 Star 排序", "统计时间用 <date>" — with no reference to the
+// reporting period. The shipped 2026-09-25 weekly therefore produced a poster
+// whose every star delta was labelled 今日 while the values were a genuine
+// seven-day total, footered "榜单按今日新增 Star 排序 ｜ 统计时间：2026-09-25",
+// with no date range anywhere. OCR of the delivered PNG confirms all three
+// strings rendered as written. A reader cannot tell a weekly from a daily by
+// looking at it.
+//
+// H3b, the fabrication: a missing fork count was rendered as an em-dash —
+//     const forks = r.forks != null ? r.forks.toLocaleString() : "—";
+// The stated intent (2026-09-25 Copilot review) was "never invented". The
+// mechanism defeated it: an image model asked to paint a column of "Fork —"
+// cannot paint a dash in a numeric column, so it fills the cell with a
+// plausible integer. A blank is a request for data; a dash is a request for a
+// number. The fix is to leave the metric out of the row entirely, so there is
+// no cell to fill.
+// ---------------------------------------------------------------------------
+
+const GITHUB_WEEKLY_PERIOD = {
+  weekly: true,
+  label: "2026-09-19 ~ 2026-09-25",
+  starWord: "本周新增",
+  maxRows: 10,
+};
+
+test("H3: a weekly poster labels the star delta as a weekly total", () => {
+  const out = buildContextualPrompt("base {date}", {
+    date: "2026-09-25",
+    period: GITHUB_WEEKLY_PERIOD,
+    repos: [{ repo: "a/b", starsToday: 7364, starsTotal: 89798, forks: 15655 }],
+  });
+  assert.match(out, /本周新增 \+7,364|本周新增 \+7364/, "the delta must be labelled by its real period");
+  assert.doesNotMatch(
+    out,
+    /今日 Star/,
+    "a weekly render must not carry the daily column label anywhere in the prompt",
+  );
+});
+
+test("H3: the sort note and the period footer both name the week", () => {
+  const out = buildContextualPrompt("base {date}", {
+    date: "2026-09-25",
+    period: GITHUB_WEEKLY_PERIOD,
+    repos: [{ repo: "a/b", starsToday: 7364, starsTotal: 89798, forks: 1 }],
+  });
+  assert.match(out, /按本周新增 Star 排序/);
+  assert.match(out, /2026-09-19 ~ 2026-09-25/, "the date range must reach the prompt");
+  assert.doesNotMatch(out, /按今日新增 Star 排序/);
+});
+
+test("H3: a daily poster is unchanged by the period plumbing", () => {
+  // The daily path is the overwhelmingly common one and must not regress: with
+  // no period (or a daily one) the original daily vocabulary stands, including
+  // the unseparated star delta the renderer has always emitted — this change is
+  // about WHICH PERIOD is named, not about number formatting.
+  const out = buildContextualPrompt("base {date}", {
+    date: "2026-09-25",
+    repos: [{ repo: "a/b", starsToday: 7364, starsTotal: 89798, forks: 1 }],
+  });
+  assert.match(out, /今日 Star \+7364/);
+  assert.match(out, /按今日新增 Star 排序/);
+  assert.match(out, /统计时间用 2026-09-25/);
+});
+
+test("H3b: a row with no fork count omits the metric instead of printing a dash", () => {
+  const out = buildContextualPrompt("base {date}", {
+    date: "2026-09-25",
+    repos: [{ repo: "a/b", starsToday: 5, starsTotal: 10, forks: null, description: null }],
+  });
+  assert.doesNotMatch(
+    out,
+    /Fork/,
+    "no cell, nothing to fabricate into — got a Fork mention in the prompt",
+  );
+  assert.match(out, /a\/b — 今日 Star \+5，总 Star 10/);
+});
+
+test("H3b: a row WITH a fork count still states it", () => {
+  // The omission above must not become a blanket removal: real data still
+  // belongs in the prompt.
+  const out = buildContextualPrompt("base {date}", {
+    date: "2026-09-25",
+    repos: [{ repo: "a/b", starsToday: 5, starsTotal: 1000, forks: 3903, description: null }],
+  });
+  assert.match(out, /Fork 3,903/);
+});
+
+test("H3b: a missing TOTAL star count is omitted the same way", () => {
+  // Same mechanism, same fix: `starsTotal: null` printed a dash in the
+  // total-stars cell, inviting the same invention.
+  const out = buildContextualPrompt("base {date}", {
+    date: "2026-09-25",
+    repos: [{ repo: "a/b", starsToday: 5, starsTotal: null, forks: null, description: null }],
+  });
+  assert.doesNotMatch(out, /总 Star/);
+  assert.match(out, /a\/b — 今日 Star \+5/);
+});
+
+test("H3c: truncating 15 repos to 10 is declared, not silent", () => {
+  // The note lists 15; the poster has room for 10. Shipping 10 of 15 with no
+  // statement anywhere makes the poster look like the complete ranking. The
+  // prompt must say how many were dropped so the rendered footer can say so.
+  const repos = Array.from({ length: 15 }, (_, i) => ({
+    repo: `owner${i}/repo${i}`,
+    starsToday: 100 - i,
+    starsTotal: 1000,
+    forks: 10,
+    description: null,
+  }));
+  const out = buildContextualPrompt("base {date}", { date: "2026-09-25", period: GITHUB_WEEKLY_PERIOD, repos });
+  assert.match(out, /共 15 个项目/);
+  assert.match(out, /展示前 10 名/);
+  assert.doesNotMatch(
+    out,
+    /共 10 个项目/,
+    "a 10-of-15 render must not claim it is showing everything",
+  );
+});
+
+test("H3c: a list that fits is not described as truncated", () => {
+  const repos = Array.from({ length: 4 }, (_, i) => ({
+    repo: `o${i}/r${i}`,
+    starsToday: 1,
+    starsTotal: 2,
+    forks: 3,
+    description: null,
+  }));
+  const out = buildContextualPrompt("base {date}", { date: "2026-09-25", repos });
+  assert.doesNotMatch(out, /展示前/, "no truncation happened, so do not claim one");
 });

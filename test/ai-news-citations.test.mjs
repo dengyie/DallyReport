@@ -231,3 +231,79 @@ test("G1: an entry with no n falls back to its position, never printing [undefin
   const lines = buildReferenceLines([{ source: { title: "X", url: "https://x.test/9" } }], DEPS);
   assert.equal(lines[0], "- [1] [X](<https://x.test/9>)");
 });
+
+// ---------------------------------------------------------------------------
+// 2026-09-28 review H1: a COMBINED citation resolved to nothing.
+//
+// The parser matched /\[(\d+)\]/ — one number, immediately closed by "]". A
+// body that cites several sources at once writes "[22, 25]", and that string
+// does not match the pattern at all: the scan consumes "[22" and dies on the
+// comma, so NEITHER 22 nor 25 is recorded.
+//
+//   Shipped AI-周报.md, 2026-09-25: body carried one combined marker,
+//   "[22, 25]". The reference list held 1 2 4 6 9 13 16 17 19 21 24 26 27
+//   29 30. 22 and 25 appear nowhere in it — two assertions in the delivered
+//   note pointed at no source at all, and did so silently: the note still
+//   rendered, still looked complete, and simply under-reported by two.
+//
+// This is the worst failure shape in the whole pipeline because it is
+// invisible. A missing source in the list is indistinguishable from a body that
+// chose not to cite anything, unless you go and count the markers.
+// ---------------------------------------------------------------------------
+
+const THIRTY = Array.from({ length: 30 }, (_, i) => ({
+  title: `S${i + 1}`,
+  url: `https://s.test/${i + 1}`,
+}));
+
+test("H1: a combined marker [22, 25] resolves to BOTH sources", () => {
+  const selected = selectCitedSources(THIRTY, "两条并列的说法 [22, 25]");
+  assert.deepEqual(
+    selected.map((c) => c.n),
+    [22, 25],
+    "both halves of the marker must reach the reference list",
+  );
+  assert.deepEqual(
+    selected.map((c) => c.source.title),
+    ["S22", "S25"],
+  );
+});
+
+test("H1: the shipped 2026-09-25 shape leaves NO marker unresolved", () => {
+  // The end-to-end shape, not the regex: 15 single markers plus one combined
+  // one, against 30 sources. Before the fix this returned 15 entries and the
+  // two numbers in the combined marker were silently absent from the output.
+  const body = Array.from({ length: 15 }, (_, i) => `[${i * 2 + 1}]`).join(" ") + " 合并 [22, 25]";
+  const selected = selectCitedSources(THIRTY, body);
+  const numbers = selected.map((c) => c.n);
+  for (const cited of [22, 25]) {
+    assert.ok(numbers.includes(cited), `cited [${cited}] must appear in the reference list`);
+  }
+});
+
+test("H1: a combined marker survives into the rendered reference lines", () => {
+  const lines = buildReferenceLines(selectCitedSources(THIRTY, "并列 [22, 25]"), DEPS);
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /^\- \[22\] /, "line 1 must print [22], not sit unnumbered");
+  assert.match(lines[1], /^\- \[25\] /, "line 2 must print [25]");
+});
+
+test("H1: a combined marker's halves obey the same range guard as a single one", () => {
+  // The fix must widen the SHAPE, not the trust: an out-of-range or malformed
+  // half is still ignored rather than clamped onto a real source.
+  const selected = selectCitedSources(FIVE, "越界 [2, 99]，非数字 [2, abc]，负数 [-1, 2]");
+  assert.deepEqual(selected.map((c) => c.n), [2], "only the in-range, well-formed half survives");
+});
+
+test("H1: a single marker is unchanged by the widened parser", () => {
+  // The parser now accepts an optional comma-separated tail. That must not
+  // change the single-marker case at all — the overwhelmingly common one.
+  assert.deepEqual(selectCitedSources(FIVE, "一 [1] 二 [3]").map((c) => c.n), [1, 3]);
+});
+
+test("H1: a bracket that is not a citation is still not a citation", () => {
+  // The body legitimately contains markdown links and bracketed non-numbers.
+  // Widening must not start harvesting digits out of them.
+  const selected = selectCitedSources(FIVE, "见 [链接](https://x.test) 与 [注] 以及 [3]");
+  assert.deepEqual(selected.map((c) => c.n), [3]);
+});

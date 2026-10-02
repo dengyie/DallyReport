@@ -21,6 +21,15 @@ import {
 
 const TODAY = "2026-08-10";
 
+// 2026-09-28 weekly. The window gained an UPPER bound (a weekly must not admit
+// tomorrow's news, and a lower-bound-only gate let any future-dated card
+// through). These fixtures had been building "today" stories with the real
+// clock — Date.now() against a config dated 2026-08-10 put every card ~7 weeks
+// in the FUTURE, which the old one-sided gate silently tolerated and the new
+// closed window correctly rejects. The subject of each test is unchanged; only
+// the fixture's idea of "now" is now consistent with the config's date.
+const TODAY_NOON_SEC = Math.floor(Date.parse(`${TODAY}T12:00:00+08:00`) / 1000);
+
 // A minimal RSS 2.0 body. The vendor RSS fetchers had ZERO test coverage, which
 // is how a 12-day cache-key collision shipped unnoticed.
 const FEED_XML = `<?xml version="1.0"?><rss version="2.0"><channel>
@@ -262,10 +271,13 @@ test("fetchOfficialBlogRss: two vendors write DIFFERENT cache files", async () =
     site: "google-research", runFetch,
   });
   assert.equal(new Set(seen).size, 3, "three sources, three distinct cache files");
+  // 2026-09-28 weekly: the key gained a `-daily` mode token so a weekly run can
+  // never collide with the daily's cache. The assertion's SUBJECT is unchanged
+  // — three sources must still produce three distinct files.
   assert.deepEqual(seen, [
-    "/cache/2026-08-10-hf-feed.txt",
-    "/cache/2026-08-10-google-ai-feed.txt",
-    "/cache/2026-08-10-google-research-feed.txt",
+    "/cache/2026-08-10-daily-hf-feed.txt",
+    "/cache/2026-08-10-daily-google-ai-feed.txt",
+    "/cache/2026-08-10-daily-google-research-feed.txt",
   ]);
 });
 
@@ -309,7 +321,7 @@ test("isAiRelevant (via fetchHackerNewsDaily): unrelated HN stories are filtered
       title,
       url: `https://example.com/${i}`,
       type: "story",
-      time: Math.floor(Date.now() / 1000),
+      time: TODAY_NOON_SEC,
     })),
     { limit: 12 },
   );
@@ -328,7 +340,7 @@ test("isAiRelevant: genuinely AI stories still pass", async () => {
       title,
       url: `https://example.com/${i}`,
       type: "story",
-      time: Math.floor(Date.now() / 1000),
+      time: TODAY_NOON_SEC,
     })),
     { limit: 12 },
   );
@@ -342,7 +354,7 @@ test("fetchAllDailySources: the config limits actually reach the fetchers", asyn
     title: `OpenAI model update ${i}`,
     url: `https://example.com/${i}`,
     type: "story",
-    time: Math.floor(Date.now() / 1000),
+    time: TODAY_NOON_SEC,
   }));
   const original = globalThis.fetch;
   globalThis.fetch = async (url) => {
@@ -376,7 +388,7 @@ test("fetchAllDailySources: aggregateDailySourceLimit caps the merged pool", asy
     title: `OpenAI model update ${i}`,
     url: `https://example.com/${i}`,
     type: "story",
-    time: Math.floor(Date.now() / 1000),
+    time: TODAY_NOON_SEC,
   }));
   const original = globalThis.fetch;
   globalThis.fetch = async (url) => {
@@ -779,4 +791,254 @@ test("H2: an old story on these feeds is filtered out by the window", async () =
     { limit: 5, runFetch: async () => ({ text: ATOM("Old OpenAI story", "https://tc.test/8", old) }) },
   );
   assert.equal(out.length, 0, "a 9-day-old story is not same-day material");
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-28 smoke test: a fetcher that reaches the network, parses fine, and
+// yields nothing produces []. attachDailyDiagnostics then returns early at
+// `if (!failures || failures.length === 0) return sources;` — so the result
+// carries NO dailyDiagnostics at all.
+//
+// The report's only signal for a hard source is that diagnostics object. 8 of
+// 11 fetchers report "no-fresh-items-in-window" for exactly this case (the
+// vendor RSS path); 36kr, arXiv and HN returned a bare [] and were invisible.
+// A week where the three most reliable hard sources went quiet rendered a
+// clean ✅ over forum chatter.
+//
+// The tests below assert BOTH directions: empty-and-explained, and
+// populated-and-silent. A fix that attaches diagnostics unconditionally would
+// make every healthy morning look like a warning, which is the same class of
+// defect in the other direction.
+// ---------------------------------------------------------------------------
+
+const STALE_ONLY_FEED = `<?xml version="1.0"?><rss version="2.0"><channel>
+  <item>
+    <title>三月的老新闻</title>
+    <link>https://36kr.com/p/1</link>
+    <pubDate>Mon, 02 Mar 2026 08:00:00 GMT</pubDate>
+    <description><![CDATA[OpenAI 发布新模型。]]></description>
+  </item></channel></rss>`;
+
+const STALE_ONLY_ARXIV = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+<entry>
+<title>Old Paper</title>
+<id>http://arxiv.org/abs/2603.00001v1</id>
+<summary>Old.</summary>
+<published>2026-03-02T02:00:00Z</published>
+</entry></feed>`;
+
+test("36kr: an empty result is reported, not silent", async () => {
+  const out = await fetch36krDaily(
+    { date: TODAY, cacheDir: "/tmp/nonexistent-cache-dir-xyz" },
+    { runFetch: async () => ({ text: STALE_ONLY_FEED }) },
+  );
+  assert.equal(out.length, 0);
+  // attachDailyDiagnostics' shape on a SINGLE fetcher is flat
+  // {provider, failures, failureCount}; collectDailyDiagnostics is what nests it
+  // by provider for fetchAllDailySources.
+  const diag = out.dailyDiagnostics;
+  assert.ok(diag, "an empty 36kr result must carry diagnostics");
+  assert.equal(diag.provider, "36kr");
+  assert.equal(diag.failureCount, 1);
+  assert.equal(
+    diag.failures[0].reason,
+    "no-fresh-items-in-window",
+    "the cause is the window, not the network",
+  );
+  assert.equal(diag.failures[0].parsed, 1, "the feed did yield an entry — the window dropped it");
+});
+
+test("arXiv: an empty result is reported, not silent", async () => {
+  const out = await fetchArxivDaily(
+    { date: TODAY, cacheDir: "/tmp/nonexistent-cache-dir-xyz" },
+    { runFetch: async () => ({ text: STALE_ONLY_ARXIV }) },
+  );
+  assert.equal(out.length, 0);
+  assert.equal(out.dailyDiagnostics?.failures?.[0]?.reason, "no-fresh-items-in-window");
+});
+
+test("HN: an empty result is reported, not silent", async () => {
+  const original = globalThis.fetch;
+  // A well-formed response carrying only items the AI filter rejects.
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes("topstories")) {
+      return {
+        ok: true,
+        json: async () => [
+          { id: 1, title: "A fishing trip report", url: "https://e.test/1", type: "story", time: 1 },
+        ],
+      };
+    }
+    return { ok: true, json: async () => ({}) };
+  };
+  try {
+    const out = await fetchHackerNewsDaily({ date: TODAY });
+    assert.equal(out.length, 0);
+    assert.equal(
+      out.dailyDiagnostics?.failures?.[0]?.reason,
+      "no-fresh-items-in-window",
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("a healthy fetcher stays silent: no diagnostics on a populated result", async () => {
+  // Contrast with the three above. Attaching "no-fresh-items-in-window" to a
+  // successful collection would print a starvation warning over a good day.
+  const out = await fetch36krDaily(
+    { date: TODAY, cacheDir: "/tmp/nonexistent-cache-dir-xyz" },
+    { runFetch: async () => ({ text: KR36_SAMPLE }) },
+  );
+  assert.ok(out.length > 0, "fixture must actually produce sources");
+  assert.equal(out.dailyDiagnostics, undefined, "a populated result carries no diagnostics");
+});
+
+test("HN: a per-item failure is not overwritten by the emptiness diagnostic", async () => {
+  // The contrast that reportEmpty must get right. Zero sources can be explained
+  // two ways: the window emptied a real result set, or the detail fetch itself
+  // failed. When a transport failure is already recorded it is the better
+  // explanation — the window never saw anything — and a blanket
+  // "no-fresh-items-in-window" would send the operator to the calendar instead
+  // of the network.
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes("topstories")) {
+      return { ok: true, json: async () => [1, 2] };
+    }
+    throw Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+  };
+  try {
+    const out = await fetchHackerNewsDaily({ date: TODAY });
+    assert.equal(out.length, 0);
+    const diag = out.dailyDiagnostics;
+    assert.ok(diag, "diagnostics survive");
+    assert.equal(diag.provider, "hackernews");
+    assert.equal(
+      diag.failures.some((f) => f.reason === "ECONNRESET"),
+      true,
+      "the real transport failure is still reported",
+    );
+    assert.equal(
+      diag.failures.some((f) => f.reason === "no-fresh-items-in-window"),
+      false,
+      "the window is not blamed for a fetch that never landed",
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-28 review H2: HN put its own chrome into user-visible text.
+//
+//   snippet: String(item.title).slice(0, 500) + ` (score: ${item.score})`
+//
+// The snippet was the title, echoed, with a Hacker News score appended. Two
+// separate defects leave that one line:
+//
+// 1. "(score: 125)" is forum chrome. It is meaningless outside HN's own UI, and
+//    it is not part of the story. The AI poster is built from title+snippet, so
+//    the poster agent faithfully PAINTED it — the shipped AI-周报.png carries
+//    "Evolving programming languages in the Al era （score: 125）" on its face,
+//    three times over. Our data, on our poster, blaming the image model.
+//
+// 2. A summary that restates the headline is worse than no summary. The poster
+//    brief asks for "one line of context per item"; for every HN-sourced item
+//    that line was a copy of the line above it, which is a large share of the
+//    "the same stories are reprinted across panels" complaint. An honest blank
+//    lets the renderer omit a panel; a duplicated line makes it print the panel.
+//
+// The score stays on the card as a FIELD — it is real metadata and callers may
+// sort on it. Only the human-readable string loses it.
+// ---------------------------------------------------------------------------
+
+const HN_STORY = {
+  title: "Evolving programming languages in the AI era",
+  url: "https://news.ycombinator.com/item?id=1",
+  score: 125,
+  descendants: 42,
+  by: "someone",
+  type: "story",
+  time: TODAY_NOON_SEC,
+  // A link post: HN gives no body text, only the title.
+};
+
+function mockHn(items) {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (url.includes("topstories")) {
+      return { ok: true, json: async () => items.map((_, i) => i + 1) };
+    }
+    const id = Number(url.match(/item\/(\d+)\.json/)?.[1] || 0);
+    return { ok: true, json: async () => items[id - 1] };
+  };
+  return original;
+}
+
+test("H2: an HN snippet never carries the raw score", async () => {
+  const original = mockHn([HN_STORY]);
+  try {
+    const out = await fetchHackerNewsDaily({ date: TODAY });
+    assert.equal(out.length, 1);
+    assert.doesNotMatch(
+      out[0].snippet || "",
+      /score/i,
+      `the score is chrome, not a summary — got ${JSON.stringify(out[0].snippet)}`,
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("H2: a link post with no body yields NO snippet at all", async () => {
+  // The contract, stated so a lazy fix cannot pass it: with the score chrome
+  // gone, the only thing this line could hold is the title again. An empty
+  // snippet is the honest answer — it lets the poster renderer omit a summary
+  // panel rather than print the headline twice. Asserting mere inequality with
+  // the title would be satisfied by the very string this fix removes, so it
+  // would not have caught the defect at all.
+  const original = mockHn([HN_STORY]);
+  try {
+    const out = await fetchHackerNewsDaily({ date: TODAY });
+    assert.equal(
+      (out[0].snippet || "").trim(),
+      "",
+      `nothing to summarise means no summary — got ${JSON.stringify(out[0].snippet)}`,
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("H2: the score survives as a FIELD even though it leaves the text", async () => {
+  // Removing the string must not remove the metadata: dedup and ranking read
+  // the field, and dropping it would silently change which HN card wins.
+  const original = mockHn([HN_STORY]);
+  try {
+    const out = await fetchHackerNewsDaily({ date: TODAY });
+    assert.equal(out[0].score, 125, "the field is real data and stays put");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("H2: a text post uses HN's own body as the summary", async () => {
+  // The one case where HN DOES carry context: Ask HN / text posts have `text`.
+  // Using it is strictly better than the title echo, and it is the same string
+  // the markdown body already had available.
+  const original = mockHn([
+    { ...HN_STORY, text: "<p>A deep dive into how model output shapes new syntax.</p>" },
+  ]);
+  try {
+    const out = await fetchHackerNewsDaily({ date: TODAY });
+    const snippet = (out[0].snippet || "").toLowerCase();
+    assert.match(snippet, /deep dive/, `the post body should be the summary, got ${out[0].snippet}`);
+    assert.doesNotMatch(out[0].snippet, /<p>/i, "raw HTML must not reach the text");
+  } finally {
+    globalThis.fetch = original;
+  }
 });

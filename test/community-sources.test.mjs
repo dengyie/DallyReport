@@ -4,6 +4,7 @@ import { parseNodeSeekTopics, snippetFromNodeSeekTopicText, fetchNodeSeekAiSourc
 import { parseV2exTopics, snippetFromV2exTopicText, fetchV2exAiSources } from "../src/v2ex.mjs";
 import { isAiRelatedTopic, selectAiTopics, rankTopic } from "../src/community.mjs";
 import { mergeSourcesPreferLinuxDo } from "../src/linuxdo.mjs";
+import { tmpDir, tmpDirSync } from "./helpers/tmp.mjs";
 
 const NODESEEK_LISTING = `
 # NodeSeek 最新
@@ -433,7 +434,7 @@ async function fixtureFetchDir(bodyText) {
   const fs = await import("node:fs/promises");
   const os = await import("node:os");
   const pathMod = await import("node:path");
-  const root = await fs.mkdtemp(pathMod.join(os.tmpdir(), "dally-community-fixture-"));
+  const root = await tmpDir("dally-community-fixture-");
   const scripts = pathMod.join(root, "scripts");
   await fs.mkdir(scripts, { recursive: true });
   await fs.writeFile(
@@ -449,10 +450,13 @@ test("fetchNodeSeekAiSources: poisoned list cache (challenge page) is rejected �
   const { default: os } = await import("node:os");
   const { default: path } = await import("node:path");
   const date = "2026-08-06";
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "dally-community-poison-"));
+  const tmp = await tmpDir("dally-community-poison-");
   const cacheDir = path.join(tmp, "cache");
   await fs.mkdir(cacheDir, { recursive: true });
-  const cacheFile = path.join(cacheDir, `${date}-nodeseek-list-0.txt`);
+  // 2026-09-28 weekly: the cache key gained a `-daily` mode token, so the poison
+  // must be planted where the collector will actually READ it. The test's
+  // subject — a challenge page on disk must not be replayed — is unchanged.
+  const cacheFile = path.join(cacheDir, `${date}-daily-nodeseek-list-0.txt`);
   await fs.writeFile(cacheFile, "<html>Just a moment... (Cloudflare challenge)</html>", "utf8");
 
   const grokSearchDir = await fixtureFetchDir(NODESEEK_LISTING);

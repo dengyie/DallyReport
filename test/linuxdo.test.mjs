@@ -20,6 +20,7 @@ import {
   selectDeepFetchTargets,
   mapLimit,
 } from "../src/linuxdo.mjs";
+import { tmpDir, tmpDirSync } from "./helpers/tmp.mjs";
 
 const LISTING_FIXTURE = `
 # Latest topics in 前沿快讯
@@ -714,7 +715,7 @@ test("fetchLinuxDoAiSources: HTML list fetch carries a parse-validating cachePre
 // grok-search fetch.js fixture (same pattern as test/grok-cli.test.mjs) so the
 // REAL runFetch runs: cache-first read + predicate gate + cache write.
 async function fixtureGrokSearchDir(bodyText) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dally-linuxdo-fixture-"));
+  const root = await tmpDir("dally-linuxdo-fixture-");
   const scripts = path.join(root, "scripts");
   await fs.mkdir(scripts, { recursive: true });
   await fs.writeFile(
@@ -727,10 +728,14 @@ async function fixtureGrokSearchDir(bodyText) {
 
 test("fetchNews34ViaJsonApi: poisoned news34 cache (challenge page) is not replayed — live fetch wins", async () => {
   const date = "2026-08-06";
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "dally-linuxdo-poison-"));
+  const tmp = await tmpDir("dally-linuxdo-poison-");
   const cacheDir = path.join(tmp, "cache");
   await fs.mkdir(cacheDir, { recursive: true });
-  const cacheFile = path.join(cacheDir, `${date}-linuxdo-news34-page-1.txt`);
+  // 2026-09-28 weekly: the cache key gained a `-daily` mode token, so the poison
+  // must be planted at the name the collector will actually READ. The test's
+  // subject — a challenge page on disk must not be replayed, and the live fetch
+  // must overwrite it — is unchanged; only the filename it plants at moved.
+  const cacheFile = path.join(cacheDir, `${date}-daily-linuxdo-news34-page-1.txt`);
   await fs.writeFile(cacheFile, "<html>Just a moment... (Cloudflare challenge)</html>", "utf8");
 
   const topics = [
@@ -770,7 +775,7 @@ test("extractAttachments: bare % in a filename falls back to the raw basename in
 });
 
 test("enrichLinuxdoPosts: bare-% attachment link no longer drops the post archive", async () => {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "dally-linuxdo-pct-"));
+  const tmp = await tmpDir("dally-linuxdo-pct-");
   const config = {
     date: "2026-08-07",
     obsidianDir: tmp,
@@ -1216,4 +1221,48 @@ test("mapLimit: an expired deadline stops everything immediately", async () => {
     return 1;
   }, Date.now() - 1);
   assert.equal(started, 0, "an already-expired deadline must schedule nothing");
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-28 weekly. beijingDayRange is the ONLY place in the codebase with a
+// real closed interval, and the collection filter is `tMs >= startLocal && tMs
+// < endLocal` — so widening the wrong end silently excludes the material the
+// weekly exists to collect.
+//
+// The trap: the original derived `endLocal` as `startLocal + 24h`. Carrying
+// that shape into a weekly and only pushing `startLocal` back 7 days yields
+// [D-6, D-6+24h) — a window that is a week long at the START and a single day
+// at the end. Days 2..7 would be filtered out and the weekly would quietly
+// report roughly one day of forum posts.
+// ---------------------------------------------------------------------------
+
+test("beijingDayRange: the default is unchanged — one Beijing day", () => {
+  const { startLocal, endLocal } = beijingDayRange("2026-08-06");
+  assert.equal(startLocal, Date.parse("2026-08-06T00:00:00+08:00"));
+  assert.equal(endLocal, startLocal + 24 * 3600 * 1000);
+});
+
+test("beijingDayRange: a 7-day window ENDS on the report day, not the day it starts", () => {
+  const { startLocal, endLocal } = beijingDayRange("2026-10-02", 7);
+  // End is the close of the report day — unchanged by the widening.
+  assert.equal(endLocal, Date.parse("2026-10-03T00:00:00+08:00"));
+  // Start is 7 days earlier. Deriving it from the END is what keeps the
+  // interval anchored to the report date instead of drifting backwards.
+  assert.equal(startLocal, Date.parse("2026-09-26T00:00:00+08:00"));
+  assert.equal((endLocal - startLocal) / (24 * 3600 * 1000), 7);
+});
+
+test("beijingDayRange: a post from every day of the window is inside the interval", () => {
+  // The regression this guards: with endLocal == startLocal + 24h, days 2..7
+  // fall outside `tMs < endLocal` and are filtered out.
+  const { startLocal, endLocal } = beijingDayRange("2026-10-02", 7);
+  for (const day of ["2026-09-26", "2026-09-28", "2026-10-01", "2026-10-02"]) {
+    const tMs = Date.parse(`${day}T12:00:00+08:00`);
+    assert.ok(
+      tMs >= startLocal && tMs < endLocal,
+      `${day} 12:00 must be inside the weekly window`,
+    );
+  }
+  const before = Date.parse("2026-09-25T12:00:00+08:00");
+  assert.ok(before < startLocal, "the day before the window is outside it");
 });

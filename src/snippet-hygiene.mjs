@@ -277,15 +277,12 @@ function sourceEpochMs(src) {
   * @param {string} dateStr  Beijing date "YYYY-MM-DD"
   * @returns {{ sources: Array, dropped: number }}
   */
-export function filterByRecency(sources, dateStr) {
-  // Validate dateStr: must be at least YYYY-MM-DD length. Invalid dates fall
-  // through to pass-through (no filtering, no false drops from NaN comparisons).
-  if (!dateStr || typeof dateStr !== "string" || dateStr.length < 10 || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-    return { sources: sources || [], dropped: 0 };
-  }
+export function filterByRecency(sources, dateStr, window) {
+  // Resolve the window: an explicit one (weekly passes config's) or, for the
+  // daily path and every pre-existing caller, the single Beijing day.
+  const win = resolveWindow(dateStr, window);
+  if (!win) return { sources: sources || [], dropped: 0 };
   if (!sources || !sources.length) return { sources: sources || [], dropped: 0 };
-  const [y, m, d] = dateStr.split("-").map(Number);
-  const todayStart = Date.UTC(y, m - 1, d, 0, 0, 0, 0) - 8 * 60 * 60 * 1000;
 
   const kept = [];
   let dropped = 0;
@@ -293,8 +290,18 @@ export function filterByRecency(sources, dateStr) {
     const ts = sourceEpochMs(src);
     if (ts != null) {
       const grace = Number(src.recencyGraceDays) > 0 ? Number(src.recencyGraceDays) : 0;
-      const windowStart = todayStart - grace * 24 * 60 * 60 * 1000;
-      if (ts >= windowStart) {
+      // Grace widens the LOWER bound only. It exists because arXiv labels a
+      // paper with the UTC submit day, so a fresh paper reads as "yesterday" in
+      // Beijing; it is not a licence to admit the future.
+      const windowStart = win.startMs - grace * 24 * 60 * 60 * 1000;
+      // 2026-09-28 weekly: the window gained an UPPER bound. The gate used to be
+      // one-sided, so a card stamped in the future passed every recency check and
+      // reached the model as very fresh news. A 7-day window makes that far more
+      // reachable (clock skew, a feed stamping ahead, a pubDate pushed through
+      // the wrong timezone). For a normal 09:00 run nothing is ever past
+      // endMs; this only bites on a backfill, where dropping a "now"-stamped
+      // card is the more honest answer anyway.
+      if (ts >= windowStart && ts < win.endMs) {
         kept.push(src);
       } else {
         dropped++;
@@ -305,6 +312,29 @@ export function filterByRecency(sources, dateStr) {
     }
   }
   return { sources: kept, dropped };
+}
+
+/**
+ * The window this call filters against, or null when it cannot be determined.
+ *
+ * An explicit window always wins. Otherwise the date must be a real YYYY-MM-DD
+ * and the window is that one Beijing day — byte-identical to what this function
+ * computed before the weekly existed, so every daily regression test still
+ * describes the same thing. An unusable date falls through to pass-through
+ * rather than NaN comparisons, which would drop every dated card silently.
+ */
+function resolveWindow(dateStr, window) {
+  const startMs = Number(window?.startMs);
+  const endMs = Number(window?.endMs);
+  if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
+    return { startMs, endMs };
+  }
+  if (!dateStr || typeof dateStr !== "string" || dateStr.length < 10 || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return null;
+  }
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const start = Date.UTC(y, m - 1, d, 0, 0, 0, 0) - 8 * 60 * 60 * 1000;
+  return { startMs: start, endMs: start + 24 * 60 * 60 * 1000 };
 }
 
 // Whether one source is same-day material, decided with the SAME window and the
@@ -318,18 +348,28 @@ export function filterByRecency(sources, dateStr) {
 // posts. Provenance is a property of the card's timestamp, not of the collector
 // that happened to produce it.
 export function isSameDaySource(src, dateStr) {
+  return isInWindowSource(src, dateStr, undefined);
+}
+
+// The window-aware form behind isSameDaySource. Same rules, except the window
+// can span more than one day (weekly) and is closed on BOTH ends.
+//
+// 2026-09-28: isSameDaySource used to be a second, lower-bound-only
+// implementation of what filterByRecency does. Delegating means the material
+// count and the recency gate can no longer drift apart — the exact failure the
+// comment above this function was written to prevent. The daily path is
+// unchanged in every respect a real 09:00 run can observe: a card is never past
+// the end of its own report day.
+export function isInWindowSource(src, dateStr, window) {
   if (src?.fromDaily === true) return true;
-  if (!dateStr || typeof dateStr !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-    return false;
-  }
+  const win = resolveWindow(dateStr, window);
+  if (!win) return false;
   const ts = sourceEpochMs(src);
   // No usable timestamp → freshness is unknown, not proven. A tavily/firecrawl
   // card is not evidence of anything being published today.
   if (ts == null) return false;
-  const [y, m, d] = dateStr.split("-").map(Number);
-  const todayStart = Date.UTC(y, m - 1, d, 0, 0, 0, 0) - 8 * 60 * 60 * 1000;
-  const grace = Number(src?.recencyGraceDays) > 0 ? Number(src.recencyGraceDays) : 0;
-  return ts >= todayStart - grace * 24 * 60 * 60 * 1000;
+  const grace = Number(src.recencyGraceDays) > 0 ? Number(src.recencyGraceDays) : 0;
+  return ts >= win.startMs - grace * 24 * 60 * 60 * 1000 && ts < win.endMs;
 }
 
 // Negative filter for community forums (drops account trading, carpooling, quota complaints, payment tricks)

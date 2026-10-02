@@ -21,6 +21,7 @@ import { mkdir, writeFile, stat, rmdir } from "node:fs/promises";
 import { runFetch } from "./grok-cli.mjs";
 import { sanitizeSnippet, isInjectionOnlySource, NEGATIVE_COMMUNITY_RE, extractOutlinks } from "./snippet-hygiene.mjs";
 import { AI_TITLE_RE } from "./community.mjs";
+import { cacheKeyFor, materialWindow } from "./report-window.mjs";
 
 // Listing pages that concentrate AI / frontier news. Discourse category ids observed
 // live on 2026-07-31: 前沿快讯 = /c/news/34, 人工智能 tag = /tag/444-tag/444.
@@ -137,9 +138,17 @@ function cleanTitle(raw) {
  * epoch ms for filtering Discourse `created_at` (UTC) fields.
  * Exported for unit tests.
  */
-export function beijingDayRange(dateStr) {
-  const startLocal = new Date(`${dateStr}T00:00:00+08:00`).getTime();
-  const endLocal = startLocal + 24 * 3600 * 1000;
+export function beijingDayRange(dateStr, days = 1) {
+  // 2026-09-28 weekly. The END is the close of the report day and the start is
+  // derived backwards from it. The original computed `endLocal` as
+  // `startLocal + 24h`; keeping that shape and only pushing `startLocal` back
+  // would yield [D-6, D-5) — a window that is a week long at the front and one
+  // day at the back, so days 2..7 would be excluded by the `tMs < endLocal`
+  // half of the collection filter and the weekly would quietly report a single
+  // day of forum posts while reporting seven.
+  const endLocal = new Date(`${dateStr}T00:00:00+08:00`).getTime() + 24 * 3600 * 1000;
+  const span = Number(days) > 0 ? Number(days) : 1;
+  const startLocal = endLocal - span * 24 * 3600 * 1000;
   return { startLocal, endLocal };
 }
 
@@ -422,7 +431,13 @@ async function fetchLinuxDoJsonPageWithCookie(url, cookie, config) {
 export async function fetchNews34ViaJsonApi(config, deps = {}) {
   if (!config.date) return [];
   const doFetch = deps.runFetch || runFetch;
-  const { startLocal, endLocal } = beijingDayRange(config.date);
+  // A weekly scans 7 days, so the pagination early-stop below (which breaks
+  // once a whole page predates the window) fires much later. JSON_API_MAX_PAGES
+  // is sized in pages, so it has to grow with the window or the scan truncates
+  // at the page cap long before reaching the window's own lower bound.
+  const winDays = Number(config.materialWindowDays) > 0 ? Number(config.materialWindowDays) : 1;
+  const { startLocal, endLocal } = beijingDayRange(config.date, winDays);
+  const maxPages = winDays > 1 ? Math.ceil(JSON_API_MAX_PAGES * winDays * 0.75) : JSON_API_MAX_PAGES;
   const allTopics = [];
   // One entry per failed page, so the historical silent `break` (a challenge page
   // or provider hiccup quietly ended the scan as an empty day) is at least
@@ -430,7 +445,7 @@ export async function fetchNews34ViaJsonApi(config, deps = {}) {
   const jsonApiFailures = [];
   let pagesSucceeded = 0;
 
-  for (let page = 1; page <= JSON_API_MAX_PAGES; page++) {
+  for (let page = 1; page <= maxPages; page++) {
     // order=created pins the server-side sort to created_at desc — the early-stop
     // check below assumes it. Without the param Discourse defaults to activity
     // order, where a bumped old topic shadows same-day posts mid-list.
@@ -450,7 +465,7 @@ export async function fetchNews34ViaJsonApi(config, deps = {}) {
       if (text == null) {
         const cacheFile = path.join(
           config.cacheDir,
-          `${config.date}-linuxdo-news34-page-${page}.txt`,
+          `${cacheKeyFor(config)}-linuxdo-news34-page-${page}.txt`,
         );
         const res = await doFetch(url, config, {
           maxChars: JSON_API_MAX_CHARS,
@@ -574,7 +589,7 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
       try {
         const cacheFile = path.join(
           config.cacheDir,
-          `${config.date}-linuxdo-list-${i}.txt`,
+          `${cacheKeyFor(config)}-linuxdo-list-${i}.txt`,
         );
         const res = await doFetch(url, config, {
           maxChars,
@@ -703,7 +718,7 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
         try {
           const cacheFile = path.join(
             config.cacheDir,
-            `${config.date}-linuxdo-topic-${card.id}.txt`,
+            `${cacheKeyFor(config)}-linuxdo-topic-${card.id}.txt`,
           );
           const res = await doFetch(card.url, config, {
             maxChars: Math.min(maxChars, 12000),
@@ -1228,7 +1243,7 @@ export async function enrichLinuxdoPosts(cards, config, deps = {}) {
         // Re-run of the same date: file already archived → reuse, don't re-fetch.
         const existing = await stat(dest).catch(() => null);
         if (existing?.size > 0) {
-          const rel = path.relative(dateDir, dest);
+          const rel = vaultRel(dateDir, dest);
           uploaded.push({ url: a.url, basename: safeBase, local: rel, bytes: existing.size });
           localByUrl.set(a.url, `../${rel}`);
           if (!byStem.has(attachmentKey(a.basename))) byStem.set(attachmentKey(a.basename), `../${rel}`);
@@ -1241,7 +1256,7 @@ export async function enrichLinuxdoPosts(cards, config, deps = {}) {
         const res = await download(a.url, dest, { maxBytes: maxBytesPerPost });
         const bytes = res?.bytes || 0;
         if (!bytes) continue;
-        const rel = path.relative(dateDir, dest);
+        const rel = vaultRel(dateDir, dest);
         uploaded.push({ url: a.url, basename: safeBase, local: rel, bytes });
         localByUrl.set(a.url, `../${rel}`);
         if (!byStem.has(attachmentKey(a.basename))) byStem.set(attachmentKey(a.basename), `../${rel}`);
@@ -1279,7 +1294,7 @@ export async function enrichLinuxdoPosts(cards, config, deps = {}) {
       "",
     ];
     const attachBlock = uploaded.length
-      ? ["", "## 附件", ""].concat(uploaded.map((u) => `- [${u.local.split("/").pop()}](../${u.local})`))
+      ? ["", "## 附件", ""].concat(uploaded.map((u) => `- [${u.basename}](../${u.local})`))
       : [];
     const md = [...header, body, ...attachBlock, ""].join("\n");
     try { await writeFile(postFile, md, "utf8"); } catch { return null; }
@@ -1289,7 +1304,7 @@ export async function enrichLinuxdoPosts(cards, config, deps = {}) {
       url: card?.url || `https://linux.do/t/${id}`,
       title,
       created_at: card?.created_at || topic?.created_at || null,
-      postFile: path.relative(dateDir, postFile),
+      postFile: vaultRel(dateDir, postFile),
       embed: `![[${config.date}/linuxdo-posts/${fileName}]]`,
       attachments: uploaded,
     };
@@ -1306,6 +1321,13 @@ export async function enrichLinuxdoPosts(cards, config, deps = {}) {
     );
   }
   return enriched;
+}
+
+// Vault markdown links are URL-like and always use `/`, including on Windows
+// where path.relative emits `\`. A backslash makes the image and the attachment
+// list unresolvable in Obsidian.
+function vaultRel(from, to) {
+  return path.relative(from, to).split(path.sep).join("/");
 }
 
 // File-name slug mirror of config.modelSlug: kebab of [\w] runs, empty -> "post".

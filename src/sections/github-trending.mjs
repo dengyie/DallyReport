@@ -1,8 +1,31 @@
 import path from "node:path";
 import { runFetch } from "../grok-cli.mjs";
 import { frontMatter, table } from "../markdown.mjs";
+import { cacheKeyFor } from "../report-window.mjs";
 
-const TRENDING_URL = "https://github.com/trending?since=daily";
+// 2026-09-28 weekly: the trending page is period-parameterised. Only the daily
+// URL was ever fetched, and it is not a superset — GitHub re-renders the star
+// delta for each period, so the weekly page must be requested, not inferred.
+export function trendingUrlFor(mode) {
+  return `https://github.com/trending?since=${mode === "weekly" ? "weekly" : "daily"}`;
+}
+
+// 2026-09-28 weekly: BOTH the AI note and this note are written into the
+// report date's own folder, and a forced weekly for a past date lands beside a
+// shipped daily. The AI channel was renamed "AI-周报" but this one was not, so
+// a weekly for 2026-09-25 would have overwritten that Friday's GitHub.md. The
+// period therefore travels in the artifact's name, not just its headings.
+export function githubNoteName(config) {
+  return config?.reportMode === "weekly" ? "GitHub-周报" : "GitHub";
+}
+
+// The column header and the footnote both name the period, because a "今日新增"
+// column over a 7-day delta is a misstatement in the delivered note — and it is
+// the column the reader sorts by.
+export function starDeltaLabel(mode) {
+  return mode === "weekly" ? "本周新增" : "今日新增";
+}
+
 const TOP_N = 15;
 
 // One concise line for the 简介 column: cut at the first *real* sentence
@@ -39,7 +62,17 @@ export function briefDescription(s) {
 // last bare number before "Built by", and "N stars today" closes the block.
 const OWNER_LINE_RE = /^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?)\s+\/$/;
 const NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
-const STARS_TODAY_RE = /^([\d,]+)\s+stars?\s+today$/i;
+// 2026-09-28 weekly: GitHub renders the delta as "N stars today" on the daily
+// page, "N stars this week" on the weekly one and "N stars this month" on the
+// monthly one. The old pattern anchored on the literal "today", so the weekly
+// page matched NOTHING and every row came back with starsToday === null — which
+// the `starsToday != null` filter below then turned into an empty section with
+// ok:false. Confirmed against the live page, not assumed.
+//
+// The period is an explicit allowlist rather than `.*`: it must not swallow a
+// description line or a total-star count that happens to end in a number.
+const STARS_PERIODS = "today|this week|this month";
+const STARS_TODAY_RE = new RegExp(`^([\\d,]+)\\s+stars?\\s+(?:${STARS_PERIODS})$`, "i");
 const BUILT_BY_RE = /^Built by\s*$/;
 const NUM_RE = /^([\d,]{1,15})$/;
 // The <language> line sits right after the description (or right after the
@@ -199,7 +232,7 @@ export function parseTrending(text) {
 export async function githubTrendingSection(config) {
   const cacheFile = path.join(
     config.cacheDir,
-    `${config.date}-github-trending.txt`,
+    `${cacheKeyFor(config)}-github-trending.txt`,
   );
 
   let text;
@@ -214,7 +247,7 @@ export async function githubTrendingSection(config) {
     // into trending rows. This stops a transient HTML error page (CF interstitial,
     // gateway 200+HTML) from being written as the day's cache and then silently
     // replayed as "successful" on every rerun that day.
-    const r = await runFetch(TRENDING_URL, config, {
+    const r = await runFetch(trendingUrlFor(config.reportMode), config, {
       provider: "direct",
       maxChars: config.fetchMaxChars,
       cacheFile,
@@ -241,10 +274,14 @@ export async function githubTrendingSection(config) {
   const rows = parseTrending(text);
   const top = rows.slice(0, TOP_N);
 
+  const weekly = config.reportMode === "weekly";
   const fm = frontMatter({
     date: config.date,
+    // frontMatter drops null fields, so a daily note keeps exactly the keys it
+    // ships with today.
+    date_range: weekly ? config.windowLabel : null,
     updated: new Date().toISOString(),
-    tags: ["日报", "GitHub", "trending"],
+    tags: [weekly ? "周报" : "日报", "GitHub", "trending"],
   });
 
   let mdTable = "";
@@ -255,7 +292,7 @@ export async function githubTrendingSection(config) {
       : "> 未能从抓取结果解析出 star 增量数据，可能页面结构变化或抓取为空。";
   } else {
     mdTable = table(
-      ["排名", "仓库（地址）", "简介", "语言", "今日新增", "总 star"],
+      ["排名", "仓库（地址）", "简介", "语言", starDeltaLabel(config.reportMode), "总 star"],
       top.map((r, i) => [
         i + 1,
         `[github.com/${r.repo}](https://github.com/${r.repo})`,
@@ -271,7 +308,10 @@ export async function githubTrendingSection(config) {
       note = "> ⚠️ 实时抓取响应格式异常（疑似错误页），未写入缓存，本次以实时结果渲染。\n";
     }
     const cacheTag = fromCache ? "（缓存）" : "";
-    note += `> 数据来自 github.com/trending（since=daily），抓取于 ${new Date().toISOString()} via ${provider}${cacheTag}。`;
+    // The footnote states the period actually fetched, so a weekly note cannot
+    // be mistaken for a daily one (and vice versa) when read out of context.
+    const since = config.reportMode === "weekly" ? "weekly" : "daily";
+    note += `> 数据来自 github.com/trending（since=${since}），抓取于 ${new Date().toISOString()} via ${provider}${cacheTag}。`;
     if (cacheWriteError) {
       note += `\n> ⚠️ 实时数据已获取，但缓存写入失败：${cacheWriteError.message || cacheWriteError.code || "未知错误"}`;
     }
@@ -290,7 +330,7 @@ export async function githubTrendingSection(config) {
 
   return {
     ok: top.length > 0,
-    name: "GitHub",
+    name: githubNoteName(config),
     markdown: body,
     summary: top.length > 0 ? `success (${top.length} repos)${fromCache ? " [缓存]" : ""}` : "failed",
     repoCount: top.length,
