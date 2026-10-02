@@ -24,6 +24,21 @@ function childTimeoutMs() {
   return Number.isFinite(n) && n > 0 ? n : 120000;
 }
 
+// grok-search defaults to a 240s command deadline / 180s Grok HTTP timeout.
+// DallyReport kills the child at GROK_CHILD_TIMEOUT_MS (default 120s), so pass
+// --deadline in seconds or a hung /responses POST still burns the whole budget
+// and extras never return. Sub-second test timeouts omit the flag (0 disables).
+function childDeadlineSeconds() {
+  const seconds = Math.floor(childTimeoutMs() / 1000);
+  return seconds > 0 ? seconds : null;
+}
+
+function withChildDeadline(args) {
+  const deadline = childDeadlineSeconds();
+  if (deadline != null) args.push("--deadline", String(deadline));
+  return args;
+}
+
 // Cap on the stdout a child may contribute to the accumulated buffer. A runaway
 // provider streaming gigabytes through the pipe would otherwise balloon the
 // parent's heap (and the error objects that carry `stdout` with it). Past the cap
@@ -430,6 +445,7 @@ export async function runSearch(query, config, { days, extra } = {}) {
   if (days && days > 0) args.push("--days", String(days));
   if (extra != null) args.push("--extra", String(extra));
   if (config?.searchModel) args.push("--model", config.searchModel);
+  withChildDeadline(args);
   args.push(query);
 
   const res = await runScript(scriptPath, args);
@@ -475,6 +491,7 @@ export async function runFetch(url, config, { maxChars, provider = "auto", cache
   const scriptPath = path.join(config.grokSearchDir, "scripts", "fetch.js");
   const args = ["--provider", provider];
   if (maxChars != null) args.push("--max-chars", String(maxChars));
+  withChildDeadline(args);
   args.push(url);
 
   const res = await runScript(scriptPath, args);

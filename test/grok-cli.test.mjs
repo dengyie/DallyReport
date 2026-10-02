@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import {
   runFetch,
+  runSearch,
   redactSecrets,
   MAX_STDOUT_BYTES,
   truncateRawForParseError,
@@ -151,6 +152,61 @@ async function fixtureScript(root, name, body) {
   await fs.writeFile(path.join(scripts, name), body, "utf8");
   return root;
 }
+
+test("runSearch: passes --deadline from GROK_CHILD_TIMEOUT_MS so grok-search can cap Grok HTTP", async () => {
+  const root = await tmpDir("dally-grok-deadline-");
+  await fixtureScript(
+    root,
+    "search.js",
+    'process.stdout.write(JSON.stringify({ok:true,argv:process.argv.slice(2)}));',
+  );
+  const prev = process.env.GROK_CHILD_TIMEOUT_MS;
+  process.env.GROK_CHILD_TIMEOUT_MS = "120000";
+  try {
+    const parsed = await runSearch("latest ai", { grokSearchDir: root }, { extra: 2, days: 1 });
+    assert.deepEqual(parsed.argv, ["--days", "1", "--extra", "2", "--deadline", "120", "latest ai"]);
+  } finally {
+    if (prev == null) delete process.env.GROK_CHILD_TIMEOUT_MS;
+    else process.env.GROK_CHILD_TIMEOUT_MS = prev;
+  }
+});
+
+test("runSearch: omits --deadline when the child budget is under one second", async () => {
+  const root = await tmpDir("dally-grok-deadline-omit-");
+  await fixtureScript(
+    root,
+    "search.js",
+    'process.stdout.write(JSON.stringify({ok:true,argv:process.argv.slice(2)}));',
+  );
+  const prev = process.env.GROK_CHILD_TIMEOUT_MS;
+  process.env.GROK_CHILD_TIMEOUT_MS = "400";
+  try {
+    const parsed = await runSearch("q", { grokSearchDir: root });
+    assert.equal(parsed.argv.includes("--deadline"), false);
+    assert.deepEqual(parsed.argv, ["q"]);
+  } finally {
+    if (prev == null) delete process.env.GROK_CHILD_TIMEOUT_MS;
+    else process.env.GROK_CHILD_TIMEOUT_MS = prev;
+  }
+});
+
+test("runFetch: passes --deadline before the URL", async () => {
+  const root = await tmpDir("dally-grok-fetch-deadline-");
+  await fixtureScript(
+    root,
+    "fetch.js",
+    'process.stdout.write(JSON.stringify({content:{text:process.argv.slice(2).join(" ")},diagnostics:{provider:"direct"}}));',
+  );
+  const prev = process.env.GROK_CHILD_TIMEOUT_MS;
+  process.env.GROK_CHILD_TIMEOUT_MS = "90000";
+  try {
+    const res = await runFetch("https://example.com", { grokSearchDir: root }, { provider: "direct", maxChars: 12 });
+    assert.equal(res.text, "--provider direct --max-chars 12 --deadline 90 https://example.com");
+  } finally {
+    if (prev == null) delete process.env.GROK_CHILD_TIMEOUT_MS;
+    else process.env.GROK_CHILD_TIMEOUT_MS = prev;
+  }
+});
 
 test("runFetch: a hung child is killed at the timeout and the call returns", async () => {
   const root = await tmpDir("dally-grok-timeout-");

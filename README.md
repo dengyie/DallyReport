@@ -129,7 +129,7 @@ npm test           # = node --test，跑 test/ 下的单测
 | `GROK_FETCH_MAX_CHARS` |  | GitHub trending 抓取上限字符，默认 `80000` |
 | `GROK_SYNTH_MAX_TOKENS` |  | 综合调用 completion token 上限，默认 `4000`（截断由 `finish_reason` 探测） |
 | `GROK_SYNTH_TIMEOUT_MS` |  | 综合 `/chat/completions` 调用超时，默认 `90000` |
-| `GROK_CHILD_TIMEOUT_MS` |  | 单个 grok-search 子进程超时，默认 `120000` |
+| `GROK_CHILD_TIMEOUT_MS` |  | 单个 grok-search 子进程超时，默认 `120000`；同时作为 `search.js` / `fetch.js` 的 `--deadline`（秒）传入，让 Grok HTTP 超时落在该预算内 |
 | `AI_QUERY` |  | AI 查询模板，`{date}` 会被替换成当天日期；默认已提示优先 linux.do |
 | `LINUXDO_ENABLED` |  | 是否额外抓取 linux.do 论坛 AI 帖并优先并入来源，默认开；`false` 关闭 |
 | `LINUXDO_LIST_URLS` |  | 列表页 URL，逗号分隔；默认 `前沿快讯` + `人工智能` tag |
