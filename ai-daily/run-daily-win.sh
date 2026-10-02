@@ -40,9 +40,10 @@ DEEPSEEK_TRIES=3
 FALLBACK_TRIES=2
 CHANNEL_FAIL_MAX=2
 LAUNCH_FAST_DEATH_S=600
-# 10/02 Windows 网关实证：deepseek-v4-flash 经 claude CLI 静默空回（exit=0 无输出）→ 后移；
-# gemini-3.6-flash 探针 37s 带回 sentinel → 置首。探针失败档会自动跳过，不空拉。
-ORCH_LADDER=(gemini-3.6-flash deepseek-v4-flash claude-opus-4-8 grok-4.6)
+# 10/02 网关实证：deepseek-v4-flash 经 claude CLI 静默空回；gemini-3.6-flash 探针可过但
+# launch 把指令当闲聊不跑 skill；deepseek 长 40min 回合被网关 Cloudflare 120s（524）打死；
+# claude-opus-4-8 手动单发即成稿 → 置首。探针失败档会自动跳过，不空拉。
+ORCH_LADDER=(claude-opus-4-8 gemini-3.6-flash deepseek-v4-flash grok-4.6)
 
 # Windows：通知降级为日志行（原 osascript 为 macOS 专属）。
 notify() {
