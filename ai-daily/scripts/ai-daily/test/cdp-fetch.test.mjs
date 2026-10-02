@@ -4,11 +4,13 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { acquireLock, releaseLock, cdpFetch, parseArgs, LOCK_MAX, LOCK_TIMEOUT_MS } from '../cdp-fetch.mjs'
 import { CDP_DEFAULTS } from '../cdp-core.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
+// win32 动态 import 只认 file:// URL（裸 E:\ 路径报 ERR_UNSUPPORTED_ESM_URL_SCHEME）
+const HERE_URL = pathToFileURL(HERE).href
 const ARTICLE_TEXT = '谷歌发布 Gemini 3.8 Flash。六周内第三次迭代。\n价格与 3.7 Flash 持平。'
 
 // 与 linuxdo.test.mjs 同款 mock 形态：替换 globalThis.fetch/WebSocket。
@@ -152,7 +154,7 @@ test('acquireLock：固定槽 wx，并发不得超 max（随机文件名 wx 挡�
 function runCli(args, { mockCdp = false, bodyText = ARTICLE_TEXT } = {}) {
   const argsJson = JSON.stringify(args)
   const mockSetup = mockCdp ? `
-    const { CDP_DEFAULTS: CD } = await import('${HERE}/../cdp-core.mjs')
+    const { CDP_DEFAULTS: CD } = await import('${HERE_URL}/../cdp-core.mjs')
     CD.pollIntervalMs = 1
     CD.requestTimeoutMs = 500
     CD.pollMaxMs = 1000
@@ -178,8 +180,8 @@ function runCli(args, { mockCdp = false, bodyText = ARTICLE_TEXT } = {}) {
   ` : ''
   const inline = `
     ${mockSetup}
-    const { main } = await import('${HERE}/../cdp-fetch.mjs')
-    await main(JSON.parse('${argsJson.replace(/'/g, "\\'")}'))
+    const { main } = await import('${HERE_URL}/../cdp-fetch.mjs')
+    await main(JSON.parse(${JSON.stringify(argsJson)}))
   `
   try {
     const out = execFileSync(process.execPath, ['--input-type=module', '-e', inline], { cwd: HERE, stdio: 'pipe', timeout: 30_000 })

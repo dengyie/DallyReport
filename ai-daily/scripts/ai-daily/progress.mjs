@@ -115,6 +115,8 @@ export const furthestPhase = labels => {
 }
 
 // 扫 projects 根下所有 session 的 subagents/workflows/wf_*/journal.jsonl，取 mtime 最新且 ≥ sinceMs。
+// join 用 '/'（win32 path.join 反斜杠会让调用方/测试的 posix 键对不上）
+const jf = (...segs) => segs.join('/')
 export const findLatestJournal = (projectsDir, sinceMs, io = fs) => {
   let best = null
   let bestM = -1
@@ -123,11 +125,11 @@ export const findLatestJournal = (projectsDir, sinceMs, io = fs) => {
     sess = io.readdirSync(projectsDir).filter(n => /^[0-9a-f-]{36}$/.test(n))
   } catch { return null }
   for (const s of sess) {
-    const wfDir = path.join(projectsDir, s, 'subagents', 'workflows')
+    const wfDir = jf(projectsDir, s, 'subagents', 'workflows')
     let wfs
     try { wfs = io.readdirSync(wfDir).filter(n => n.startsWith('wf_')) } catch { continue }
     for (const w of wfs) {
-      const j = path.join(wfDir, w, 'journal.jsonl')
+      const j = jf(wfDir, w, 'journal.jsonl')
       let m
       try { m = io.statSync(j).mtimeMs } catch { continue }
       if (m > bestM && m >= sinceMs) { bestM = m; best = j }

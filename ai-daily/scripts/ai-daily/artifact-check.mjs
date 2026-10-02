@@ -22,9 +22,10 @@ const DEFAULT_DIR = path.join(
 )
 
 // 产物命名契约（与 template 落盘一致）：<date>-ai日报.md / <date>.meta.json
+// join 用 '/'（win32 path.join 反斜杠会破坏摘要契约的 posix 路径展示/测试键）
 export const artifactPaths = (date, root) => ({
-  report: path.join(root, date, date + '-ai日报.md'),
-  meta: path.join(root, date, date + '.meta.json'),
+  report: [root, date, date + '-ai日报.md'].join('/'),
+  meta: [root, date, date + '.meta.json'].join('/'),
 })
 
 // meta.json 的统计是**顶层字段**（非 stats 嵌套）——旧 shell 版 `grep '"confirmed": [0-9]*'`

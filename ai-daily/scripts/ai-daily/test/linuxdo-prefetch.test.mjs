@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
 // ─── 8/27 Task 2：linux.do Node prefetch 隔离层聚焦测试。
@@ -11,9 +11,10 @@ import { spawnSync } from 'node:child_process'
 // 开=关仍由 linuxdo.mjs readBodyText 的 finally 收敛（mock 环境断言开=关）。
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const PREFETCH = 'file://' + path.join(HERE, '../linuxdo-prefetch.mjs')
+// win32 动态 import 只认 file:// URL（'file://' + path.join 拼不出合法 URL）
+const PREFETCH = pathToFileURL(path.join(HERE, '../linuxdo-prefetch.mjs')).href
 // cdp-core 用绝对 file:// URL import——相对 './scripts/...' 依赖 CWD（从仓根/ai-daily 根跑行为不同）。
-const CDP_CORE = 'file://' + path.join(HERE, '../cdp-core.mjs')
+const CDP_CORE = pathToFileURL(path.join(HERE, '../cdp-core.mjs')).href
 
 // 成功 mock 时每条紧接页/深帖返回的 body。注意 linuxdo 分页会逐页 readBodyText，
 // mock 不改页会全部返回同一 body，导致 topics 累积 = maxPages × 每页条数。
