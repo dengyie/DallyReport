@@ -43,10 +43,17 @@ export const classifyPrompt = text => {
   return null
 }
 
-const START_RE = /^===== (\S+ \S+) CST start run-daily/
-const DONE_RE = /^===== \S+ \S+ CST done rc=(\d+) =====/
+// P1（10-04 review 实证）：旧版把时区字面量写死成 `CST`——Mac launchd 宿主 `date '+%Z'` 出 CST，
+// 但 Windows Git Bash 出**空串** → run-daily-win 写的 `===== 2026-10-04 02:55:53  start run-daily-win…`
+// （两个空格、无时区）永不匹配 → 进度台恒显「未启动」。时区标记改为可选 `(?: \S+)?`。
+// DONE 行同理：两个 runner 都写 `done rc=2 (probe-exhausted) =====`，旧 `rc=(\d+) =====` 不认括号后缀
+// → 终态在两平台都测不到。后缀改为可选 `(?: \([^)]*\))?`，rc 仍取第一个捕获组。
+// 空格分隔用 ` +`（一个或多个）而非单个空格：无时区时 runner 写出两个连续空格
+// （`…02:55:53  start run-daily-win`），单空格字面量匹配不上，实测被测试逮住。
+const START_RE = /^===== (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?: \S+)? +start run-daily/
+const DONE_RE = /^===== \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?: \S+)? +done rc=(\d+)(?: \([^)]*\))? =====/
 
-// 日志时间戳是本地 CST 字面量（launchd 宿主写的），直接按本地时区解析。
+// 日志时间戳是宿主本地时区字面量（时区标记可有可无），按本地时区解析——与 parseStamp 同法。
 const parseStamp = s => {
   const m = s.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/)
   if (!m) return null

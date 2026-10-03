@@ -65,6 +65,39 @@ test('parseRunState：终态 rc=1 + 无 start 日志两种边界', () => {
   assert.equal(none.started, false)
 })
 
+// P1 回归（10-04 review 实证）：Windows Git Bash `date '+%Z'` 出空串 → runner 写无时区标记的
+// start/done 行（`===== …  start run-daily-win`，两个空格）。旧正则写死 `CST` 永不匹配。
+// 时区标记必须可选；CST 旧格式不得回归（下面 fixture 同时锁两态）。
+test('parseRunState：Windows 无时区标记 start（run-daily-win）也能识别', () => {
+  const winStart = '===== 2026-10-04 02:55:53  start run-daily-win（CEILING_MS=0）====='
+  const log = [winStart, 'LINUXDO-PREFETCH-OK json_bytes=8596', 'API Error: 524 ray=x'].join('\n')
+  const nowMs = new Date('2026-10-04T02:55:53').getTime() + 30000
+  const s = parseRunState(log, nowMs)
+  assert.equal(s.started, true)
+  assert.equal(s.terminal, false)
+  assert.equal(s.elapsedS, 30, '无时区标记同样按本地时区解析墙钟')
+  assert.equal(s.fives24, 1)
+  // CST 旧格式仍必须匹配（Mac 宿主没变）。
+  assert.equal(parseRunState(START + '\n', 0).started, true)
+})
+
+test('parseRunState：done rc=2 (probe-exhausted) 括号后缀也能判终态', () => {
+  const log = [
+    '===== 2026-10-04 02:55:53  start run-daily-win（CEILING_MS=0）=====',
+    'LINUXDO-PREFETCH-FAIL exit=1 → 落盘 ok:false（realm 不裸抓 CDP，linux.do 走降级）',
+    '===== 2026-10-04 03:41:19  done rc=2 (probe-exhausted) =====',
+    'ARTIFACT-FAIL report_missing err=ENOENT',
+  ].join('\n')
+  const s = parseRunState(log, 0)
+  assert.equal(s.terminal, true)
+  assert.equal(s.rc, 2, 'probe-exhausted 仍记 rc=2，不因括号后缀丢失')
+  assert.match(s.artifactLine, /^ARTIFACT-FAIL/)
+  // 带时区标记 + 括号后缀的组合（Mac 若未来也发终结后缀）一并锁住。
+  const mix = parseRunState([START, '===== 2026-09-02 19:18:20 CST done rc=2 (probe-exhausted) ====='].join('\n'), 0)
+  assert.equal(mix.terminal, true)
+  assert.equal(mix.rc, 2)
+})
+
 test('classifyPrompt：五阶段 + 探针锚点与 prompts.mjs 标题逐字对齐', () => {
   assert.equal(classifyPrompt('## 共享源 Harvest（批量 official）\n\n窗口：…'), 'harvest')
   assert.equal(classifyPrompt('## 板块发现代理（合组：labs+opensource）\n\n窗口：…'), 'discover')
