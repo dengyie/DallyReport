@@ -423,13 +423,32 @@ test('模板：fetch claim 走 bindExtractedClaims（索引页缺文章 URL 丢�
   assert.match(TPL, /indexClaimDroppedTotal \+= /, '丢弃计数累加绑定结果（不再对所有 !su 计数）')
   assert.match(TPL, /index_claim_dropped:/, 'degraded 旗标是丢弃数，不得再叫 citation')
   assert.doesNotMatch(TPL, /index_page_citation:/, 'index_page_citation 会把已丢弃的栏目页 claim 读成仍在引用链上')
-  assert.match(TPL, /const CDP_FETCH_CLI = '\/Users\/mango\/project\/claude-project\/obsidian\/scripts\/ai-daily\/cdp-fetch\.mjs'/, 'cdp-fetch CLI 绝对路径常量在场')
+  assert.match(TPL, /const CDP_FETCH_CLI = \(typeof args\.cdpFetchCli === 'string' && args\.cdpFetchCli\) \|\| 'E:\/code\/DallyReport\/ai-daily\/scripts\/ai-daily\/cdp-fetch\.mjs'/, 'cdp-fetch CLI：args 可覆盖 + Windows 生产默认（10-03 P0：旧 Mac 硬编码在 Windows 指向不存在文件）')
+  assert.match(TPL, /const GROK_DIR = \(typeof args\.grokDir === 'string' && args\.grokDir\) \|\| 'C:\/Users\/mango\/\.agents\/skills\/grok-search'/, 'grok-search skill 目录：args 可覆盖 + Windows 默认')
+  assert.doesNotMatch(TPL, /['"]\/Users\/mango\//, '模板内不得残留 Mac 绝对路径字面量（10-03 P0-D：Windows 生产唯一；C:/Users/... 盘符形态不误伤）')
   assert.match(TPL, /webFetchViaCdp: WEB_FETCH_VIA_CDP/, 'ctx 携带门控标志')
 })
 
 test('模板：windowMisses 聚合走 foldWindowMisses（09-21 中文近重复不得只比全名）', () => {
   assert.match(TPL, /foldWindowMisses\(/, '窗口外参考聚合必须折叠近重复，不得只 w.name === m.name')
   assert.doesNotMatch(TPL, /!windowMisses\.some\(w => w\.name === m\.name\)/, '全等去重已退役')
+})
+
+// ─── 10-03 §12 债务清偿：阶梯观测 / 周期墙钟标定 ───
+
+test('模板：周期墙钟标定观测在场（10-03 §12-③ 健康跑零观测盲区）', () => {
+  assert.match(TPL, /const WALL_CALIBRATE_MS = typeof args\.wallCalibrateMs === 'number' && args\.wallCalibrateMs >= 0 \? args\.wallCalibrateMs : 600000/, 'args.wallCalibrateMs 可覆盖（默认 600s）')
+  assert.match(TPL, /WALL\.observe\(250, _wallMs - t0\)/, '250ms 微超时定时器喂 WALL.observe（setTimeout 绝不早触发 = 真实经过下界）')
+  assert.match(TPL, /_wallCalibrateOnce\(\)\.then\(_scheduleWallCalibrate\)/, '标定完成后链式续排（不重叠、run 结束自然停止）')
+  assert.match(TPL, /墙钟标定·周期/, 'factor>1 才留日志（健康跑零噪声）')
+})
+
+test('模板：meta.ladder 阶梯观测账在场（10-03 §12-① 重排决策数据）', () => {
+  assert.match(TPL, /const ladderTried = \{ report: \[\], verify: \[\] \}/, 'report/verify 分桶尝试记录')
+  assert.match(TPL, /ladderTried\[isReport \? 'report' : 'verify'\]\.push\(model\)/, 'onTried 逐档入桶')
+  assert.match(TPL, /ladder: \{/, 'meta 增 ladder 账')
+  assert.match(TPL, /verify: \{ tried_total: ladderTried\.verify\.length, by_model:/, 'verify 各档计数可读')
+  assert.match(TPL, /exhausted: \[\.\.\.ladderExhaustedStages\]/, '耗尽阶段入账')
 })
 
 // ─── 9/19 根因修复编排契约：linuxdo 治理 / 外部抽查票 / Status 烘焙 / 窗口预过滤 ───

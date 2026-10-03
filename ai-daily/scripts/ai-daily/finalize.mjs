@@ -65,14 +65,24 @@ const ensure = {
 
 // ─── 9/13 跨天账本（记录端）───
 export const DEFAULT_LEDGER = path.join(os.homedir(), '.ai-daily', 'published-ledger.json')
-// 生产 outDir 前缀：只有写进该前缀下的 run 才自动记账（烟测 /tmp 隔离）。
-export const PROD_DALLYREPORT_PREFIX = path.join(os.homedir(), 'Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-note/AI/DallyReport')
+// 生产 outDir 前缀：只有写进任一前缀下的 run 才自动记账（烟测 /tmp 隔离）。
+// P0（10-03 review 实证）：旧版只有 Mac iCloud 单前缀——Windows 迁移后生产 outDir 是
+// E:/profile/note/note/AI/DallyReport，isProdOutDir 恒 false → 生产 LEDGER-SKIP + poster 永不跑。
+// 改前缀列表：Windows 生产置首 + Mac iCloud 兜底（历史对账）；AI_DAILY_PROD_PREFIX 环境变量可再覆盖。
+export const PROD_DALLYREPORT_PREFIXES = [
+  'E:/profile/note/note/AI/DallyReport',
+  path.join(os.homedir(), 'Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-note/AI/DallyReport'),
+]
+if (process.env.AI_DAILY_PROD_PREFIX) PROD_DALLYREPORT_PREFIXES.unshift(process.env.AI_DAILY_PROD_PREFIX)
 
-/** 生产 outDir 判定（可注入 prefix，测试不得在真实 iCloud 目录 mkdtemp）。 */
-export const isProdOutDir = (outDir, prefix = PROD_DALLYREPORT_PREFIX) => {
+/** 生产 outDir 判定（prefix 可注入：字符串或前缀数组；测试不得在真实生产目录 mkdtemp）。 */
+export const isProdOutDir = (outDir, prefix = PROD_DALLYREPORT_PREFIXES) => {
   const resolvedOut = path.resolve(expand(outDir))
-  const resolvedPrefix = path.resolve(prefix)
-  return resolvedOut === resolvedPrefix || resolvedOut.startsWith(resolvedPrefix + path.sep)
+  const prefixes = Array.isArray(prefix) ? prefix : [prefix]
+  return prefixes.some(p => {
+    const resolvedPrefix = path.resolve(expand(p))
+    return resolvedOut === resolvedPrefix || resolvedOut.startsWith(resolvedPrefix + path.sep)
+  })
 }
 
 /**

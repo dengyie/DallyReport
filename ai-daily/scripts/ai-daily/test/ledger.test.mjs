@@ -10,7 +10,7 @@ import {
   fingerprintTokens, makeLedgerEntry, storyMatch, filterReportedTargets, splitSeeds, pruneLedger,
   parseReportedLedger, buildYesterdayTopics,
 } from '../ledger.mjs'
-import { ledgerEntriesFromClaims, recordLedger, DEFAULT_LEDGER, PROD_DALLYREPORT_PREFIX, isProdOutDir } from '../finalize.mjs'
+import { ledgerEntriesFromClaims, recordLedger, DEFAULT_LEDGER, PROD_DALLYREPORT_PREFIXES, isProdOutDir } from '../finalize.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -263,13 +263,20 @@ test('CLI：--ledger 显式覆盖 → /tmp outDir 也记账', () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('isProdOutDir：只认生产前缀，不在真实 iCloud 目录落盘', () => {
+test('isProdOutDir：只认生产前缀，不在真实生产目录落盘', () => {
   const prefix = path.join(os.tmpdir(), 'fake-dallyreport-prefix')
   assert.equal(isProdOutDir(prefix, prefix), true)
   assert.equal(isProdOutDir(path.join(prefix, '2026-09-06'), prefix), true)
   assert.equal(isProdOutDir(path.join(os.tmpdir(), 'elsewhere'), prefix), false)
-  assert.equal(isProdOutDir(PROD_DALLYREPORT_PREFIX), true, '默认前缀命中生产根')
   assert.equal(isProdOutDir(path.join(os.tmpdir(), 'finalize-smoke-x')), false)
+})
+
+test('isProdOutDir（10-03 P0）：Windows vault 生产路径命中（旧版 Mac iCloud 单前缀恒 false → 生产 LEDGER-SKIP）', () => {
+  assert.equal(isProdOutDir('E:/profile/note/note/AI/DallyReport/2026-10-03'), true, 'Windows 生产日期目录命中')
+  assert.equal(isProdOutDir('E:\\profile\\note\\note\\AI\\DallyReport\\2026-10-03'), true, '反斜杠形态同样命中（path.resolve 归一）')
+  assert.equal(isProdOutDir('E:/profile/note/note/AI/DallyReport'), true, '生产根目录命中')
+  assert.equal(isProdOutDir('E:/profile/note/note/AI/DallyReport-other/x'), false, '同前缀异目录不误命中')
+  assert.equal(isProdOutDir(PROD_DALLYREPORT_PREFIXES[1]), true, 'Mac iCloud 兜底前缀仍命中（历史对账）')
 })
 
 // ─── 10/03 对齐参考日报：昨日话题追踪（连续剧）───

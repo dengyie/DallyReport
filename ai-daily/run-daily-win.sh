@@ -17,16 +17,22 @@ REPO_AI="E:/code/DallyReport/ai-daily"
 VAULT="E:/profile/note/note"
 mkdir -p "$LOGDIR"
 LOG="$LOGDIR/run-daily.log"
-STAMP="$(date '+%Y-%m-%d %H:%M:%S %Z')"
 
 # 任务计划程序上下文下保证 node / claude 可达（npm 全局 shim 在 AppData\Roaming\npm）。
-export PATH="/c/Program Files/nodejs:/c/Users/mango/AppData/Roaming/npm:$PATH"
+# P0（10-03 08:40 生产实证）：任务计划程序调起的 bash.exe 非登录 shell，PATH 里没有 Git 的
+# /usr/bin → date/seq/tr/wc 全部 command not found：STAMP/TODAY 空串、四档探针被 seq 失败
+# 全部打死（零 launch，rc=2 probe-exhausted），整轮空转。补 /usr/bin 后这些 coreutils 可达。
+# STAMP 必须在 PATH 导出之后取（此前在 line 20，Task Scheduler 下 date 不可达 → 空时间戳）。
+export PATH="/e/code/Git/usr/bin:/c/Program Files/nodejs:/c/Users/mango/AppData/Roaming/npm:$PATH"
+STAMP="$(date '+%Y-%m-%d %H:%M:%S %Z')"
 # P0 headless 修复（8/18 Mac 实证）：关闭 print 模式 600s 后台任务上限，等 workflow 真正完成。
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0
 
 cd "$VAULT" || { echo "$STAMP FAIL cd-vault exit=$?" >> "$LOG"; exit 1; }
 
 TODAY="$(date '+%F')"
+# P0 防御：日期取不到（date 不可达/异常）宁可早退，也不用空 TODAY 构造坏产物路径。
+[ -n "$TODAY" ] || { echo "$STAMP FAIL date-unavailable → early exit（不空跑）" >> "$LOG"; exit 1; }
 OB_DIR="${VAULT}/AI/DallyReport/${TODAY}"
 REPORT="${OB_DIR}/${TODAY}-ai日报.md"
 LEDGER="${LOGDIR}/published-ledger.json"
@@ -45,9 +51,21 @@ LAUNCH_FAST_DEATH_S=600
 # claude-opus-4-8 手动单发即成稿 → 置首。探针失败档会自动跳过，不空拉。
 ORCH_LADDER=(claude-opus-4-8 gemini-3.6-flash deepseek-v4-flash grok-4.6)
 
-# Windows：通知降级为日志行（原 osascript 为 macOS 专属）。
+# Windows 通知（10-03 §12-④）：PowerShell WinRT toast（任务计划程序上下文可用，无需 BurntToast 模块），
+# 失败回落纯日志——通知绝不能影响 run 本体。AppId 用 PowerShell 的已注册 AUMID 免自注册。
+# 注意：toast 只在「有交互会话」时可见；纯后台会话 toast 静默失败 → 回落日志行（可见性仍由日志兜底）。
 notify() {
-  echo "NOTIFY (log-only) $1 :: $2"
+  echo "NOTIFY $1 :: $2"
+  powershell.exe -NoProfile -NonInteractive -Command "
+try {
+  \$a = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+  \$t = \$a.GetElementsByTagName('text')
+  \$t.Item(0).AppendChild(\$a.CreateTextNode('$1')) | Out-Null
+  \$t.Item(1).AppendChild(\$a.CreateTextNode('$2')) | Out-Null
+  \$n = [Windows.UI.Notifications.ToastNotification]::new(\$a)
+  [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show(\$n)
+} catch { Write-Output (\"toast-fallback-log \" + \$_.Exception.Message) }
+" 2>> "$LOG" | grep -q "toast-fallback-log" && echo "NOTIFY-TOAST-FAILED → log-only 兜底" >> "$LOG" || true
 }
 
 # 网关探针：必须与本次 launch 同模型、同 skip-permissions、同属工具调用类。

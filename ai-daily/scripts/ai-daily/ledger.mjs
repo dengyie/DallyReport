@@ -182,6 +182,16 @@ export const buildYesterdayTopics = (ledger, confirmedItems, today, lookbackDays
   })
   if (!ents.length) return []
   const likeOf = c => ({ url: c && c.sourceUrl, tokens: fingerprintTokens([c && c.claim, c && c.quote].filter(Boolean).join(' ')) })
+  // 10-03 §12-⑤ 复杂度治理：streak 回看此前每步都对全账本 find（O(回看天数 × 账本条目 × storyMatch)）。
+  // 改 day→entries 倒排索引一次建表，每步只 match 当天分桶；同天多条时任一命中即续（与旧行为一致——
+  // 旧 find 也是「当天第一条命中的」）。账本 60d 上限内单日几十条时是常数级优化，膨胀后是线性→常数。
+  const byDay = new Map()
+  for (const e of (Array.isArray(ledger) ? ledger : [])) {
+    const d = normalizeDate(e && e.day)
+    if (d == null) continue
+    if (!byDay.has(d)) byDay.set(d, [])
+    byDay.get(d).push(e)
+  }
   // 连续剧计数：该事件在此前账本里连续出现的天数（含本次 day）。从条目自身 day 往前逐天回看
   // + storyMatch 互认（回看起点是 e.day-1——从 t 回看会命中条目自己）。
   const streakOf = e => {
@@ -190,7 +200,9 @@ export const buildYesterdayTopics = (ledger, confirmedItems, today, lookbackDays
     let streak = 1
     for (let back = 1; back <= LEDGER_KEEP_DAYS; back++) {
       const prevDay = _calendarDayMinus(eDay, back)
-      const prev = (Array.isArray(ledger) ? ledger : []).find(x => normalizeDate(x && x.day) === prevDay && storyMatch(e, x))
+      const bucket = byDay.get(prevDay)
+      if (!bucket) break
+      const prev = bucket.find(x => storyMatch(e, x))
       if (!prev) break
       streak++
     }

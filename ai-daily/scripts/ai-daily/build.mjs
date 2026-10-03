@@ -2,8 +2,12 @@
 // ai-daily workflow 构建器：模块真源（scripts/ai-daily/*.mjs）inline 进模板 → 自包含 workflow 产物。
 // workflow realm 无 fs/模块解析，必须单文件自包含——本脚本是唯一既让逻辑进 node:test、又不破坏该约束的形态。
 //
-// 用法：node scripts/ai-daily/build.mjs [--out <path>] [--check-only]
+// 用法：node scripts/ai-daily/build.mjs [--out <path>] [--check-only] [--sync-vault [dir]]
 // 护栏：①剥 export/import 后 inline；②产物 node --check；③占位符零残留断言。任一失败不出产物。
+// --sync-vault（10-03 §12-⑥）：产物写盘成功后把「workflow 产物 + SKILL.md」同步拷入 vault .claude/
+//   （默认 E:/profile/note/note/.claude，可跟目录或用 AI_DAILY_VAULT 覆盖）。治双仓手工 cp 漂移：
+//   仓内产物/SKILL 改了而 vault 没拷 → 生产跑旧版。同步失败只告警不失败（build 本体已成功），
+//   产物/SKILL 与 vault 目标逐字节相同则跳过（幂等，mtime 不动）。
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -77,11 +81,37 @@ const assertRealmGuards = code => {
   }
 }
 
+// ─── 10-03 §12-⑥：vault 镜像同步（产物 + SKILL.md；漏 cp 即生产跑旧版的漂移治理）───
+const DEFAULT_VAULT_CLAUDE = 'E:/profile/note/note/.claude'
+export const syncVault = (repoArtifact, repoSkill, vaultClaude, fsImpl = fs) => {
+  const targets = [
+    [repoArtifact, path.join(vaultClaude, 'workflows', 'ai-daily.js')],
+    [repoSkill, path.join(vaultClaude, 'skills', 'ai-daily', 'SKILL.md')],
+  ]
+  const synced = [], skipped = []
+  for (const [src, dst] of targets) {
+    if (!fsImpl.existsSync(src)) throw new Error('sync-vault: 源不存在 ' + src)
+    fsImpl.mkdirSync(path.dirname(dst), { recursive: true })
+    if (fsImpl.existsSync(dst) && fsImpl.readFileSync(src, 'utf8') === fsImpl.readFileSync(dst, 'utf8')) {
+      skipped.push(dst); continue
+    }
+    fsImpl.copyFileSync(src, dst)
+    synced.push(dst)
+  }
+  return { synced, skipped }
+}
+
 const main = () => {
   const argv = process.argv.slice(2)
   const outIdx = argv.indexOf('--out')
   const outPath = outIdx >= 0 ? path.resolve(argv[outIdx + 1]) : DEFAULT_OUT
   const checkOnly = argv.includes('--check-only')
+  const syncVaultFlag = argv.includes('--sync-vault')
+  const vaultArgIdx = argv.indexOf('--sync-vault')
+  const vaultNext = vaultArgIdx >= 0 ? argv[vaultArgIdx + 1] : null
+  const vaultClaude = (vaultNext && !vaultNext.startsWith('--') ? vaultNext : null)
+    || process.env.AI_DAILY_VAULT_CLAUDE
+    || DEFAULT_VAULT_CLAUDE
   const code = build()
   assertRealmGuards(code)
   syntaxGate(code)
@@ -91,6 +121,15 @@ const main = () => {
   }
   fs.writeFileSync(outPath, code)
   console.log('built → ' + outPath + '（' + code.split('\n').length + ' 行）')
+  if (syncVaultFlag) {
+    try {
+      const { synced, skipped } = syncVault(outPath, path.resolve(HERE, '../../.claude/skills/ai-daily/SKILL.md'), vaultClaude)
+      for (const s of synced) console.log('VAULT-SYNC updated → ' + s)
+      for (const s of skipped) console.log('VAULT-SYNC identical → ' + s)
+    } catch (e) {
+      console.error('VAULT-SYNC-WARN 同步失败（产物已构建，vault 仍需手工 cp）: ' + (e && e.message))
+    }
+  }
 }
 
 // ─── 语法门（9/19 根因修复，与 Node 版本解耦）───

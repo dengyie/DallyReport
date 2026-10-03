@@ -49,17 +49,6 @@ export const makeAddMajor = majorOutClaims => (m, board) => {
   majorOutClaims.push(_mkMajor(m, board))
 }
 
-// 静态候选优先：把 found_via==='static-fallback' 的项移到数组前部，组内保持原顺序；返回新数组，
-// 不修改输入数组与项对象。8/27 Fetch 预算书账：静态源（官方新闻页）在预算紧张时优先摄入，
-// 保证 discover 全失败 + harvest 兜底缺时，静态兜底 URL 仍能先进 Fetch 配额（而非被排在普通候选中
-// 挤到 budgetDropped）。只排序不增减项——不承诺恢复 budgetDropped 项，MAX_FETCH 是总上限。
-export const preferStaticFirst = targets => {
-  const statics = []
-  const others = []
-  for (const t of targets) (t && t.found_via === 'static-fallback' ? statics : others).push(t)
-  return statics.concat(others)
-}
-
 // 轮询公平分配 fetch 预算：每轮每板块至多取 1 个未抓 URL，直到 maxFetch 耗尽——保证晚序板块不被压占。
 // boardURLMap: Map<boardKey, urlObj[]>（urlObj 带 url 字段；函数内补 board 字段）。
 // 8/27 Task 1：可选 prefer 通道——found_via 命中 preferFoundVia（默认 ['linuxdo-cdp','static-fallback']）

@@ -7,9 +7,9 @@
 ## 速读（当前有效 · 维护于 2026-10-03）
 
 - 生产 Windows 唯一：任务计划程序 `ai-daily`（每日 08:40）→ `run-daily-task.cmd` → `run-daily-win.sh` → `claude -p`（skill 编排）→ Workflow 产物 → `finalize.mjs` 落盘 vault `AI/DallyReport/<date>/`。Mac launchd 与 `~/.ai-daily` 已于 10-03 清流。
-- 逻辑真源 = `scripts/ai-daily/*.mjs`（15 个模块）+ `ai-daily.template.js`（编排骨架）；`build.mjs` inline 生成 3269 行自包含产物 `.claude/workflows/ai-daily.js`（repo 内），再手工 cp 同步到 vault `.claude/`。
+- 逻辑真源 = `scripts/ai-daily/*.mjs`（15 个模块）+ `ai-daily.template.js`（编排骨架）；`build.mjs` inline 生成 3309 行自包含产物 `.claude/workflows/ai-daily.js`（repo 内），`--sync-vault` 一步同步产物 + SKILL.md 到 vault `.claude/`。
 - 全链路预算：MAX_FETCH/MAX_VERIFY 16，五阶段墙钟切片 540/480/480/300s（总 1800s），report 单次 600s；对抗核查 2+1 票；跨天账本硬去重 + 昨日话题追踪 + 社区热度（10-03 五要素已上线）。
-- 测试：`cd scripts/ai-daily && node --test test/*.test.mjs`（**必须 cd 进目录**，repo 根跑 glob 不中）；当前 433 项 425 pass / 0 fail / 8 有意 skip。
+- 测试：`cd scripts/ai-daily && node --test test/*.test.mjs`（**必须 cd 进目录**，repo 根跑 glob 不中）；当前 429 项 421 pass / 0 fail / 8 有意 skip。
 - 纪律红线：CDP 只复用 9222 已运行登录态 Chrome；日报正文写「社区」不点名站名；secrets 不入库不进 prompt；`--date` 全量重跑禁止（Iron Rule，单节修复 only）。
 
 ## 1. 系统总览
@@ -37,14 +37,14 @@
 
 ```
 ai-daily/
-├── ai-daily.template.js @ scripts/ai-daily/     # 编排骨架（1273 行）：realm 适配 + 五阶段编排
+├── ai-daily.template.js @ scripts/ai-daily/     # 编排骨架（1312 行）：realm 适配 + 五阶段编排
 ├── scripts/ai-daily/*.mjs                       # 15 个逻辑模块真源 + 6 个宿主 CLI
 │   ├── 纯逻辑模块（build inline 进产物）：url-polyfill date-utils schemas boards dedup budget
 │   │   wallclock ladder fallback prompts render-md cluster ledger cdp-core linuxdo
 │   ├── 宿主 CLI（绝不 inline）：linuxdo-prefetch cdp-fetch artifact-check host-finalize
 │   │   progress generate-poster finalize cli-main
 │   └── test/*.test.mjs                          # 32 个测试文件，node --test 直调模块真源
-├── .claude/workflows/ai-daily.js                # build 产物（repo 内，3269 行，勿手改）
+├── .claude/workflows/ai-daily.js                # build 产物（repo 内，3309 行，勿手改）
 ├── .claude/skills/ai-daily/SKILL.md             # skill 编排器（vault 侧另有同步副本）
 ├── run-daily-win.sh / run-daily.sh              # Windows 生产 / Mac（已清流，保留语义参考）
 ├── run-daily-task.cmd / register-task.ps1       # 任务计划程序包装与注册
@@ -52,15 +52,16 @@ ai-daily/
 └── docs/2026-08-*.md                            # dated 历史设计快照（见 §13）
 ```
 
-**双仓镜像纪律**：`DallyReport/ai-daily/scripts/ai-daily/` 是版本管理真源（本仓）；vault `.claude/` 是运行时副本。**改模块逻辑 → 改 `.mjs` 真源；改编排 → 改 `ai-daily.template.js`；改完必须 `node scripts/ai-daily/build.mjs`**，再 cp 产物 + SKILL.md 到 vault。`generate-poster.mjs` 有跨仓依赖（向上找 DallyReport 仓根 image-gen），两仓各一份镜像，层数不同。
+**双仓镜像纪律**：`DallyReport/ai-daily/scripts/ai-daily/` 是版本管理真源（本仓）；vault `.claude/` 是运行时副本。**改模块逻辑 → 改 `.mjs` 真源；改编排 → 改 `ai-daily.template.js`；改完必须 `node scripts/ai-daily/build.mjs --sync-vault`**（构建 + 产物/SKILL.md 一步同步 vault，逐字节相同自动跳过；10-03 §12-⑥ 前为手工 cp）。`generate-poster.mjs` 有跨仓依赖（向上找 DallyReport 仓根 image-gen），两仓各一份镜像，层数不同。
 
 ## 3. 构建系统（build.mjs）
 
 ```
-node scripts/ai-daily/build.mjs [--out <path>] [--check-only]
+node scripts/ai-daily/build.mjs [--out <path>] [--check-only] [--sync-vault [vaultClaudeDir]]
 # 默认写 ../../.claude/workflows/ai-daily.js（repo 内）
-# vault 同步：cp .claude/workflows/ai-daily.js  <vault>/.claude/workflows/
-#            cp .claude/skills/ai-daily/SKILL.md <vault>/.claude/skills/ai-daily/
+# --sync-vault（10-03 §12-⑥）：产物写盘成功后把「workflow 产物 + SKILL.md」同步拷入 vault
+#   .claude/（默认 E:/profile/note/note/.claude，可跟目录参数或 AI_DAILY_VAULT_CLAUDE 环境变量）。
+#   逐字节相同自动跳过（幂等）；同步失败只告警不判 build 失败。
 ```
 
 四道护栏，任一失败不出产物：
@@ -83,7 +84,7 @@ node scripts/ai-daily/build.mjs [--out <path>] [--check-only]
 
 ## 5. 五阶段流水线
 
-模板常量（args 可覆盖）：`MAX_FETCH=16`、`MAX_VERIFY=16`、`MAX_URLS_PER_BOARD=6`、`AGENT_TIMEOUT_MS=360s`、`SYNTHESIS_LIMIT_MS=600s`、`LADDER_BUDGET_MS=900s`、`TOTAL_LIMIT_MS=1800s`。
+模板常量（args 可覆盖）：`MAX_FETCH=16`、`MAX_VERIFY=16`、`MAX_URLS_PER_BOARD=6`、`AGENT_TIMEOUT_MS=360s`、`SYNTHESIS_LIMIT_MS=600s`、`LADDER_BUDGET_MS=900s`、`TOTAL_LIMIT_MS=1800s`、`WALL_CALIBRATE_MS=600s`（0 关闭）、`CDP_FETCH_CLI`（Windows 仓绝对路径）、`GROK_DIR`（C:/Users/mango/.agents/skills/grok-search）——后两项 10-03 P0-D 前硬编码 Mac 路径，Windows 生产下 9222 fetch 通道与 grok-search skill 全哑。
 
 ### Harvest（切片 540s）
 - 唯一 feed 去重（feedMap，共享源只抓一次）→ GROUPS_RAW 5 组（official/cn-media/en-media/opensource/academic）→ `HARVEST_BATCH=3` 批量串行，`tries=1`，单代理上界 1800s（8/16-8/19 实证：360s 死线会丢弃已完成的慢结果）。
@@ -121,19 +122,20 @@ node scripts/ai-daily/build.mjs [--out <path>] [--check-only]
 累加器在事件循环饱和下**只低估**（8/31 实测 Fetch gate 低估 ≥4.7×，4h13m run 零 BUDGET-SKIP）：
 
 1. **budgetGate**（预算.mjs）：累计死线 = 切片和（Verify 另减 60s inflight buffer）；超限记 budget_skipped 一次性；`roomTo()` 纯读不记账（批边界用）。
-2. **WALL 标定**（wallclock.mjs）：`withDeadline` 真超时是「真实经过 ≥ ms」的硬证据，与同窗口累加器增量相比得饥饿倍率 → `WALL.observe` 标定（maxFactor 20 封顶 + 单调闸防时间倒流）；探针/短窗超时传 `observe=false` 不污染倍率。meta 记 wallclock{raw_s, calibrated_s, starvation_factor, peak_factor}，与宿主侧 epoch（run-daily-win.sh WALL_START）三方对账。
+2. **WALL 标定**（wallclock.mjs）：`withDeadline` 真超时是「真实经过 ≥ ms」的硬证据，与同窗口累加器增量相比得饥饿倍率 → `WALL.observe` 标定（maxFactor 20 封顶 + 单调闸防时间倒流）；探针/短窗超时传 `observe=false` 不污染倍率。**周期标定观测（10-03 §12-③）**：健康跑零真实超时曾意味着零观测（盲区）——现每 `wallCalibrateMs`（默认 600s）发一发 250ms 微超时定时器喂 `WALL.observe`（setTimeout 绝不早触发 = 真实经过下界；健康跑 factor=1 零影响，饱和跑立刻拿到证据），factor>1 才留日志。meta 记 wallclock{raw_s, calibrated_s, starvation_factor, peak_factor, observations, calibrate_period_ms}，与宿主侧 epoch（run-daily-win.sh WALL_START）三方对账。
 3. **BREAKER 计数断路器**：不依赖时钟（饱和下计数依然准确），连续 3 或累计 5 次代理失败跳闸 → Discover 余批跳过直连 static-fallback。Discover 入口 `resetConsecutive()`（Harvest 失败不外溢，已跳闸仍 open）。中间失败不得自吃计数（ladder 工厂不碰断路器）。
 
 ### 6.2 模型阶梯（两个层面，勿混淆）
-- **realm 内 ladder**（ladder.mjs，作用于 report/verify 代理）：`DEFAULT_LADDER = [deepseek-v4-flash, grok-4.6, claude-opus-4-8, gemini-3.7-flash-high]`，args.modelLadder 可覆盖。仅 TRANSIENT（524/5xx/429/timeout/gateway）换级，null（超时）也换级（safeAgent 的唯一偏离），schema/end_turn 同级消化；LADDER_BUDGET_MS 900s 全程共享（verify 多票共享 t0）；中间失败不计入断路器。
+- **realm 内 ladder**（ladder.mjs，作用于 report/verify 代理）：`DEFAULT_LADDER = [deepseek-v4-flash, grok-4.6, claude-opus-4-8, gemini-3.7-flash-high]`，args.modelLadder 可覆盖。仅 TRANSIENT（524/5xx/429/timeout/gateway）换级，null（超时）也换级（safeAgent 的唯一偏离），schema/end_turn 同级消化；LADDER_BUDGET_MS 900s 全程共享（verify 多票共享 t0）；中间失败不计入断路器。**重排决策待数据（10-03 §12-①）**：是否按网关实证把 opus 置首，等 10-04 run 的 `meta.ladder` 字段（report 实际尝试序 / verify 各档计数 / exhausted）确认 realm 内 deepseek 同病后再动——不盲改（verify 票全走首级，重排会把全部核查票抬到 opus 计价）。
 - **宿主编排器阶梯**（run-daily-win.sh `ORCH_LADDER`，作用于整个 claude -p launch）：`[claude-opus-4-8, gemini-3.6-flash, deepseek-v4-flash, grok-4.6]`——10/02 网关实证后 opus 置首（deepseek 经 CLI 静默空回、gemini 把 launch 指令当闲聊不跑 skill）。每档先文件读 sentinel 探针（GATEWAY-TOOL-PROBE-SENTINEL，防短问答 200/tools 400 假阳性），快死 <600s 才重拉，≥600s 无产物 = workflow 深处失败不盲目重拉（SLOW_DEATH）。
 
 ### 6.3 跨天账本（ledger.mjs）
 - 路径 `C:/Users/mango/.ai-daily/published-ledger.json`（HOME 而非 vault——无头上下文读 vault 会被拒，8/31 P4 实证）。
 - 条目 `{day, url, tokens(≤64 分桶截断), title(≤80), major}`；记录端 finalize **先落盘后记账**（顺序曾反转导致次日硬过滤压制正当报道，9/19 P2-1 恢复），账本损坏备份 `.corrupt` 再重建，tmp+rename 原子写，60d prune，烟测 outDir 隔离（PROD_DALLYREPORT_PREFIX 判定）。
 - 消费端 `storyMatch` 四级硬判定：URL 归一命中 → overlap≥0.8 且共享≥5 token → 连字符≥8 强 ASCII 实体精确命中 → 特异 ASCII（非通用词表）共享≥2 或带数字版本号。
+- 生产前缀判定 `isProdOutDir` 吃**前缀列表** `PROD_DALLYREPORT_PREFIXES`（10-03 P0-B：Windows vault 路径置首 + Mac iCloud 兜底 + AI_DAILY_PROD_PREFIX 环境变量；此前 Mac 单前缀在 Windows 恒 false → 生产 LEDGER-SKIP + poster 永不跑）。
 - 三个消费点：fetch 配额前硬过滤（lookback 3d）/ 种子退役（报过一次即退役，不看 lookback）/ report prompt 软网 reportedBlock（兜同事件换 URL，账本按 day 过滤不能 slice 头部——头部是最老条目）。
-- **buildYesterdayTopics**（10-03 五要素）：昨日+前日条目（lookback 2）+ 今日 confirmed 中 storyMatch 命中 = 「本次新增」；streak 连续天数从**条目自身 day-1** 纯日历逆推（从 t 回看会命中条目自己——实测修正）。
+- **buildYesterdayTopics**（10-03 五要素）：昨日+前日条目（lookback 2）+ 今日 confirmed 中 storyMatch 命中 = 「本次新增」；streak 连续天数从**条目自身 day-1** 纯日历逆推（从 t 回看会命中条目自己——实测修正），回看走 day→entries 倒排索引（10-03 §12-⑤，O(回看×全账本)→O(回看×当日桶)）。
 
 ### 6.4 linuxdo 链路（CDP 纪律）
 只复用 9222 已运行登录态 Chrome，绝不启动/关闭浏览器本体（只 /json/new + /json/close 临时标签）。链路：宿主 prefetch（列表页收齐 → 噪声过滤 → likeCount desc 排序 → 只深抓前 16 条富化正文+探测出链）→ JSON 落盘（本体永不进 claude -p 命令行，标题引号破 shell）→ args 注入 → 窗口预过滤+配额 → GOVERN → MINT → verify 正文行「社区热度」。无预抓数据时 realm 不裸抓（裸 fetch 必 403），如实降级 linuxdo_degraded。
@@ -186,7 +188,7 @@ meta.json 另有 `ledger_recorded`（recorded/skipped/failed，finalize 回写�
 ## 10. 测试体系
 
 - **必须 `cd scripts/ai-daily` 跑** `node --test test/*.test.mjs`（repo 根跑 glob 不中 → 0 tests 假绿）。
-- 当前 433 项：425 pass / 0 fail / 8 有意 skip（2026-10-03）。
+- 当前 429 项：421 pass / 0 fail / 8 有意 skip（2026-10-03 第二轮，删 prefer-static.test.mjs、增 sync-vault/阶梯观测/周期标定/Windows 前缀用例）。
 - 测试原则：**纯函数直调**（测试直调 buildFallback/externalCheckState 等真实实现，不 grep 模板源码——消除 forward-test 缺陷）；realm 隔离（wallclock/budget 时钟注入 mock）；fail-open 契约固化（坏输入→null/[]，不抛穿）；skill-doc-contract 锁 SKILL.md 关键字面量（改 SKILL.md 前先看该测试）。
 - 改动门禁：模块/模板改动 → 全量测试 + `node scripts/ai-daily/build.mjs --check-only` + 产物 cp 同步 vault + 两仓提交。
 
@@ -202,17 +204,26 @@ meta.json 另有 `ledger_recorded`（recorded/skipped/failed，finalize 回写�
 
 8/22 之后至 10-03 的迭代（windows 迁移、账本、prefetch 隔离、wallclock 标定、断路器、阶梯、mint/govern、索引页治理、五要素对齐）**无独立设计文档**，决策依据记录在各模块头注释与 vault 运维文档变更记录——本文档 §5-§7 即当前状态的权威描述。
 
-## 12. 设计债务与后续优化（2026-10-03 review）
+## 12. 设计债务（2026-10-03 review → 同日第二轮清偿）
 
-按优先级，均为观察记录、未擅自改动生产行为：
+首轮 review 记录 6 项；同日第二轮开发清偿 5 项 + 新发现 4 项 P0 Windows 迁移缺陷（均已修，见 §13）：
 
-1. **realm 内阶梯首档与网关现状不匹配**：`DEFAULT_LADDER` 仍 deepseek-v4-flash 置首，而 10/02 实证 deepseek 经 claude CLI 静默空回（编排器阶梯已 opus 置首）。ladder 作用于 realm 内 report/verify 代理（不經 CLI 层），行为未必同病，但值得下次运行 meta.ladder_used 数据确认后重排。
-2. **`preferStaticFirst` 死导出**：9/01 P0 后模板不再消费（allocateFetchBudget Phase 1 已按通道轮询），仅 prefer-static.test.mjs 引用。可删或保留作回归样例。
-3. **墙钟标定的观测盲区**：健康跑零真实超时 → 零观测 → 累加器低估无旗标（meta.wallclock.raw_s 与宿主 epoch 对账是唯一兜底）。可考虑周期性定时器观测（每 60s 一发短 withDeadline observe=true），代价是跑批内多 N 次微超时。
-4. **Windows 通知未实现**：`notify()` 是 log-only；toast/推送可后续接入（任务计划程序上下文）。
-5. **`buildYesterdayTopics.streakOf` 复杂度** O(回看天数 × 账本条目)：60d prune 上限内（单日几十条）可控；账本若膨胀需倒排索引（day → entries 预分组）。
-6. **双仓镜像手工同步**：generate-poster 跨仓依赖 + 产物/SKILL 手工 cp，漏 cp 即漂移（build REQUIRED_MARKERS 只护产物内容、不护「是否 cp 过」）。可考虑 build.mjs 增加 --sync-vault 一步到位。
+1. ~~**realm 内阶梯首档与网关现状不匹配**~~ → **观测先行（已实现，重排待数据）**：meta 新增 `ladder{report:{used,tried}, verify:{tried_total,by_model}, exhausted}` 结构化账目；DEFAULT_LADDER 顺序暂不动（verify 票全走首级，盲排 opus 置首会把全部核查票抬到 opus 计价），等 10-04 run 的 meta.ladder 实证 realm 内 deepseek 是否同病后再决策。
+2. ~~**`preferStaticFirst` 死导出**~~ → **已删除**（dedup.mjs 导出与 prefer-static.test.mjs 一并移除；allocateFetchBudget prefer 通道语义由 dedup.test.mjs P2 系列全覆盖）。
+3. ~~**墙钟标定观测盲区**~~ → **已实现周期标定**：每 `wallCalibrateMs`（默认 600s，0 关闭）发 250ms 微超时定时器喂 WALL.observe；健康跑 factor=1 零影响，饱和跑立刻有下界证据；factor>1 才留日志（零噪声）。
+4. ~~**Windows 通知未实现**~~ → **已接 PowerShell WinRT toast**（run-daily-win.sh notify()；失败回落 log-only，任务计划程序上下文真机验证通过）。
+5. ~~**streakOf 复杂度**~~ → **已改倒排索引**（day→entries 预分组一次建表，每步只 match 当天桶；行为逐字节不变，28 项 ledger 测试全绿）。
+6. ~~**双仓手工 cp 漂移**~~ → **build.mjs 已加 `--sync-vault`**（产物 + SKILL.md 一步同步，逐字节相同跳过；SKILL §3.4 部署纪律已引用）。
+
+**遗留观察（不阻塞生产）**：① DEFAULT_LADDER 重排决策（等 10-04 meta.ladder 数据）；② artifact-check.mjs 默认 --dir 仍是 Mac iCloud 路径（Windows 生产显式传 --dir，无实际影响）；③ generate-poster 跨仓双镜像布局（有探测兜底，风险低）。
 
 ## 13. 变更记录
 
-- **2026-10-03**: 建立本文档为唯一总纲；吸收 4 篇 dated 设计文档与 README 旧架构描述（均已加历史快照标注）；依据 15 个模块真源 + 模板 1273 行逐一核对契约（含 10-03 五要素：亮点/昨日话题追踪/社区热度/数据概览/趋势收尾）；记录设计债务 6 项（§12）。同日完成 10-03 五要素对齐（主仓 `7e14ea3`）、433 项测试全绿（425/0/8）、产物 3269 行。
+- **2026-10-03（第二轮 · 按 §12 清偿 + 生产 P0 修复）**：
+  - **P0-A run-daily-win.sh 整轮空转修复**（10-03 08:40 生产实证）：任务计划程序调起的 bash.exe 非登录 shell，PATH 无 Git `/usr/bin` → `date/seq/tr/wc` 全部 command not found，四档探针被 `seq` 失败全灭、**零 launch** 即 rc=2 放弃，10-03 日报缺口。修：PATH 前插 `/e/code/Git/usr/bin`、STAMP 挪到 PATH 导出后、TODAY 空值守卫早退。最小 PATH 模拟验证通过。**10-03 无日报（09-25 以来第二个缺口日），如需补偿须用户授权单日跑（Iron Rule：已有产物日期禁 --date 全量重跑）。**
+  - **P0-B finalize.mjs 生产前缀 Windows 化**：`PROD_DALLYREPORT_PREFIX`（Mac iCloud 单前缀）→ `PROD_DALLYREPORT_PREFIXES` 列表（Windows vault 置首 + Mac 兜底 + AI_DAILY_PROD_PREFIX 覆盖）。旧版在 Windows 上 isProdOutDir 恒 false → 生产 LEDGER-SKIP（跨天去重失效）+ poster 永不跑。**注意：10-02 产物若出自 Windows 路径，其账本未记账；10-04 起恢复正常。**
+  - **P0-C SKILL.md Windows 路径对齐**：frontmatter/触发器/日期命令（GNU date）/outDir/scriptPath/build 检查/finalize 命令/产出物命名/headless 契约（linuxdoMaxSources 12）全部改 Windows 实路径，残留 Mac 叙述字样清零；新增 cdpFetchCli/grokDir 可选 args 说明。
+  - **P0-D 模板 Mac 硬编码路径清除**：`CDP_FETCH_CLI` 与 `GROK_DIR` 旧硬编码 `/Users/mango/...` → args 可覆盖 + Windows 生产默认（旧版在 Windows 生产下 9222 fetch 通道静默哑火、grok-search skill 指向不存在文件）。加 `assert.doesNotMatch(/['"]\/Users\/mango\//)` 源级防回归。
+  - **§12 六项清偿**：① meta.ladder 阶梯观测账（重排待 10-04 数据）② 删 preferStaticFirst ③ 周期墙钟标定（wallCalibrateMs 默认 600s）④ PowerShell toast 通知 ⑤ streakOf 倒排索引 ⑥ build.mjs --sync-vault。
+  - 测试 429 项 421 pass / 0 fail / 8 skip；产物 3309 行；`--sync-vault` 已同步 vault 产物 + SKILL.md。下次生效 10-04 08:40。
+- **2026-10-03（第一轮）**: 建立本文档为唯一总纲；吸收 4 篇 dated 设计文档与 README 旧架构描述（均已加历史快照标注）；依据 15 个模块真源 + 模板 1273 行逐一核对契约（含 10-03 五要素：亮点/昨日话题追踪/社区热度/数据概览/趋势收尾）；记录设计债务 6 项（§12）。同日完成 10-03 五要素对齐（主仓 `7e14ea3`）、433 项测试全绿（425/0/8）、产物 3269 行。

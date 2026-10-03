@@ -153,3 +153,19 @@ function readBuiltProduct() {
     try { fs.unlinkSync(tmp) } catch (_) { /* noop */ }
   }
 }
+// ─── 10-03 §12-⑥：--sync-vault 双仓镜像同步（漏 cp 即生产跑旧版的漂移治理）───
+test('F3 --sync-vault：产物 + SKILL.md 拷入指定 vault .claude/，再跑幂等（identical 不重写）', () => {
+  const tmpVault = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-daily-vault-'))
+  const artifact = path.join(tmpVault, 'artifact.js')
+  execFileSync(process.execPath, [BUILD, '--out', artifact, '--sync-vault', path.join(tmpVault, '.claude')], { cwd: HERE, stdio: 'pipe' })
+  const wf = path.join(tmpVault, '.claude', 'workflows', 'ai-daily.js')
+  const skill = path.join(tmpVault, '.claude', 'skills', 'ai-daily', 'SKILL.md')
+  assert.ok(fs.existsSync(wf), 'workflow 产物已同步进 vault')
+  assert.ok(fs.existsSync(skill), 'SKILL.md 已同步进 vault')
+  assert.equal(fs.readFileSync(wf, 'utf8'), fs.readFileSync(artifact, 'utf8'), '产物逐字节一致')
+  assert.ok(fs.readFileSync(skill, 'utf8').includes('ai-daily'), 'SKILL.md 内容非空')
+  // 幂等：第二次跑不报错且标记 identical
+  const out = execFileSync(process.execPath, [BUILD, '--out', artifact, '--sync-vault', path.join(tmpVault, '.claude')], { cwd: HERE, stdio: 'pipe' }).toString()
+  assert.match(out, /VAULT-SYNC identical/, '第二次同步识别相同内容跳过')
+  fs.rmSync(tmpVault, { recursive: true, force: true })
+})

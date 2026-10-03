@@ -76,9 +76,12 @@ const WFROM = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.from)
 const WTO = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.to)) ? String(args.window.to) : DATE
 const OUT = typeof args.outDir === 'string' && args.outDir ? args.outDir : null
 const BOARDS_SELECTED = Array.isArray(args.boards) ? new Set(args.boards) : null
-const GROK_DIR = '/Users/mango/.claude/skills/grok-search'
+// P0（10-03 review 实证）：以下两个宿主路径旧版硬编码 Mac（/Users/mango/...），Windows 生产下
+// grok-search skill 与 cdp-fetch CLI 全部指向不存在的文件（fetch 代理静默回落 WebFetch、9222 通道哑火）。
+// 改 args 可覆盖 + Windows 生产默认（生产 Windows 唯一；Mac 已 10-03 清退）。
+const GROK_DIR = (typeof args.grokDir === 'string' && args.grokDir) || 'C:/Users/mango/.agents/skills/grok-search'
 // 9/13 fetch 走 9222：宿主 CDP 抓取 CLI（fetch 子代理经 Bash 调用；realm 本身不碰 CDP，护栏不变）。
-const CDP_FETCH_CLI = '/Users/mango/project/claude-project/obsidian/scripts/ai-daily/cdp-fetch.mjs'
+const CDP_FETCH_CLI = (typeof args.cdpFetchCli === 'string' && args.cdpFetchCli) || 'E:/code/DallyReport/ai-daily/scripts/ai-daily/cdp-fetch.mjs'
 // 8/23 第二十一项：linuxdo 接入（登录态 CDP 独立发现组）。linuxdoCdpHost 默认 null → 组保留在
 // DISCOVER_GROUPS（板不崩）但 LINUXDO-SKIP no_cdp_host → urls:[] 不降级（命令行/手动补跑默认不启用）；
 // linuxdoMaxSources 配额默认 8→12（10/03 对齐参考日报：mint 直铸不占 MAX_FETCH，扩配额成本极低；
@@ -557,17 +560,6 @@ const makeAddMajor = majorOutClaims => (m, board) => {
     return
   }
   majorOutClaims.push(_mkMajor(m, board))
-}
-
-// 静态候选优先：把 found_via==='static-fallback' 的项移到数组前部，组内保持原顺序；返回新数组，
-// 不修改输入数组与项对象。8/27 Fetch 预算书账：静态源（官方新闻页）在预算紧张时优先摄入，
-// 保证 discover 全失败 + harvest 兜底缺时，静态兜底 URL 仍能先进 Fetch 配额（而非被排在普通候选中
-// 挤到 budgetDropped）。只排序不增减项——不承诺恢复 budgetDropped 项，MAX_FETCH 是总上限。
-const preferStaticFirst = targets => {
-  const statics = []
-  const others = []
-  for (const t of targets) (t && t.found_via === 'static-fallback' ? statics : others).push(t)
-  return statics.concat(others)
 }
 
 // 轮询公平分配 fetch 预算：每轮每板块至多取 1 个未抓 URL，直到 maxFetch 耗尽——保证晚序板块不被压占。
@@ -1852,6 +1844,16 @@ const buildYesterdayTopics = (ledger, confirmedItems, today, lookbackDays = 2) =
   })
   if (!ents.length) return []
   const likeOf = c => ({ url: c && c.sourceUrl, tokens: fingerprintTokens([c && c.claim, c && c.quote].filter(Boolean).join(' ')) })
+  // 10-03 §12-⑤ 复杂度治理：streak 回看此前每步都对全账本 find（O(回看天数 × 账本条目 × storyMatch)）。
+  // 改 day→entries 倒排索引一次建表，每步只 match 当天分桶；同天多条时任一命中即续（与旧行为一致——
+  // 旧 find 也是「当天第一条命中的」）。账本 60d 上限内单日几十条时是常数级优化，膨胀后是线性→常数。
+  const byDay = new Map()
+  for (const e of (Array.isArray(ledger) ? ledger : [])) {
+    const d = normalizeDate(e && e.day)
+    if (d == null) continue
+    if (!byDay.has(d)) byDay.set(d, [])
+    byDay.get(d).push(e)
+  }
   // 连续剧计数：该事件在此前账本里连续出现的天数（含本次 day）。从条目自身 day 往前逐天回看
   // + storyMatch 互认（回看起点是 e.day-1——从 t 回看会命中条目自己）。
   const streakOf = e => {
@@ -1860,7 +1862,9 @@ const buildYesterdayTopics = (ledger, confirmedItems, today, lookbackDays = 2) =
     let streak = 1
     for (let back = 1; back <= LEDGER_KEEP_DAYS; back++) {
       const prevDay = _calendarDayMinus(eDay, back)
-      const prev = (Array.isArray(ledger) ? ledger : []).find(x => normalizeDate(x && x.day) === prevDay && storyMatch(e, x))
+      const bucket = byDay.get(prevDay)
+      if (!bucket) break
+      const prev = bucket.find(x => storyMatch(e, x))
       if (!prev) break
       streak++
     }
@@ -2221,6 +2225,26 @@ const RUN_ELAPSED_RAW = () => now() - RUN_START
 // withDeadline 真超时且 observe=true 才标定（探针传 false，短窗不得污染倍率）。
 const WALL = makeCalibratedElapsed(RUN_ELAPSED_RAW)
 const RUN_ELAPSED = () => WALL.elapsed()
+// 10-03 §12-③ 周期标定观测（治健康跑零观测盲区）：旧链路只有 withDeadline 真超时才喂 WALL.observe，
+// 健康跑零超时 → 零观测 → 累加器被饿时无任何旗标（8/31 P1 的对账只能靠宿主 epoch 事后发现）。
+// 每 wallCalibrateMs（默认 600000，0 关闭）发一发 **250ms 微超时**定时器：setTimeout(250) 绝不早于
+// 真实 250ms 触发——触发即证明「真实经过 ≥250ms」，与同窗 tick 累加器增量相比即饥饿倍率。
+// 与探针 observe=false 的区别：本观测是**专用标定仪器**（固定短窗、无 agent 成本、factor>1 才留日志）；
+// 健康跑 delta≈250 → factor=1 零影响，饱和跑立刻拿到下界证据。代价 = 每 10min 250ms。
+const WALL_CALIBRATE_MS = typeof args.wallCalibrateMs === 'number' && args.wallCalibrateMs >= 0 ? args.wallCalibrateMs : 600000
+const _wallCalibrateOnce = () => new Promise(resolve => {
+  const t0 = _wallMs
+  setTimeout(() => {
+    const f = WALL.observe(250, _wallMs - t0)
+    if (f && f > 1) log('[墙钟标定·周期] 250ms 真实窗累加器仅计 ' + Math.round(_wallMs - t0) + 'ms → 饥饿倍率 ' + f.toFixed(2) + '×')
+    resolve(f)
+  }, 250)
+})
+const _scheduleWallCalibrate = () => {
+  if (!(WALL_CALIBRATE_MS > 0)) return
+  setTimeout(() => { _wallCalibrateOnce().then(_scheduleWallCalibrate) }, WALL_CALIBRATE_MS)
+}
+_scheduleWallCalibrate()
 // 8/31 P1-①：计数型断路器——不依赖时钟（饱和下计数信号依然准确），连续 3 次或累计 5 次代理失败即跳闸，
 // 之后不再放行昂贵的 Discover 代理批，直连 static-fallback → Fetch。
 // 8/31 实证：Harvest 烧 70min、Discover 再烧 129min，而此间 DISCOVER-FAIL 早已密集出现。
@@ -2252,9 +2276,17 @@ const LADDER_BUDGET_MS = typeof args.ladderBudgetMs === 'number' ? args.ladderBu
 const ladderUsed = []
 const ladderExhaustedStages = new Set()
 let reportModelUsed = MODEL_LADDER[0]
+// 10-03 §12-① 阶梯观测：记录每档实际尝试（report 逐次序 / verify 计数）。DEFAULT_LADDER 是否按
+// 网关实证（10/02 deepseek 静默空回、opus 单发成稿）重排为 opus 置首，待 10-04 本字段的真实数据
+// 确认后再动——不盲改（verify 票走首级，重排会把全部核查票抬到 opus 计价）。
+const ladderTried = { report: [], verify: [] }
 const safeAgentWithLadder = makeSafeAgentWithLadder({
   agent, withDeadline, now, log, TRANSIENT, AGENT_TIMEOUT_MS,
-  onTried: (label, model) => { if (/^report/.test(String(label))) reportModelUsed = model },
+  onTried: (label, model) => {
+    const isReport = /^report/.test(String(label))
+    if (isReport) reportModelUsed = model
+    ladderTried[isReport ? 'report' : 'verify'].push(model)
+  },
   onRecovered: (label, model) => { ladderUsed.push(label + ':' + model) },
   onExhausted: (label) => { ladderExhaustedStages.add(/^report/.test(String(label)) ? 'report' : 'verify') },
 })
@@ -3247,6 +3279,14 @@ const metaJson = JSON.stringify({
     starvation_factor: Number(WALL.factor.toFixed(2)),
     peak_factor: Number(WALL.peakFactor.toFixed(2)),
     observations: WALL.observations,
+    calibrate_period_ms: WALL_CALIBRATE_MS,
+  },
+  // 10-03 §12-① 阶梯观测账：report=实际尝试序（重排决策数据）；verify=各档尝试计数（首档用量 vs
+  // 换级用量一眼可读）；exhausted=阶梯耗尽阶段。生成端 generated_by 已有；这里补机器可读全量。
+  ladder: {
+    report: { used: reportModelUsed, tried: ladderTried.report },
+    verify: { tried_total: ladderTried.verify.length, by_model: ladderTried.verify.reduce((m, x) => { m[x] = (m[x] || 0) + 1; return m }, {}) },
+    exhausted: [...ladderExhaustedStages],
   },
   breaker: { open: BREAKER.open(), reason: BREAKER.reason(), ...BREAKER.stats },
   // md_written 语义（8/18 重构后）：report 是否成功（1=完整版 md 进 payloads.md，0=降级版 md 仍落盘）——不再是 workflow 写盘计数。
