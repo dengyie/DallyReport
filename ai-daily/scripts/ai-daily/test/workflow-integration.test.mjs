@@ -436,11 +436,12 @@ test('模板：windowMisses 聚合走 foldWindowMisses（09-21 中文近重复�
 
 // ─── 10-03 §12 债务清偿：阶梯观测 / 周期墙钟标定 ───
 
-test('模板：周期墙钟标定观测在场（10-03 §12-③ 健康跑零观测盲区）', () => {
-  assert.match(TPL, /const WALL_CALIBRATE_MS = typeof args\.wallCalibrateMs === 'number' && args\.wallCalibrateMs >= 0 \? args\.wallCalibrateMs : 600000/, 'args.wallCalibrateMs 可覆盖（默认 600s）')
-  assert.match(TPL, /WALL\.observe\(250, _wallMs - t0\)/, '250ms 微超时定时器喂 WALL.observe（setTimeout 绝不早触发 = 真实经过下界）')
-  assert.match(TPL, /_wallCalibrateOnce\(\)\.then\(_scheduleWallCalibrate\)/, '标定完成后链式续排（不重叠、run 结束自然停止）')
-  assert.match(TPL, /墙钟标定·周期/, 'factor>1 才留日志（健康跑零噪声）')
+test('模板：周期墙钟标定在场（10-03 §12-③ 根因版：仪器抽 wallclock.mjs，nominal ≫ tick 粒度）', () => {
+  assert.match(TPL, /const WALL_CALIBRATE_MS = typeof args\.wallCalibrateMs === 'number' && args\.wallCalibrateMs >= 0 \? args\.wallCalibrateMs : 120000/, 'args.wallCalibrateMs 可覆盖（默认 120s = 480 拍 ≫ 250ms tick）')
+  assert.match(TPL, /const WALL_CALIBRATOR = makeWallCalibrator\(\{/, '标定仪器走 wallclock.mjs makeWallCalibrator（行为级可测）')
+  assert.match(TPL, /observe: WALL\.observe/, '直接喂 WALL.observe（闭包方法无 this 依赖）')
+  assert.match(TPL, /readAccum: \(\) => _wallMs/, '读 tick 累加器做窗口 delta')
+  assert.match(TPL, /WALL_CALIBRATOR\.start\(\)/, 'run 启动即开标定链')
 })
 
 test('模板：meta.ladder 阶梯观测账在场（10-03 §12-① 重排决策数据）', () => {

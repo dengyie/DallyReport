@@ -330,3 +330,31 @@ test('buildYesterdayTopics：空账本 / today 不可解析 → []（fail-open�
 })
 
 // buildYesterdayTopics import（10/03 追踪节）
+
+test('isProdOutDir（review S-⑤）：AI_DAILY_PROD_PREFIX 惰性读取——env 覆盖即时生效且不改导出数组', () => {
+  const dir = path.join(os.tmpdir(), 'ai-daily-env-prefix-' + process.pid)
+  // 子进程用 pathToFileURL 绝对 import（--test 运行器下子进程 cwd = test/，相对说明符落空；
+  // pathToFileURL 自行处理 Windows 反斜杠，测试代码里不写反斜杠字面量——多层转义互搏的教训）
+  const modPath = JSON.stringify(path.resolve(HERE, '../finalize.mjs'))
+  const child = (code, withEnv) =>
+    execFileSync(process.execPath, ['-e', code], {
+      env: withEnv ? { ...process.env, AI_DAILY_PROD_PREFIX: dir } : { ...process.env },
+      encoding: 'utf8',
+    })
+  const withEnv = JSON.parse(child(`
+    import('node:url').then(({ pathToFileURL }) => import(pathToFileURL(${modPath}).href)).then(m => {
+      console.log(JSON.stringify({
+        hit: m.isProdOutDir(${JSON.stringify(dir + '/out')}),
+        listUntouched: m.PROD_DALLYREPORT_PREFIXES[0] === 'E:/profile/note/note/AI/DallyReport',
+      }))
+    })
+  `, true))
+  assert.equal(withEnv.hit, true, 'env 前缀命中（import 后设置仍生效 = 惰性读取）')
+  assert.equal(withEnv.listUntouched, true, '导出数组不被 env 突变')
+  const withoutEnv = JSON.parse(child(`
+    import('node:url').then(({ pathToFileURL }) => import(pathToFileURL(${modPath}).href)).then(m => {
+      console.log(JSON.stringify({ hit: m.isProdOutDir(${JSON.stringify(dir + '/out')}) }))
+    })
+  `, false))
+  assert.equal(withoutEnv.hit, false, '无 env 时同一路径不命中')
+})

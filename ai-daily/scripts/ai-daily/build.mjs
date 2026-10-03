@@ -82,8 +82,11 @@ const assertRealmGuards = code => {
 }
 
 // ─── 10-03 §12-⑥：vault 镜像同步（产物 + SKILL.md；漏 cp 即生产跑旧版的漂移治理）───
+// 注意：本文件是「脚本即入口」形态（底部无条件 main()），**不得 export 任何符号**——
+// export 会邀请 import，而 import 即触发 main() 写盘真实产物（build.test.mjs 头注释记载的事故形态）。
+// 测试一律走 CLI spawn。
 const DEFAULT_VAULT_CLAUDE = 'E:/profile/note/note/.claude'
-export const syncVault = (repoArtifact, repoSkill, vaultClaude, fsImpl = fs) => {
+const syncVault = (repoArtifact, repoSkill, vaultClaude, fsImpl = fs) => {
   const targets = [
     [repoArtifact, path.join(vaultClaude, 'workflows', 'ai-daily.js')],
     [repoSkill, path.join(vaultClaude, 'skills', 'ai-daily', 'SKILL.md')],

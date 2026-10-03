@@ -8,7 +8,7 @@
 //   零副作用、绝不覆写 .claude/workflows/ai-daily.js（C 全局约束，CI 下可靠）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs'
@@ -168,4 +168,19 @@ test('F3 --sync-vault：产物 + SKILL.md 拷入指定 vault .claude/，再跑�
   const out = execFileSync(process.execPath, [BUILD, '--out', artifact, '--sync-vault', path.join(tmpVault, '.claude')], { cwd: HERE, stdio: 'pipe' }).toString()
   assert.match(out, /VAULT-SYNC identical/, '第二次同步识别相同内容跳过')
   fs.rmSync(tmpVault, { recursive: true, force: true })
+})
+
+test('F3 --sync-vault 失败路径：vault 目标不可写 → VAULT-SYNC-WARN 但 build 仍 exit 0（产物已构建）', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-daily-vault-fail-'))
+  // 把 --sync-vault 的目标指到一个「已存在的文件」→ mkdirSync(文件/workflows) 必抛 → 同步失败走 WARN
+  const blocker = path.join(tmp, 'blocked')
+  fs.writeFileSync(blocker, 'not a dir')
+  const artifact = path.join(tmp, 'artifact.js')
+  // spawnSync（非 execFileSync）：成功路径也要拿到 stderr——WARN 走 console.error
+  const r0 = spawnSync(process.execPath, [BUILD, '--out', artifact, '--sync-vault', blocker], { cwd: HERE, encoding: 'utf8' })
+  const r = { ok: r0.status === 0, stdout: r0.stdout || '', stderr: r0.stderr || '' }
+  assert.ok(r.ok, `同步失败不得判 build 失败（stderr: ${r.stderr}）`)
+  assert.match(r.stdout + r.stderr, /VAULT-SYNC-WARN/, '须打 VAULT-SYNC-WARN 告警')
+  assert.ok(fs.existsSync(artifact), '产物本体已写盘不受同步失败影响')
+  fs.rmSync(tmp, { recursive: true, force: true })
 })

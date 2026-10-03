@@ -8,22 +8,23 @@
 #   - 产物目录 E:/profile/note/note/AI/DallyReport/<date>/，artifact-check 显式传 --dir（其默认值是 Mac iCloud 路径）
 #   - 运行时文件 C:/Users/mango/.ai-daily（账本 / 预抓 JSON / 日志）——统一用盘符路径书写，
 #     因为这些路径会嵌进 claude -p 的 prompt 由 Read 工具解析，Git Bash 的 /c/ 形式在 Windows 端不可解析
-#   - notify() 由 macOS osascript 改为纯日志（Windows toast 可后续再加）
+#   - notify() 由 macOS osascript 改为 PowerShell WinRT toast（10-03 §12-④，失败回落纯日志）
 #   - linux.do 预抓仍只复用 127.0.0.1:9222 已运行的登录态 Chrome：Windows 上 Chrome 未带 9222 常开时
 #     prefetch 如实 ok:false → linux.do 板降级（LINUXDO-SKIP），不阻塞其它板块。
 
 LOGDIR="C:/Users/mango/.ai-daily"
 REPO_AI="E:/code/DallyReport/ai-daily"
 VAULT="E:/profile/note/note"
-mkdir -p "$LOGDIR"
 LOG="$LOGDIR/run-daily.log"
 
 # 任务计划程序上下文下保证 node / claude 可达（npm 全局 shim 在 AppData\Roaming\npm）。
 # P0（10-03 08:40 生产实证）：任务计划程序调起的 bash.exe 非登录 shell，PATH 里没有 Git 的
 # /usr/bin → date/seq/tr/wc 全部 command not found：STAMP/TODAY 空串、四档探针被 seq 失败
 # 全部打死（零 launch，rc=2 probe-exhausted），整轮空转。补 /usr/bin 后这些 coreutils 可达。
-# STAMP 必须在 PATH 导出之后取（此前在 line 20，Task Scheduler 下 date 不可达 → 空时间戳）。
+# 纪律（review P3 根因收口）：PATH 导出点之前不得出现任何外部命令——mkdir 也在 /usr/bin，
+# 留在前面则 LOGDIR 缺失场景下 mkdir 失败 → 全 run 静默失日志。STAMP 同理必须在导出后取。
 export PATH="/e/code/Git/usr/bin:/c/Program Files/nodejs:/c/Users/mango/AppData/Roaming/npm:$PATH"
+mkdir -p "$LOGDIR"
 STAMP="$(date '+%Y-%m-%d %H:%M:%S %Z')"
 # P0 headless 修复（8/18 Mac 实证）：关闭 print 模式 600s 后台任务上限，等 workflow 真正完成。
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0
@@ -53,15 +54,17 @@ ORCH_LADDER=(claude-opus-4-8 gemini-3.6-flash deepseek-v4-flash grok-4.6)
 
 # Windows 通知（10-03 §12-④）：PowerShell WinRT toast（任务计划程序上下文可用，无需 BurntToast 模块），
 # 失败回落纯日志——通知绝不能影响 run 本体。AppId 用 PowerShell 的已注册 AUMID 免自注册。
-# 注意：toast 只在「有交互会话」时可见；纯后台会话 toast 静默失败 → 回落日志行（可见性仍由日志兜底）。
+# review P3：参数经 ps_escape 把单引号翻倍（PS 单引号字符串转义），文案含撇号不再打断 PS 解析；
+# 注意 toast 只在「有交互会话」时可见；纯后台会话 toast 静默失败 → 回落日志行（可见性仍由日志兜底）。
+ps_escape() { local s=$1; printf '%s' "${s//\'/\'\'}"; }
 notify() {
   echo "NOTIFY $1 :: $2"
   powershell.exe -NoProfile -NonInteractive -Command "
 try {
   \$a = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
   \$t = \$a.GetElementsByTagName('text')
-  \$t.Item(0).AppendChild(\$a.CreateTextNode('$1')) | Out-Null
-  \$t.Item(1).AppendChild(\$a.CreateTextNode('$2')) | Out-Null
+  \$t.Item(0).AppendChild(\$a.CreateTextNode('$(ps_escape "$1")')) | Out-Null
+  \$t.Item(1).AppendChild(\$a.CreateTextNode('$(ps_escape "$2")')) | Out-Null
   \$n = [Windows.UI.Notifications.ToastNotification]::new(\$a)
   [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show(\$n)
 } catch { Write-Output (\"toast-fallback-log \" + \$_.Exception.Message) }

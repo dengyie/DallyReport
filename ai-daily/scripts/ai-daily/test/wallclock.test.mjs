@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { starvationFactor, makeCalibratedElapsed, makeCircuitBreaker } from '../wallclock.mjs'
+import { starvationFactor, makeCalibratedElapsed, makeCircuitBreaker, makeWallCalibrator } from '../wallclock.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const TPL = fs.readFileSync(path.join(HERE, '../ai-daily.template.js'), 'utf8')
@@ -223,4 +223,80 @@ test('P1 接线：wallclock_starved 看 peakFactor（先饿后恢复不得抹旗
   assert.equal(flag(9, 7.2), 'wallclock_starved:7.2x', '峰值 7.2× 即使最新 factor 已回落仍打标')
   assert.match(TPL, /WALL\.observations > 0 && WALL\.peakFactor > 1\.5/, '模板条件看 peakFactor 而非最新 factor')
   assert.match(TPL, /peak_factor: Number\(WALL\.peakFactor\.toFixed\(2\)\)/, 'meta 同时记 peak_factor 供审计')
+})
+
+// ─── 10-03 §12-③ 根因版：makeWallCalibrator 行为级测试（假时钟注入，测真实工厂而非复刻逻辑）───
+// 250ms 首版教训：nominal ≈ tick 粒度时 factor 只能取 {1,null}（review 模拟实证：2s 全饱和 factor=1）。
+// 本组测试锁死根因契约：健康满拍 factor=1、饱和停拍 factor=win/delta>1、cap、链式续排、幂等、禁用。
+const makeFakeClock = () => {
+  const pending = []
+  return {
+    setTimer: (fn, ms) => { pending.push({ fn, ms }); return pending.length },
+    // fireFirst 异步：真实链路里 once().then(chain) 的续排在微任务中，setImmediate 等价排空后再断言
+    fireFirst: async () => { const t = pending.shift(); if (t) t.fn(); await new Promise(r => setImmediate(r)); return !!t },
+    count: () => pending.length,
+    lastMs: () => (pending.length ? pending[pending.length - 1].ms : null),
+  }
+}
+const makeHarness = (windowMs, { maxFactor } = {}) => {
+  const accum = { ms: 0 }
+  const WALL = makeCalibratedElapsed(() => accum.ms, maxFactor != null ? { maxFactor } : undefined)
+  const logs = []
+  const clock = makeFakeClock()
+  const cal = makeWallCalibrator({ windowMs, observe: WALL.observe, readAccum: () => accum.ms, log: s => logs.push(s), setTimer: clock.setTimer })
+  return { accum, WALL, logs, clock, cal }
+}
+
+test('标定链·健康跑：满拍 fire → factor=1、零日志、链式续排同窗长、start 幂等', async () => {
+  const h = makeHarness(1000)
+  h.cal.start()
+  h.cal.start() // 幂等：不叠链
+  assert.equal(h.clock.count(), 1, '只挂一条标定链')
+  assert.equal(h.clock.lastMs(), 1000, '窗口 = windowMs')
+  h.accum.ms += 1000 // 健康：480 拍全跑满（delta = windowMs）
+  await h.clock.fireFirst()
+  assert.equal(h.WALL.factor, 1, '满拍 → 倍率 1')
+  assert.equal(h.logs.length, 0, 'factor=1 不留日志（健康跑零噪声）')
+  assert.equal(h.clock.count(), 1, 'fire 即续排下一窗（首尾相接无缝隙）')
+  assert.equal(h.clock.lastMs(), 1000, '续排窗口不变')
+})
+
+test('标定链·饱和跑：fire 时 delta 停滞 → factor=win/delta>1 且留日志（250ms 首版的 no-op 已根除）', async () => {
+  const h = makeHarness(1000)
+  h.cal.start()
+  h.accum.ms += 250 // 全饱和后解除批次：只有 1 拍先跑（真实 unblock 批次时序）
+  await h.clock.fireFirst()
+  assert.equal(h.WALL.factor, 4, '1000/250 = 4（首版 nominal=250 时此场景恒 1）')
+  assert.ok(h.logs.some(l => /墙钟标定·周期.*饥饿倍率 4\.00×/.test(l)), '饱和 fire 留证据日志：' + h.logs.join(' | '))
+  assert.equal(h.WALL.observations, 1)
+})
+
+test('标定链·maxFactor 封顶与单调闸：极端饱和 factor 触顶 20，elapsed 不倒退', async () => {
+  const h = makeHarness(100000) // 400 拍窗
+  h.cal.start()
+  h.accum.ms += 250
+  await h.clock.fireFirst()
+  assert.equal(h.WALL.factor, 20, '100000/250=400 → maxFactor 20 封顶')
+  const atPeak = h.WALL.elapsed()
+  h.accum.ms += 100000 // 恢复满拍
+  await h.clock.fireFirst()
+  assert.equal(h.WALL.factor, 1, '恢复后最新倍率回落 1')
+  assert.ok(h.WALL.elapsed() >= atPeak, '单调闸：读数不因倍率回落而倒退')
+})
+
+test('标定链·禁用与默认：windowMs=0 不挂链；缺省 windowMs=120000', () => {
+  const off = makeHarness(0)
+  off.cal.start()
+  assert.equal(off.clock.count(), 0, '0 = 显式关闭')
+  const def = makeHarness(undefined)
+  def.cal.start()
+  assert.equal(def.clock.lastMs(), 120000, '缺省窗长 120s（≫ 250ms tick）')
+})
+
+test('标定链·0=显式禁用与非法类型 fail-fast（首版把 0 吞进默认分支的回归锁）', () => {
+  const off = makeHarness(0)
+  off.cal.start()
+  assert.equal(off.clock.count(), 0, '显式 0 不挂链（可关闭）')
+  assert.throws(() => makeWallCalibrator({ windowMs: -5, observe: () => 1, readAccum: () => 0 }), TypeError, '负数 fail-fast 不静默回落默认')
+  assert.throws(() => makeWallCalibrator({ windowMs: '600000', observe: () => 1, readAccum: () => 0 }), TypeError, '字符串 fail-fast')
 })

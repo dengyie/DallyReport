@@ -9,7 +9,7 @@
 - 生产 Windows 唯一：任务计划程序 `ai-daily`（每日 08:40）→ `run-daily-task.cmd` → `run-daily-win.sh` → `claude -p`（skill 编排）→ Workflow 产物 → `finalize.mjs` 落盘 vault `AI/DallyReport/<date>/`。Mac launchd 与 `~/.ai-daily` 已于 10-03 清流。
 - 逻辑真源 = `scripts/ai-daily/*.mjs`（15 个模块）+ `ai-daily.template.js`（编排骨架）；`build.mjs` inline 生成 3309 行自包含产物 `.claude/workflows/ai-daily.js`（repo 内），`--sync-vault` 一步同步产物 + SKILL.md 到 vault `.claude/`。
 - 全链路预算：MAX_FETCH/MAX_VERIFY 16，五阶段墙钟切片 540/480/480/300s（总 1800s），report 单次 600s；对抗核查 2+1 票；跨天账本硬去重 + 昨日话题追踪 + 社区热度（10-03 五要素已上线）。
-- 测试：`cd scripts/ai-daily && node --test test/*.test.mjs`（**必须 cd 进目录**，repo 根跑 glob 不中）；当前 429 项 421 pass / 0 fail / 8 有意 skip。
+- 测试：`cd scripts/ai-daily && node --test test/*.test.mjs`（**必须 cd 进目录**，repo 根跑 glob 不中）；当前 436 项 428 pass / 0 fail / 8 有意 skip。
 - 纪律红线：CDP 只复用 9222 已运行登录态 Chrome；日报正文写「社区」不点名站名；secrets 不入库不进 prompt；`--date` 全量重跑禁止（Iron Rule，单节修复 only）。
 
 ## 1. 系统总览
@@ -44,7 +44,7 @@ ai-daily/
 │   ├── 宿主 CLI（绝不 inline）：linuxdo-prefetch cdp-fetch artifact-check host-finalize
 │   │   progress generate-poster finalize cli-main
 │   └── test/*.test.mjs                          # 32 个测试文件，node --test 直调模块真源
-├── .claude/workflows/ai-daily.js                # build 产物（repo 内，3309 行，勿手改）
+├── .claude/workflows/ai-daily.js                # build 产物（repo 内，3354 行，勿手改）
 ├── .claude/skills/ai-daily/SKILL.md             # skill 编排器（vault 侧另有同步副本）
 ├── run-daily-win.sh / run-daily.sh              # Windows 生产 / Mac（已清流，保留语义参考）
 ├── run-daily-task.cmd / register-task.ps1       # 任务计划程序包装与注册
@@ -84,7 +84,7 @@ node scripts/ai-daily/build.mjs [--out <path>] [--check-only] [--sync-vault [vau
 
 ## 5. 五阶段流水线
 
-模板常量（args 可覆盖）：`MAX_FETCH=16`、`MAX_VERIFY=16`、`MAX_URLS_PER_BOARD=6`、`AGENT_TIMEOUT_MS=360s`、`SYNTHESIS_LIMIT_MS=600s`、`LADDER_BUDGET_MS=900s`、`TOTAL_LIMIT_MS=1800s`、`WALL_CALIBRATE_MS=600s`（0 关闭）、`CDP_FETCH_CLI`（Windows 仓绝对路径）、`GROK_DIR`（C:/Users/mango/.agents/skills/grok-search）——后两项 10-03 P0-D 前硬编码 Mac 路径，Windows 生产下 9222 fetch 通道与 grok-search skill 全哑。
+模板常量（args 可覆盖）：`MAX_FETCH=16`、`MAX_VERIFY=16`、`MAX_URLS_PER_BOARD=6`、`AGENT_TIMEOUT_MS=360s`、`SYNTHESIS_LIMIT_MS=600s`、`LADDER_BUDGET_MS=900s`、`TOTAL_LIMIT_MS=1800s`、`WALL_CALIBRATE_MS=120s`（标定窗长，0=显式禁用）、`CDP_FETCH_CLI`（Windows 仓绝对路径）、`GROK_DIR`（C:/Users/mango/.agents/skills/grok-search）——后两项 10-03 P0-D 前硬编码 Mac 路径，Windows 生产下 9222 fetch 通道与 grok-search skill 全哑。
 
 ### Harvest（切片 540s）
 - 唯一 feed 去重（feedMap，共享源只抓一次）→ GROUPS_RAW 5 组（official/cn-media/en-media/opensource/academic）→ `HARVEST_BATCH=3` 批量串行，`tries=1`，单代理上界 1800s（8/16-8/19 实证：360s 死线会丢弃已完成的慢结果）。
@@ -122,7 +122,7 @@ node scripts/ai-daily/build.mjs [--out <path>] [--check-only] [--sync-vault [vau
 累加器在事件循环饱和下**只低估**（8/31 实测 Fetch gate 低估 ≥4.7×，4h13m run 零 BUDGET-SKIP）：
 
 1. **budgetGate**（预算.mjs）：累计死线 = 切片和（Verify 另减 60s inflight buffer）；超限记 budget_skipped 一次性；`roomTo()` 纯读不记账（批边界用）。
-2. **WALL 标定**（wallclock.mjs）：`withDeadline` 真超时是「真实经过 ≥ ms」的硬证据，与同窗口累加器增量相比得饥饿倍率 → `WALL.observe` 标定（maxFactor 20 封顶 + 单调闸防时间倒流）；探针/短窗超时传 `observe=false` 不污染倍率。**周期标定观测（10-03 §12-③）**：健康跑零真实超时曾意味着零观测（盲区）——现每 `wallCalibrateMs`（默认 600s）发一发 250ms 微超时定时器喂 `WALL.observe`（setTimeout 绝不早触发 = 真实经过下界；健康跑 factor=1 零影响，饱和跑立刻拿到证据），factor>1 才留日志。meta 记 wallclock{raw_s, calibrated_s, starvation_factor, peak_factor, observations, calibrate_period_ms}，与宿主侧 epoch（run-daily-win.sh WALL_START）三方对账。
+2. **WALL 标定**（wallclock.mjs）：`withDeadline` 真超时是「真实经过 ≥ ms」的硬证据，与同窗口累加器增量相比得饥饿倍率 → `WALL.observe` 标定（maxFactor 20 封顶 + 单调闸防时间倒流）；探针/短窗超时传 `observe=false` 不污染倍率。**周期标定链（10-03 §12-③ 根因版 `makeWallCalibrator`）**：窗口首尾相接的标定仪器（fire 即续排下一窗，观测无缝隙），每窗 `wallCalibrateMs`（默认 120000，0=显式禁用，非法类型 fail-fast）喂 `WALL.observe`；**nominal 必须 ≫ tick 粒度（250ms）**——首版 nominal=250ms 时 delta 恒为整数拍、factor 只能取 {1,null}，2s 全饱和实证 factor=1（仪器 no-op，review 抓出后抽成可注入假时钟的工厂并行为级测试锁死）。健康跑 factor=1 零影响零日志；饱和跑 fire 晚到、delta 停在解除批次首拍 → factor=win/delta ≫1。meta 记 wallclock{raw_s, calibrated_s, starvation_factor, peak_factor, observations, calibrate_period_ms}，与宿主侧 epoch（run-daily-win.sh WALL_START）三方对账。
 3. **BREAKER 计数断路器**：不依赖时钟（饱和下计数依然准确），连续 3 或累计 5 次代理失败跳闸 → Discover 余批跳过直连 static-fallback。Discover 入口 `resetConsecutive()`（Harvest 失败不外溢，已跳闸仍 open）。中间失败不得自吃计数（ladder 工厂不碰断路器）。
 
 ### 6.2 模型阶梯（两个层面，勿混淆）
@@ -188,7 +188,7 @@ meta.json 另有 `ledger_recorded`（recorded/skipped/failed，finalize 回写�
 ## 10. 测试体系
 
 - **必须 `cd scripts/ai-daily` 跑** `node --test test/*.test.mjs`（repo 根跑 glob 不中 → 0 tests 假绿）。
-- 当前 429 项：421 pass / 0 fail / 8 有意 skip（2026-10-03 第二轮，删 prefer-static.test.mjs、增 sync-vault/阶梯观测/周期标定/Windows 前缀用例）。
+- 当前 436 项：428 pass / 0 fail / 8 有意 skip（2026-10-03 第三轮：标定仪器行为级测试 6 项 + sync 失败路径 + env 前缀惰性 + 0=禁用回归锁）。
 - 测试原则：**纯函数直调**（测试直调 buildFallback/externalCheckState 等真实实现，不 grep 模板源码——消除 forward-test 缺陷）；realm 隔离（wallclock/budget 时钟注入 mock）；fail-open 契约固化（坏输入→null/[]，不抛穿）；skill-doc-contract 锁 SKILL.md 关键字面量（改 SKILL.md 前先看该测试）。
 - 改动门禁：模块/模板改动 → 全量测试 + `node scripts/ai-daily/build.mjs --check-only` + 产物 cp 同步 vault + 两仓提交。
 
@@ -210,15 +210,22 @@ meta.json 另有 `ledger_recorded`（recorded/skipped/failed，finalize 回写�
 
 1. ~~**realm 内阶梯首档与网关现状不匹配**~~ → **观测先行（已实现，重排待数据）**：meta 新增 `ladder{report:{used,tried}, verify:{tried_total,by_model}, exhausted}` 结构化账目；DEFAULT_LADDER 顺序暂不动（verify 票全走首级，盲排 opus 置首会把全部核查票抬到 opus 计价），等 10-04 run 的 meta.ladder 实证 realm 内 deepseek 是否同病后再决策。
 2. ~~**`preferStaticFirst` 死导出**~~ → **已删除**（dedup.mjs 导出与 prefer-static.test.mjs 一并移除；allocateFetchBudget prefer 通道语义由 dedup.test.mjs P2 系列全覆盖）。
-3. ~~**墙钟标定观测盲区**~~ → **已实现周期标定**：每 `wallCalibrateMs`（默认 600s，0 关闭）发 250ms 微超时定时器喂 WALL.observe；健康跑 factor=1 零影响，饱和跑立刻有下界证据；factor>1 才留日志（零噪声）。
-4. ~~**Windows 通知未实现**~~ → **已接 PowerShell WinRT toast**（run-daily-win.sh notify()；失败回落 log-only，任务计划程序上下文真机验证通过）。
-5. ~~**streakOf 复杂度**~~ → **已改倒排索引**（day→entries 预分组一次建表，每步只 match 当天桶；行为逐字节不变，28 项 ledger 测试全绿）。
-6. ~~**双仓手工 cp 漂移**~~ → **build.mjs 已加 `--sync-vault`**（产物 + SKILL.md 一步同步，逐字节相同跳过；SKILL §3.4 部署纪律已引用）。
+3. ~~**墙钟标定观测盲区**~~ → **已根因重建（review 后二次修复）**：review 实证 250ms 首版是 no-op 仪器（nominal==tick 粒度 → factor∈{1,null}，2s 全饱和 factor=1）且 0=禁用被默认分支吞掉。根因修复 = 仪器抽为 `wallclock.mjs makeWallCalibrator` 纯工厂（窗口首尾相接 + nominal≫tick 约束写进契约 + setTimer/readAccum/observe 全注入），默认窗 120s=480 拍；6 项行为级测试锁死健康/饱和/cap/幂等/禁用/fail-fast。
+4. ~~**Windows 通知未实现**~~ → **已接 PowerShell WinRT toast**（run-daily-win.sh notify()；失败回落 log-only，真机验证通过；review 后补 `ps_escape` 单引号转义 + 撇号文案端到端验证）。
+5. ~~**streakOf 复杂度**~~ → **已改倒排索引**（day→entries 预分组一次建表，每步只 match 当天桶；行为逐字节不变，29 项 ledger 测试全绿）。
+6. ~~**双仓手工 cp 漂移**~~ → **build.mjs 已加 `--sync-vault`**（产物 + SKILL.md 一步同步，逐字节相同跳过；review 后补：失败路径 VAULT-SYNC-WARN 且 exit 0 有测试；去掉 `export` 防「import 即 main() 写盘」雷区）。
 
+**review 第三轮补修（同日）**：② build.mjs 去 export + 失败路径测试；③ run-daily-win.sh `mkdir -p` 挪到 PATH 导出后（PATH 导出点之前不得有外部命令的纪律收口）+ notify() 参数 PS 转义；⑤ finalize `AI_DAILY_PROD_PREFIX` 改惰性读取（isProdOutDir 每次调用组装，不再模块加载期突变导出数组）+ 子进程 env 测试。
 **遗留观察（不阻塞生产）**：① DEFAULT_LADDER 重排决策（等 10-04 meta.ladder 数据）；② artifact-check.mjs 默认 --dir 仍是 Mac iCloud 路径（Windows 生产显式传 --dir，无实际影响）；③ generate-poster 跨仓双镜像布局（有探测兜底，风险低）。
 
 ## 13. 变更记录
 
+- **2026-10-03（第三轮 · code review 根因修复）**：对第二轮变更做 final review（P2×1 / P3×2 / Suggestion×2），全部根因修复：
+  - **[P2] 周期标定仪器重建**：review 用 tick 链模拟实证 250ms 首版是 no-op（nominal==tick 粒度 → delta 恒整数拍 → factor∈{1,null}，2s 全饱和 factor=1；nominal 1000ms 对照组 factor=4）。根因修复 = 仪器抽为 `wallclock.mjs makeWallCalibrator` 纯工厂：窗口首尾相接（fire 即续排，观测无缝隙）、nominal≫tick 契约写进注释、setTimer/readAccum/observe 全部可注入；默认窗 120s=480 拍（健康 factor=1 零日志，饱和 fire 晚到 factor=480→cap 20）。行为级测试 6 项（假时钟）当场再抓出一个真 bug：**0=显式禁用被默认分支吞掉**（args.wallCalibrateMs=0 关不掉仪器）——改为 0 合法禁用、非法类型 fail-fast。workflow-integration 断言同步更新。
+  - **[P3] build.mjs**：去掉 `export syncVault`（脚本即入口形态不得 export——import 即触发底部 main() 写盘真实产物，build.test.mjs 头注释记载的事故形态）；补同步失败路径测试（vault 目标不可写 → VAULT-SYNC-WARN 且 exit 0、产物不受影响）。
+  - **[P3] run-daily-win.sh**：`mkdir -p "$LOGDIR"` 挪到 PATH 导出后（纪律收口：PATH 导出点之前不得有外部命令——mkdir 也是 /usr/bin 外部命令，留在前面则 LOGDIR 缺失场景全 run 静默失日志）；notify() 加 `ps_escape`（单引号翻倍转义），含撇号文案端到端 toast 验证通过。
+  - **[Suggestion] finalize.mjs**：`AI_DAILY_PROD_PREFIX` 改惰性读取（isProdOutDir 每次调用组装前缀，不再模块加载期突变导出数组）；补子进程 env 覆盖测试（命中/不命中/导出数组不被突变三断言）。
+  - 测试 436 项 428 pass / 0 fail / 8 skip；产物 3354 行；`--sync-vault` 已同步（SKILL.md identical 自动跳过）。下次生效 10-04 08:40。
 - **2026-10-03（第二轮 · 按 §12 清偿 + 生产 P0 修复）**：
   - **P0-A run-daily-win.sh 整轮空转修复**（10-03 08:40 生产实证）：任务计划程序调起的 bash.exe 非登录 shell，PATH 无 Git `/usr/bin` → `date/seq/tr/wc` 全部 command not found，四档探针被 `seq` 失败全灭、**零 launch** 即 rc=2 放弃，10-03 日报缺口。修：PATH 前插 `/e/code/Git/usr/bin`、STAMP 挪到 PATH 导出后、TODAY 空值守卫早退。最小 PATH 模拟验证通过。**10-03 无日报（09-25 以来第二个缺口日），如需补偿须用户授权单日跑（Iron Rule：已有产物日期禁 --date 全量重跑）。**
   - **P0-B finalize.mjs 生产前缀 Windows 化**：`PROD_DALLYREPORT_PREFIX`（Mac iCloud 单前缀）→ `PROD_DALLYREPORT_PREFIXES` 列表（Windows vault 置首 + Mac 兜底 + AI_DAILY_PROD_PREFIX 覆盖）。旧版在 Windows 上 isProdOutDir 恒 false → 生产 LEDGER-SKIP（跨天去重失效）+ poster 永不跑。**注意：10-02 产物若出自 Windows 路径，其账本未记账；10-04 起恢复正常。**

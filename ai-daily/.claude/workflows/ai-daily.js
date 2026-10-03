@@ -772,6 +772,58 @@ const makeCalibratedElapsed = (rawElapsed, opts) => {
 }
 
 /**
+ * 周期标定链（10-03 §12-③ 根因版）——治「健康跑零观测、饱和跑无证据」的观测盲区。
+ *
+ * 仪器原理：setTimeout(nominal) 绝不早于真实 nominal 毫秒触发 → 触发即证明「真实经过 ≥ nominal」，
+ * 与同窗 tick 累加器增量相比即饥饿倍率（starvationFactor）。
+ *
+ * 根因约束（250ms 首版 review 实证教训）：**nominal 必须远大于 tick 粒度**——delta 恒为 tick 粒度
+ * 的整数倍，nominal == 粒度时 factor 的可达值域只有 {1, null}（delta≥nominal → 1；delta=0 → null），
+ * 仪器退化为 no-op。默认 120s = 480 拍：健康跑 fire 时 delta=120000 → factor=1（零影响）；
+ * 全饱和跑 fire 晚到、delta 停在解除批次的首拍 250 → factor=480 → maxFactor 封顶。
+ *
+ * 链式语义：**窗口首尾相接**（fire 即续排下一窗）——观测无缝隙，饱和无论落在哪段墙钟，
+ * 都会被随后（晚触发的）fire 按窗口占比如实捕获。
+ *
+ * @param {{windowMs?:number, observe:(realMs:number, accumDeltaMs:number)=>number|null,
+ *          readAccum:()=>number, log?:(s:string)=>void,
+ *          setTimer?:(fn:()=>void, ms:number)=>unknown}} deps
+ *   observe 一般直接传 WALL.observe（闭包方法，无 this 依赖）；readAccum 读 tick 累加器；
+ *   setTimer 供测试注入假时钟（默认 setTimeout）。
+ * @returns {{start:()=>void}} start() 启动标定链；幂等（重复 start 不叠加链）。
+ */
+const makeWallCalibrator = ({ windowMs, observe, readAccum, log, setTimer }) => {
+  // 0 是合法值 = 显式禁用（start 的 !(win>0) 守卫承接）；缺省 = 默认窗长；非法类型 fail-fast 不静默回落
+  // （首版把 0 吞进默认分支 → args.wallCalibrateMs=0 关不掉仪器，行为级测试实证后修复）。
+  let win = 120000
+  if (windowMs !== undefined) {
+    if (typeof windowMs !== 'number' || !(windowMs >= 0)) throw new TypeError('makeWallCalibrator: windowMs must be a non-negative number (ms), got: ' + JSON.stringify(windowMs))
+    win = windowMs
+  }
+  const _setTimer = setTimer || ((fn, ms) => setTimeout(fn, ms))
+  let running = false
+  const once = () => new Promise(resolve => {
+    const t0 = readAccum()
+    _setTimer(() => {
+      const delta = readAccum() - t0
+      const f = observe(win, delta)
+      if (f && f > 1 && typeof log === 'function') {
+        log('[墙钟标定·周期] ' + Math.round(win / 1000) + 's 标定窗累加器仅计 ' + Math.round(delta / 1000) + 's → 饥饿倍率 ' + f.toFixed(2) + '×')
+      }
+      resolve(f)
+    }, win)
+  })
+  const chain = () => once().then(chain)
+  return {
+    start: () => {
+      if (running || !(win > 0)) return
+      running = true
+      chain()
+    },
+  }
+}
+
+/**
  * 计数型断路器：不依赖时钟，纯靠**失败/停滞计数**决定是否放弃后续昂贵阶段。
  * 8/31 实证 Harvest 烧 70min、Discover 再烧 129min，而此间失败信号早已密集出现——
  * 计数信号在饱和下依然准确（与墙钟不同，它不会被事件循环饿死），是最后一道可靠闸门。
@@ -2225,26 +2277,19 @@ const RUN_ELAPSED_RAW = () => now() - RUN_START
 // withDeadline 真超时且 observe=true 才标定（探针传 false，短窗不得污染倍率）。
 const WALL = makeCalibratedElapsed(RUN_ELAPSED_RAW)
 const RUN_ELAPSED = () => WALL.elapsed()
-// 10-03 §12-③ 周期标定观测（治健康跑零观测盲区）：旧链路只有 withDeadline 真超时才喂 WALL.observe，
-// 健康跑零超时 → 零观测 → 累加器被饿时无任何旗标（8/31 P1 的对账只能靠宿主 epoch 事后发现）。
-// 每 wallCalibrateMs（默认 600000，0 关闭）发一发 **250ms 微超时**定时器：setTimeout(250) 绝不早于
-// 真实 250ms 触发——触发即证明「真实经过 ≥250ms」，与同窗 tick 累加器增量相比即饥饿倍率。
-// 与探针 observe=false 的区别：本观测是**专用标定仪器**（固定短窗、无 agent 成本、factor>1 才留日志）；
-// 健康跑 delta≈250 → factor=1 零影响，饱和跑立刻拿到下界证据。代价 = 每 10min 250ms。
-const WALL_CALIBRATE_MS = typeof args.wallCalibrateMs === 'number' && args.wallCalibrateMs >= 0 ? args.wallCalibrateMs : 600000
-const _wallCalibrateOnce = () => new Promise(resolve => {
-  const t0 = _wallMs
-  setTimeout(() => {
-    const f = WALL.observe(250, _wallMs - t0)
-    if (f && f > 1) log('[墙钟标定·周期] 250ms 真实窗累加器仅计 ' + Math.round(_wallMs - t0) + 'ms → 饥饿倍率 ' + f.toFixed(2) + '×')
-    resolve(f)
-  }, 250)
+// 10-03 §12-③ 周期标定（根因版，仪器抽在 wallclock.mjs makeWallCalibrator——可注入假时钟行为级测试）：
+// 治健康跑零观测盲区。窗口首尾相接的 120s 标定链，factor>1 才留日志（健康跑零噪声）。
+// 首版教训（review 实证）：nominal 必须 ≫ tick 粒度（250ms）——首版 nominal=250ms 时 delta 恒为
+// 整数拍，factor 只能取 {1,null}，2s 全饱和实证 factor=1，仪器退化 no-op。120s = 480 拍，健康 factor=1
+// 零影响，饱和 fire 晚到 delta 停滞 → factor=480 → maxFactor 封顶，证据立即出现。
+const WALL_CALIBRATE_MS = typeof args.wallCalibrateMs === 'number' && args.wallCalibrateMs >= 0 ? args.wallCalibrateMs : 120000
+const WALL_CALIBRATOR = makeWallCalibrator({
+  windowMs: WALL_CALIBRATE_MS,
+  observe: WALL.observe,
+  readAccum: () => _wallMs,
+  log,
 })
-const _scheduleWallCalibrate = () => {
-  if (!(WALL_CALIBRATE_MS > 0)) return
-  setTimeout(() => { _wallCalibrateOnce().then(_scheduleWallCalibrate) }, WALL_CALIBRATE_MS)
-}
-_scheduleWallCalibrate()
+WALL_CALIBRATOR.start()
 // 8/31 P1-①：计数型断路器——不依赖时钟（饱和下计数信号依然准确），连续 3 次或累计 5 次代理失败即跳闸，
 // 之后不再放行昂贵的 Discover 代理批，直连 static-fallback → Fetch。
 // 8/31 实证：Harvest 烧 70min、Discover 再烧 129min，而此间 DISCOVER-FAIL 早已密集出现。

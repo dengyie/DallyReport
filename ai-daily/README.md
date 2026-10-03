@@ -15,7 +15,7 @@
 ai-daily/
 ├── scripts/ai-daily/*.mjs          # 15 个逻辑模块真源 + 6 个宿主 CLI + test/（32 个测试文件）
 ├── scripts/ai-daily/ai-daily.template.js  # 编排骨架（realm 适配 + 五阶段编排）
-├── .claude/workflows/ai-daily.js   # build 产物（3309 行自包含，勿手改）
+├── .claude/workflows/ai-daily.js   # build 产物（3354 行自包含，勿手改）
 ├── .claude/skills/ai-daily/SKILL.md
 ├── run-daily-win.sh                # Windows 生产运行器
 ├── run-daily-task.cmd / register-task.ps1
