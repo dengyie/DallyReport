@@ -128,8 +128,11 @@ fi
       echo "LINUXDO-PREFETCH-WARN pid_fail（exit 0 但空 stdout）→ 落盘 ok:false"
     fi
   else
+    # 10/04 smoke 实证：`exit=$?` 若写在 printf 之后，取到的是 printf 的退出码（恒 0），
+    # node 真实退出码被吞 → 日志永远显示 exit=0，prefetch 失败原因不可审计。先捕获再写 JSON。
+    PREFETCH_RC=$?
     printf '%s\n' '{"ok":false,"reason":"prefetch_failed"}' > "$PREFETCH_JSON"
-    echo "LINUXDO-PREFETCH-FAIL exit=$? → 落盘 ok:false（realm 不裸抓 CDP，linux.do 走降级）"
+    echo "LINUXDO-PREFETCH-FAIL exit=$PREFETCH_RC → 落盘 ok:false（realm 不裸抓 CDP，linux.do 走降级）"
   fi
 
   # 9/13 编排器阶梯：DeepSeek 先打（CPA 别名抽签，同档连打几次），不行再 grok/opus/gemini。

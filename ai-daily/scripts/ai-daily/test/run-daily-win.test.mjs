@@ -81,3 +81,14 @@ test('Windows runner：探针 sentinel 文件与 probe_gateway 读取一致', ()
     fs.readFileSync(SENTINEL_FILE, 'utf8').includes('GATEWAY-TOOL-PROBE-SENTINEL'),
   'sentinel token 契约两端在场（runner 探针读同一 token）')
 })
+
+test('Windows runner：prefetch 失败日志携带 node 真实退出码（10/04 smoke 实证：printf 之后 $? 恒 0）', () => {
+  const sh = win()
+  const failIdx = sh.indexOf('LINUXDO-PREFETCH-FAIL')
+  assert.ok(failIdx >= 0, '预抓失败日志行在场')
+  // 根因：`exit=$?` 若写在 printf 之后，取到的是 printf 的退出码（恒 0），node 真实 rc 被吞 →
+  // 审计时永远看到 exit=0。必须在 else 入口（$? 仍是 node 退出码）先捕获。
+  assert.match(sh, /PREFETCH_RC=\$\?/, '失败分支入口先捕获 node 退出码')
+  assert.doesNotMatch(sh, /LINUXDO-PREFETCH-FAIL exit=\$\?/, '日志不得取 printf 之后的 $?（恒 0）')
+  assert.match(sh, /LINUXDO-PREFETCH-FAIL exit=\$PREFETCH_RC/, '日志引用捕获的真实退出码')
+})

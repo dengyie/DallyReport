@@ -9,7 +9,7 @@
 - 生产 Windows 唯一：任务计划程序 `ai-daily`（每日 08:40）→ `run-daily-task.cmd` → `run-daily-win.sh` → `claude -p`（skill 编排）→ Workflow 产物 → `finalize.mjs` 落盘 vault `AI/DallyReport/<date>/`。Mac launchd 与 `~/.ai-daily` 已于 10-03 清流。
 - 逻辑真源 = `scripts/ai-daily/*.mjs`（14 个 inline 逻辑模块 + 12 个宿主 CLI）+ `ai-daily.template.js`（编排骨架）；`build.mjs` inline 生成 3212 行自包含产物 `.claude/workflows/ai-daily.js`（repo 内），`--sync-vault` 一步同步产物 + SKILL.md 到 vault `.claude/`。
 - 全链路预算：MAX_FETCH/MAX_VERIFY 16，五阶段墙钟切片 540/480/480/300s（总 1800s），report 单次 600s；对抗核查 2+1 票；跨天账本硬去重 + 昨日话题追踪 + 社区热度（10-03 五要素已上线）。
-- 测试：`cd scripts/ai-daily && node --test test/*.test.mjs`（**必须 cd 进目录**，repo 根跑 glob 不中）；当前 452 项 443 pass / 0 fail / 9 有意 skip。
+- 测试：`cd scripts/ai-daily && node --test test/*.test.mjs`（**必须 cd 进目录**，repo 根跑 glob 不中）；当前 453 项 444 pass / 0 fail / 9 有意 skip。
 - 纪律红线：CDP 只复用 9222 已运行登录态 Chrome；日报正文写「社区」不点名站名；secrets 不入库不进 prompt；`--date` 全量重跑禁止（Iron Rule，单节修复 only）。
 
 ## 1. 系统总览
@@ -190,7 +190,7 @@ meta.json 另有 `ledger_recorded`（recorded/skipped/failed，finalize 回写�
 ## 10. 测试体系
 
 - **必须 `cd scripts/ai-daily` 跑** `node --test test/*.test.mjs`（repo 根跑 glob 不中 → 0 tests 假绿）。
-- 当前 452 项：443 pass / 0 fail / 9 有意 skip（2026-10-03 第四轮根因修复：Windows runner 契约测试 6 项新增（此前 7 条 shim 断言在 Windows 全 SKIP）、host-paths 6 项、标定链 rejection 兜底 2 项、build 护栏「宿主 API 整类拦截」1 项）。
+- 当前 453 项：444 pass / 0 fail / 9 有意 skip（2026-10-03 第四轮根因修复：Windows runner 契约测试 7 项新增（此前 7 条 shim 断言在 Windows 全 SKIP）、host-paths 6 项、标定链 rejection 兜底 2 项、build 护栏「宿主 API 整类拦截」1 项；10-04 烟测再补预抓失败日志 rc 捕获回归 1 项）。
 - 测试原则：**纯函数直调**（测试直调 buildFallback/externalCheckState 等真实实现，不 grep 模板源码——消除 forward-test 缺陷）；realm 隔离（wallclock/budget 时钟注入 mock）；fail-open 契约固化（坏输入→null/[]，不抛穿）；skill-doc-contract 锁 SKILL.md 关键字面量（改 SKILL.md 前先看该测试）。
 - 改动门禁：模块/模板改动 → 全量测试 + `node scripts/ai-daily/build.mjs --check-only` + 产物 cp 同步 vault + 两仓提交。
 
@@ -222,12 +222,23 @@ meta.json 另有 `ledger_recorded`（recorded/skipped/failed，finalize 回写�
 
 ## 13. 变更记录
 
+- **2026-10-03（第四轮 · 深度 review 根因修复）**：对第三轮做深度 review，八项全部根因修复：
+  - **[P1-① 恢复路径从未接线]** `run-daily-win.sh`/`run-daily.sh` 此前只在 artifact-check——09-21 建的 `host-finalize.mjs`（编排器 422 死在 Write 前时从 completed `wf_*.json` 找回 payloads 落盘）从未被 Windows runner 调用（10-02 移植时从 Mac git 外 shim 丢掉该步）。现两 runner 都在 artifact-check **之前**跑 `host-finalize.mjs --date --out --since-epoch $WALL_START`；且 `host-finalize` 的 `DEFAULT_PROJECTS` 旧版硬编码 Mac 会话名 → 改由 cwd 推导。
+  - **[P2-② HOME 判据]** `host-finalize`/`artifact-check`/`progress` 各写 `process.env.HOME || ''`（非登录 shell 下为空 → 路径退化）。新增 `host-paths.mjs` 单一真源（`os.homedir()` + projectSlug + env 覆盖）。
+  - **[P2-③ realm 死代码]** 旧版把 linuxdo 抓取连同 `cdp-core`（fetch/WebSocket）inline 进产物、realm 永不执行还让护栏盯不住。拆 `linuxdo-fetch.mjs`（宿主），`linuxdo.mjs` 只留纯解析；`cdp-core` 移出 MODULES；build 护栏从单条扩为宿主 Node API 整类拦截（`process.*`/`require(`/裸 `fetch(`/`WebSocket`/`AbortSignal`）。
+  - **[P2-④ 契约测试盲区]** 旧 shim 测试在 Windows 全 SKIP（7 断言），HOST-FINALIZE 回归不可见。新增 `run-daily-win.test.mjs` 锁仓内 runner（6 测，跨平台跑）。
+  - **[P3-⑤ 标定链 rejection]** `makeWallCalibrator` `once().then(chain)` 对 rejection 零兜底 → 窗内 try/catch + 链尾 `.catch` 日志停链。
+  - **[P3-⑥ 海报默认路径]** `generate-poster` CLI 默认 outDir 硬编码 Mac iCloud → `AI_DAILY_REPORT_DIR` 覆盖 → win32 vault 生产根 → 其余 Mac 兜底。
+  - **[P3-⑦ 空 STAMP]** runner 早退日志 STAMP 空 → `${STAMP:-unknown-time}` 兜底。
+  - 全量 **452 项 443 pass / 0 fail / 9 有意 skip**；产物 3212 行 `--sync-vault` 已同步。
+- **2026-10-04（第四轮后续 · 烟测实证修复）**：对第四轮变更做受限烟测（临时 projects 目录伪造 completed workflow json + 临时 outDir + 临时 AI_DAILY_HOME；只复用 9222 登录态 Chrome 开/读/关临时标签）。**恢复链全绿**：host-finalize 找回 payloads → 落盘 4 产物（LEDGER-SKIP，非生产 outDir 不记账）→ 二次调用 `HOST-FINALIZE-SKIP report_exists` → 无匹配日期 `no_matching_workflow` rc=1 → artifact-check `ARTIFACT-OK` → linuxdo-prefetch 走 9222 `ok:true posts=8` → build --check-only OK。烟测抓到一个真 bug 并根因修复：
+  - **[P2] run-daily-win.sh / run-daily.sh 预抓失败日志吞退出码**：`echo "LINUXDO-PREFETCH-FAIL exit=$?"` 写在 `printf > "$PREFETCH_JSON"` **之后**，`$?` 取到的是 printf 的退出码（恒 0），node 预抓的真实 rc 被吞 → 日志永远 `exit=0`，CDP 失败/崩溃/524 不可审计。先在 else 分支入口（`$?` 仍是条件命令 node 的 rc）捕获 `PREFETCH_RC=$?` 再写 JSON，日志引用真实码。两 runner 同修；`run-daily-win.test.mjs` 补回归锁（断言不含 `exit=$?`、含 `PREFETCH_RC=$?` 与 `exit=$PREFETCH_RC`）。全量 **453 项 444 pass / 0 fail / 9 有意 skip**。
 - **2026-10-03（第三轮 · code review 根因修复）**：对第二轮变更做 final review（P2×1 / P3×2 / Suggestion×2），全部根因修复：
   - **[P2] 周期标定仪器重建**：review 用 tick 链模拟实证 250ms 首版是 no-op（nominal==tick 粒度 → delta 恒整数拍 → factor∈{1,null}，2s 全饱和 factor=1；nominal 1000ms 对照组 factor=4）。根因修复 = 仪器抽为 `wallclock.mjs makeWallCalibrator` 纯工厂：窗口首尾相接（fire 即续排，观测无缝隙）、nominal≫tick 契约写进注释、setTimer/readAccum/observe 全部可注入；默认窗 120s=480 拍（健康 factor=1 零日志，饱和 fire 晚到 factor=480→cap 20）。行为级测试 6 项（假时钟）当场再抓出一个真 bug：**0=显式禁用被默认分支吞掉**（args.wallCalibrateMs=0 关不掉仪器）——改为 0 合法禁用、非法类型 fail-fast。workflow-integration 断言同步更新。
   - **[P3] build.mjs**：去掉 `export syncVault`（脚本即入口形态不得 export——import 即触发底部 main() 写盘真实产物，build.test.mjs 头注释记载的事故形态）；补同步失败路径测试（vault 目标不可写 → VAULT-SYNC-WARN 且 exit 0、产物不受影响）。
   - **[P3] run-daily-win.sh**：`mkdir -p "$LOGDIR"` 挪到 PATH 导出后（纪律收口：PATH 导出点之前不得有外部命令——mkdir 也是 /usr/bin 外部命令，留在前面则 LOGDIR 缺失场景全 run 静默失日志）；notify() 加 `ps_escape`（单引号翻倍转义），含撇号文案端到端 toast 验证通过。
   - **[Suggestion] finalize.mjs**：`AI_DAILY_PROD_PREFIX` 改惰性读取（isProdOutDir 每次调用组装前缀，不再模块加载期突变导出数组）；补子进程 env 覆盖测试（命中/不命中/导出数组不被突变三断言）。
-  - 测试 452 项 443 pass / 0 fail / 9 skip；产物 3212 行；`--sync-vault` 已同步（SKILL.md identical 自动跳过）。下次生效 10-04 08:40。
+  - 测试 436 项 428 pass / 0 fail / 8 skip；产物 3354 行；`--sync-vault` 已同步（SKILL.md identical 自动跳过）。下次生效 10-04 08:40。
 - **2026-10-03（第二轮 · 按 §12 清偿 + 生产 P0 修复）**：
   - **P0-A run-daily-win.sh 整轮空转修复**（10-03 08:40 生产实证）：任务计划程序调起的 bash.exe 非登录 shell，PATH 无 Git `/usr/bin` → `date/seq/tr/wc` 全部 command not found，四档探针被 `seq` 失败全灭、**零 launch** 即 rc=2 放弃，10-03 日报缺口。修：PATH 前插 `/e/code/Git/usr/bin`、STAMP 挪到 PATH 导出后、TODAY 空值守卫早退。最小 PATH 模拟验证通过。**10-03 无日报（09-25 以来第二个缺口日），如需补偿须用户授权单日跑（Iron Rule：已有产物日期禁 --date 全量重跑）。**
   - **P0-B finalize.mjs 生产前缀 Windows 化**：`PROD_DALLYREPORT_PREFIX`（Mac iCloud 单前缀）→ `PROD_DALLYREPORT_PREFIXES` 列表（Windows vault 置首 + Mac 兜底 + AI_DAILY_PROD_PREFIX 覆盖）。旧版在 Windows 上 isProdOutDir 恒 false → 生产 LEDGER-SKIP（跨天去重失效）+ poster 永不跑。**注意：10-02 产物若出自 Windows 路径，其账本未记账；10-04 起恢复正常。**
