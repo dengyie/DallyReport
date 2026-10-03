@@ -633,3 +633,55 @@ test('降级版：windowMisses 内部中文近重复同样折叠', () => {
   const hits = wmBlock.split('\n').filter(l => /Anthropic|A社/.test(l) && /安全对齐/.test(l))
   assert.equal(hits.length, 1, '降级版同样只留一条 Anthropic 安全对齐')
 })
+
+// ─── 10/03 对齐参考日报：今日亮点 / 昨日话题追踪 / 数据概览 / 今日技术趋势 ───
+
+test('完整版：highlights 存在 → 「## 🔥 今日亮点」节渲染；不存在不渲染', () => {
+  const withH = renderMarkdown({ date: 'd', window: 'w', report: { ...baseReport, highlights: [{ title: 'Grok 4.6 开源', why: '权重与评测全公开，长时 Agent 直接可用' }] }, coverage: [], windowMisses: [], degraded: [] })
+  assert.ok(withH.includes('## 🔥 今日亮点'), '亮点节渲染')
+  assert.ok(withH.includes('- **Grok 4.6 开源** — 权重与评测全公开，长时 Agent 直接可用'))
+  const noH = renderMarkdown({ date: 'd', window: 'w', report: baseReport, coverage: [], windowMisses: [], degraded: [] })
+  assert.ok(!noH.includes('## 🔥 今日亮点'), '无 highlights 不渲染空骨架')
+})
+
+test('完整版：highlights 位置在一句话之后、执行摘要之前（亮点前置，参考报风格）', () => {
+  const md = renderMarkdown({ date: 'd', window: 'w', report: { ...baseReport, highlights: [{ title: 'T', why: 'W' }] }, coverage: [], windowMisses: [], degraded: [] })
+  assert.ok(md.indexOf('## 📌 今日一句话') < md.indexOf('## 🔥 今日亮点'))
+  assert.ok(md.indexOf('## 🔥 今日亮点') < md.indexOf('## 📄 执行摘要'))
+})
+
+test('完整版：yesterdayTopics → 「## 🔁 昨日话题追踪」确定性渲染（连续 N 天 + 本次新增）', () => {
+  const tracked = [
+    { title: 'Grok 4.6 长时 Agent 能力', day: '2026-10-02', streak: 2, todayUpdate: '追加评测成绩公布' },
+    { title: '昨日无后续话题', day: '2026-10-02', streak: 1, todayUpdate: null },
+  ]
+  const withT = renderMarkdown({ date: 'd', window: 'w', report: baseReport, coverage: [], windowMisses: [], degraded: [], yesterdayTopics: tracked })
+  assert.ok(withT.includes('## 🔁 昨日话题追踪'), '追踪节渲染')
+  assert.ok(withT.includes('[2026-10-02 报道，连续 2 天] Grok 4.6 长时 Agent 能力 → **本次新增：追加评测成绩公布**'))
+  assert.ok(withT.includes('昨日无后续话题 → 今日暂无实质新增'), '无后续条目如实标注')
+  const noT = renderMarkdown({ date: 'd', window: 'w', report: baseReport, coverage: [], windowMisses: [], degraded: [] })
+  assert.ok(!noT.includes('## 🔁 昨日话题追踪'), '无追踪条目不渲染空骨架')
+})
+
+test('完整版：meta.stats 漏斗字段 → 「## 📊 数据概览」表；无扩展字段的旧 meta 不出新增行', () => {
+  const meta = { date: 'd', window: 'w', stats: { confirmed: 30, major_out: 14, killed: 2, urls_fetched: 12, urls_discovered: 45, community_topics: 840, claims_extracted: 41, topic_groups: 19, included: 35 }, generated_by: 'ai-daily (x)' }
+  const withF = renderMarkdown({ date: 'd', window: 'w', report: baseReport, coverage: [], windowMisses: [], degraded: [], meta })
+  assert.ok(withF.includes('## 📊 数据概览'), '漏斗表渲染')
+  assert.ok(withF.includes('| 社区预抓帖 | 840 |'), '漏斗首行=社区预抓帖')
+  assert.ok(withF.includes('| 纳入正文 | 35 |'), '纳入正文行')
+  assert.ok(withF.includes('| 话题组 | 19 |'), '话题组行')
+  // 旧形态 meta（无扩展漏斗字段）→ 新增行不出（既有 3 行如实渲染，向后兼容）
+  const oldMeta = { date: 'd', window: 'w', stats: { confirmed: 3, killed: 0, urls_fetched: 3 }, generated_by: 'ai-daily (x)' }
+  const noF = renderMarkdown({ date: 'd', window: 'w', report: baseReport, coverage: [], windowMisses: [], degraded: [], meta: oldMeta })
+  assert.ok(!noF.includes('| 社区预抓帖 |'), '旧 meta 不出新增漏斗行')
+})
+
+test('完整版：trend 存在 → 「## 🧭 今日技术趋势」收尾（开放问题之后、覆盖自检之前）；不存在不渲染', () => {
+  const withTrend = renderMarkdown({ date: 'd', window: 'w', report: { ...baseReport, trend: '今天最能说明趋势的是开源追平闭源的节奏。' }, coverage: [], windowMisses: [], degraded: [] })
+  assert.ok(withTrend.includes('## 🧭 今日技术趋势'), '趋势节渲染')
+  assert.ok(withTrend.includes('今天最能说明趋势的是开源追平闭源的节奏。'))
+  assert.ok(withTrend.indexOf('## ❓ 开放问题') < withTrend.indexOf('## 🧭 今日技术趋势'), '趋势在开放问题之后')
+  assert.ok(withTrend.indexOf('## 🧭 今日技术趋势') < withTrend.indexOf('## ✅ 覆盖自检'), '趋势在覆盖自检之前')
+  const noTrend = renderMarkdown({ date: 'd', window: 'w', report: baseReport, coverage: [], windowMisses: [], degraded: [] })
+  assert.ok(!noTrend.includes('## 🧭 今日技术趋势'), '无 trend 不渲染空骨架')
+})

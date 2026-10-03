@@ -191,3 +191,18 @@ test('harvest/discoverPrompt：浏览器封口纪律在场（工具清单对全�
   assert.match(PROMPTS, /每个 feed 只抓一次，不反复重抓；不要逐条打开链接。\*\*禁止启动\/打开任何独立浏览器\*\*/, 'harvest 纪律行封口')
   assert.ok((PROMPTS.match(/mcp__playwright__\*/g) || []).length >= 3, '三个阶段 prompt 均点名 mcp__playwright__* 逃逸通道')
 })
+
+// ─── 10/03 对齐参考日报：highlights / trend / 多方观点 ───
+
+test('reportPrompt：highlights/trend 指令在场 + 收口 shape 更新', () => {
+  assert.match(PROMPTS, /highlights（今日亮点，2-4 条）/, '亮点指令在场')
+  assert.match(PROMPTS, /highlights 只能来自已写进 sections 的事项/, '亮点不得新增正文没有的内容')
+  assert.match(PROMPTS, /trend（今日技术趋势综述）/, '趋势指令在场')
+  assert.match(PROMPTS, /\{ sections, oneLiner, execSummary, highlights, trend, caveats, openQuestions \}/, '收口 shape 含新字段')
+  assert.match(PROMPTS, /要有观点/, '趋势要求有观点、非流水账')
+})
+
+test('reportPrompt：多方观点并陈纪律在场（summary 支持与质疑两方声音）', () => {
+  assert.match(PROMPTS, /素材含多方观点时必须并陈/, '多方观点指令在场')
+  assert.match(PROMPTS, /不替读者下结论/, '不单方口径')
+})

@@ -97,6 +97,12 @@ description: 生成 AI 每日日报（自动每天 08:40 由 launchd 触发，�
   - 执行摘要：`summary`
   - 覆盖矩阵要点 + 确认无动态的厂商
   - **降级标记 `degraded`**（如 discovery_degraded / discovery_recovered / verify_agent_errors / fetch_budget_dropped / budget_skipped / `ladder_used:` / `ladder_exhausted:`）——必须如实转达。`discovery_recovered:<boards>` 表示这些板 discover 代理失败但已从 harvest entries 兜底救回 URL（通道仍 degraded、内容已补，不再标 missing）。`ladder_used:<label>:<model>+…` 表示 report/verify 在非首级模型救回；`ladder_exhausted:report|verify` 表示该阶段四级/预算耗尽。
+  - **10/03 对齐参考日报的完整版新节**（render-md 确定性渲染，report 成功才出现）：
+    `## 🔥 今日亮点`（report.highlights，2-4 条 {title, why}，只能来自已写入正文的事项）、
+    `## 🔁 昨日话题追踪`（跨天账本确定性渲染——昨日/前日已报道条目 + 今日 confirmed storyMatch 命中 =「本次新增」，连续天数 streak 由 buildYesterdayTopics 计算，report 代理不写此节）、
+    `## 📊 数据概览`（漏斗表：社区预抓帖 → 发现链接 → 抓取正文 → 提取声明 → 核查确认/否决 → 纳入正文 → 话题组，来自 meta.stats 扩展字段 community_topics/claims_extracted/topic_groups/included）、
+    `## 🧭 今日技术趋势`（report.trend 收尾综述段，有观点非流水账）。
+    社区热度：mint 直铸 claim 带 `heat`（浏览/赞/回复），report 素材行「社区热度：浏览 N · 赞 N · 回复 N」——正文措辞写「社区」，**不点名论坛站名**（既有纪律）。
 - 若 Workflow 返回 `error` 或产物缺失：降级处理，产出一份"未核查日报"到 `<iCloud DallyReport/<date>/<date>-ai日报.md>`（标注降级原因），并保留已归档 JSON；如实向用户说明失败点。
 - 不要向用户重复贴全文大 JSON；贴 md 文件路径 + 摘要即可。
 - **生成完成后清理本会话开起的浏览器/进程**：若本次生成过程中，我（编排器）为开发/调试而调用过 Playwright MCP / 启动过浏览器或 node 进程，则收尾时**只关闭我自己开起的那几个**（精确按本会话子进程/本会话写入的标记关闭，或用 `pkill -f 'playwright-mcp.*<本会话唯一标识>'`）。**绝不**去关用户自己开的 Chrome/浏览器/其他 Claude Code 会话的工具进程——那些不属于日报系统。关闭前用 `ps -o pid,etime,lstart,command` 复核该进程确实是本会话拉起、且不是其它会话/用户正在用的，再终止。本条为流程纪律：生成完日报即清理自身资源，不遗留占用。

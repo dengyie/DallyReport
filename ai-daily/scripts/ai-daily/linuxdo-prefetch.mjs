@@ -22,12 +22,14 @@ import { isCliMain } from './cli-main.mjs'
 export const DEFAULT_CDP_HOST = CDP_DEFAULTS.cdpHost
 
 /** 默认 --max-sources 交付上限：prefetch 交付给 Workflow 的候选 buffer（Workflow 侧消费配额另设
- * linuxdoMaxSources=8，且会再做窗口过滤——交付量 > 消费量是有意冗余，供窗口过滤后仍有得选）。 */
+ * linuxdoMaxSources=12，且会再做窗口过滤——交付量 > 消费量是有意冗余，供窗口过滤后仍有得选）。
+ * 10/03 对齐参考日报：mint 直铸不占 MAX_FETCH（配额成本极低）→ Workflow 消费配额 8→12。 */
 export const DEFAULT_MAX_SOURCES = 8
 
 /** 深抓条数上限（9/19 L3 深抓后置）：只对噪声过滤+质量排序（likeCount desc, date desc）后的前 N 帖
- * 做单帖 .json 深抓（富化正文 + 探测权威出链）。列表读 ≤maxPages 次 + 深抓 ≤N 次，全部花在入选帖上。 */
-export const DEFAULT_DEEP_FETCH = 12
+ * 做单帖 .json 深抓（富化正文 + 探测权威出链）。列表读 ≤maxPages 次 + 深抓 ≤N 次，全部花在入选帖上。
+ * 10/03：默认 12→16（消费配额扩容后，更多入选帖获得正文富化）。 */
+export const DEFAULT_DEEP_FETCH = 16
 
 /** 09-13 预抓噪声：空 snippet 铸不进 mint；重置/羊毛/喜报/蹬完/买号/拼车/代充等标题核查会 0-2。 */
 // 账号交易形态：动词后可隔 0-14 字再接「号/账号」（「收Google账号」「出ChatGPT Plus 账号」隔字/带英文不漏）。
@@ -110,8 +112,10 @@ export async function prefetchLinuxDo(opts = {}) {
     throw e
   }
   // 可序列化成功形状：posts（已过滤排序；再按 maxSources 截断 + 图片元数据兜底过滤）+ 元信息。
+  // 10/03 对齐参考日报：views/replies（论坛硬指标）随帖透传 → mint 带 heat → report 素材行。
   const mapped = (ld.posts || []).map(p => ({
     id: p.id, title: p.title, url: p.url, date: p.date || '', snippet: p.snippet || '', likeCount: p.likeCount || 0,
+    views: p.views || 0, replies: p.replies || 0,
   }))
   const posts = filterLinuxdoPosts(mapped, maxSources)
   if (!posts.length) {
@@ -143,7 +147,7 @@ export async function main(argv) {
     process.exit(1)
   }
   if (parsed.help) {
-    process.stdout.write('linuxdo-prefetch: 从 9222 登录态 Chrome 预抓 linux.do 前沿快讯。\n用法: node linuxdo-prefetch.mjs [--host 127.0.0.1:9222] [--max-sources 24] [--deep-fetch 12]\n--max-sources 是交付上限（交付 buffer，run-daily 传 24）；Workflow 消费配额 linuxdoMaxSources=8 另设。\n--deep-fetch 是质量排序后深抓的帖子数上限（默认 12）。\n')
+    process.stdout.write('linuxdo-prefetch: 从 9222 登录态 Chrome 预抓 linux.do 前沿快讯。\n用法: node linuxdo-prefetch.mjs [--host 127.0.0.1:9222] [--max-sources 28] [--deep-fetch 16]\n--max-sources 是交付上限（交付 buffer，run-daily 传 28）；Workflow 消费配额 linuxdoMaxSources=12 另设。\n--deep-fetch 是质量排序后深抓的帖子数上限（默认 16）。\n')
     return
   }
   try {

@@ -94,8 +94,9 @@ fi
   # 纪律：只复用 127.0.0.1:9222 已运行的登录态 Chrome；绝不启动/关闭浏览器本体或其它会话资源。
   PREFETCH_JSON="$LOGDIR/linuxdo-prefetch.json"
   # 9/01 P2：预抓 JSON 只落盘，JSON 本体永不进 claude -p 命令行（标题含引号会破 shell）。
-  # 9/19 L4：--max-sources 24 = 交付 buffer；Workflow 消费配额 linuxdoMaxSources=8 另设。
-  if node "$REPO_AI/scripts/ai-daily/linuxdo-prefetch.mjs" --host "127.0.0.1:9222" --max-sources 24 > "$PREFETCH_JSON" 2>> "$LOG"; then
+  # 10/03 对齐参考日报：--max-sources 28 = 交付 buffer；--deep-fetch 16 富化更多入选帖正文；
+  # Workflow 消费配额 linuxdoMaxSources=12 另设（mint 直铸不占 MAX_FETCH，扩配额成本极低）。
+  if node "$REPO_AI/scripts/ai-daily/linuxdo-prefetch.mjs" --host "127.0.0.1:9222" --max-sources 28 --deep-fetch 16 > "$PREFETCH_JSON" 2>> "$LOG"; then
     if [ -s "$PREFETCH_JSON" ]; then
       echo "LINUXDO-PREFETCH-OK json_bytes=$(wc -c < "$PREFETCH_JSON" | tr -d ' ') → 落盘 $PREFETCH_JSON，由编排器 Read 注入 args"
     else
@@ -133,7 +134,7 @@ fi
     for TRY in $(seq 1 "$TRIES"); do
       ATTEMPT=$((ATTEMPT + 1))
       LAUNCH_T0="$(date '+%s')"
-      LAUNCH_OUT="$(claude -p "运行 ai-daily skill，生成今天的 AI 日报。调用 Workflow 时 args 请带上 {\"linuxdoCdpHost\":\"127.0.0.1:9222\",\"linuxdoMaxSources\":8,\"webFetchViaCdp\":true}（复用 9222 登录态 Chrome 抓 linux.do 与 fetch 正文；论坛配额 8 与模板默认一致，避免挤占官方/一手源）。linuxdoPrefetched 已预抓到文件 $PREFETCH_JSON：请 Read 该文件，把解析后的 JSON 对象作为 args.linuxdoPrefetched 传入（成功为 ok:true + posts；失败为 ok:false + reason）。跨天去重账本 $LEDGER：若该文件存在，请 Read 并把解析后的 JSON 数组作为 args.reportedLedger 传入（不存在则不传该参数，不要视为错误）。不要把任何文件内容贴进本指令或 shell。最后简述头条与覆盖结果。" --model "$MODEL" --dangerously-skip-permissions 2>&1)"
+      LAUNCH_OUT="$(claude -p "运行 ai-daily skill，生成今天的 AI 日报。调用 Workflow 时 args 请带上 {\"linuxdoCdpHost\":\"127.0.0.1:9222\",\"linuxdoMaxSources\":12,\"webFetchViaCdp\":true}（复用 9222 登录态 Chrome 抓 linux.do 与 fetch 正文；论坛配额 12 与模板默认一致——mint 直铸不占 fetch 配额，供「社区热度」叙事仍有得选）。linuxdoPrefetched 已预抓到文件 $PREFETCH_JSON：请 Read 该文件，把解析后的 JSON 对象作为 args.linuxdoPrefetched 传入（成功为 ok:true + posts；失败为 ok:false + reason）。跨天去重账本 $LEDGER：若该文件存在，请 Read 并把解析后的 JSON 数组作为 args.reportedLedger 传入（不存在则不传该参数，不要视为错误）。不要把任何文件内容贴进本指令或 shell。最后简述头条与覆盖结果。" --model "$MODEL" --dangerously-skip-permissions 2>&1)"
       RC=$?
       printf '%s\n' "$LAUNCH_OUT"
       LAUNCH_SECS=$(( $(date '+%s') - LAUNCH_T0 ))

@@ -146,3 +146,14 @@ test('bindExtractedClaims：索引页选出真实文章 URL 则保留，不计 c
   assert.equal(out.indexClaimDropped, 1, '无合法文章 URL 的那条计入丢弃数')
   assert.equal(out.sourceQuality, 'primary', '仍有真实文章 claim → 不降 unreliable')
 })
+
+// ─── 10/03 对齐参考日报：highlights/trend 可选字段 ───
+
+test('REPORT_SCHEMA：highlights/trend 可选字段在场（required 不变，向后兼容旧产物）', () => {
+  assert.ok(REPORT_SCHEMA.properties.highlights, 'highlights 应在 properties')
+  assert.ok(!REPORT_SCHEMA.required.includes('highlights'), 'highlights 可选——旧 report 不填照常过 schema')
+  assert.deepEqual(REPORT_SCHEMA.properties.highlights.items.required, ['title', 'why'], 'highlights 元素必填 title/why')
+  assert.ok(REPORT_SCHEMA.properties.trend, 'trend 应在 properties')
+  assert.equal(REPORT_SCHEMA.properties.trend.type, 'string', 'trend 为字符串')
+  assert.ok(!REPORT_SCHEMA.required.includes('trend'), 'trend 可选')
+})

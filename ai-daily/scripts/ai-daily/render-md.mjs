@@ -118,7 +118,7 @@ const frontmatterLines = (meta, date, window) => {
 // 输入即现行 mdWriter prompt 里 reportJson 的同构数据。
 // meta 为可选参数：{ date, window, stats:{confirmed,major_out,killed,urls_fetched,urls_discovered}, generated_by, degraded }；
 // 缺失时退化（无 frontmatter/横幅），向后兼容旧调用。
-export const renderMarkdown = ({ date, window, report, coverage, windowMisses, degraded, meta }) => {
+export const renderMarkdown = ({ date, window, report, coverage, windowMisses, degraded, yesterdayTopics, meta }) => {
   const L = []
   for (const fl of frontmatterLines(meta, date, window)) L.push(fl)
   L.push('# 🤖 AI 日报 · ' + date)
@@ -140,10 +140,33 @@ export const renderMarkdown = ({ date, window, report, coverage, windowMisses, d
   L.push('')
   L.push(report.oneLiner)
   L.push('')
+  // 10/03 对齐参考日报：今日亮点（report.highlights，2-4 条，编辑要求 1.5）。存在才渲染（信息熵契约）。
+  if (report.highlights && report.highlights.length) {
+    L.push('## 🔥 今日亮点')
+    L.push('')
+    for (const h of report.highlights) {
+      if (!h || !String(h.title || '').trim()) continue
+      L.push('- **' + h.title + '**' + (String(h.why || '').trim() ? ' — ' + h.why : ''))
+    }
+    L.push('')
+  }
   L.push('## 📄 执行摘要')
   L.push('')
   L.push(report.execSummary)
   L.push('')
+  // 10/03 对齐参考日报：昨日话题追踪（连续剧）。确定性渲染（buildYesterdayTopics 编排数据），
+  // report 代理不写它；有追踪条目才渲染。streak>1 标「连续 N 天」；todayUpdate 命中标「本次新增」。
+  if (yesterdayTopics && yesterdayTopics.length) {
+    L.push('## 🔁 昨日话题追踪')
+    L.push('')
+    for (const t of yesterdayTopics) {
+      if (!t || !String(t.title || '').trim()) continue
+      const serial = t.streak > 1 ? '，连续 ' + t.streak + ' 天' : ''
+      const upd = t.todayUpdate ? '**本次新增：' + t.todayUpdate + '**' : '今日暂无实质新增'
+      L.push('- [' + (t.day || '?') + ' 报道' + serial + '] ' + t.title + ' → ' + upd)
+    }
+    L.push('')
+  }
   const citeMap = buildCitationMap(report && report.sections)
   // 8/23 第二十一项：事件驱动分节——无内容的板块整体不出现（信息熵契约：不摆空骨架）。
   for (const sec of report.sections || []) {
@@ -160,6 +183,28 @@ export const renderMarkdown = ({ date, window, report, coverage, windowMisses, d
     for (const c of report.caveats) L.push('- ' + c)
     L.push('')
   }
+  // 10/03 对齐参考日报：数据概览漏斗表（meta.stats 扩展字段，确定性渲染；有漏斗字段才渲染）。
+  // 链路：社区预抓帖 → 发现链接 → 抓取正文 → 提取声明 → 核查确认/否决 → 纳入正文 → 话题组。
+  if (meta && meta.stats && typeof meta.stats === 'object') {
+    const funnel = [
+      ['社区预抓帖', st.community_topics, 'linux.do 社区预抓帖子（登录态 CDP）'],
+      ['发现链接', st.urls_discovered, '全部板块发现的 URL 候选'],
+      ['抓取正文', st.urls_fetched, '进入配额、实际抓取的来源'],
+      ['提取声明', st.claims_extracted, '可证伪声明（含 quote）'],
+      ['核查确认', st.confirmed, '对抗式 2+1 票确认' + ((st.major_out || 0) ? '（另有 ' + st.major_out + ' 条窗口外·重大）' : '')],
+      ['否决', st.killed, '核查未通过'],
+      ['纳入正文', st.included, '合成后实际写入的条目'],
+      ['话题组', st.topic_groups, '同事件跨条合并的话题组'],
+    ].filter(r => typeof r[1] === 'number')
+    if (funnel.length) {
+      L.push('## 📊 数据概览')
+      L.push('')
+      L.push('| 阶段 | 数量 | 说明 |')
+      L.push('|---|---:|---|')
+      for (const [label, v, note] of funnel) L.push('| ' + label + ' | ' + v + ' | ' + note + ' |')
+      L.push('')
+    }
+  }
   // 层 1 去重：过滤已在 report.sections items 标题中出现的窗口外项（对齐降级版 D.3，2026-08-22）。
   const majFromSections = (report.sections || []).flatMap(s => s.items || []).map(it => ({ claim: it.title }))
   const windowMissesDedup = windowMisses ? dedupWindowMisses(windowMisses, majFromSections) : []
@@ -173,6 +218,13 @@ export const renderMarkdown = ({ date, window, report, coverage, windowMisses, d
     L.push('## ❓ 开放问题')
     L.push('')
     for (const q of report.openQuestions) L.push('- ' + q)
+    L.push('')
+  }
+  // 10/03 对齐参考日报：今日技术趋势综述（report.trend，收尾段——有观点、非流水账）。存在才渲染。
+  if (report.trend && String(report.trend).trim()) {
+    L.push('## 🧭 今日技术趋势')
+    L.push('')
+    L.push(String(report.trend).trim())
     L.push('')
   }
   L.push('## ✅ 覆盖自检')

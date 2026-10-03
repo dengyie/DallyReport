@@ -163,3 +163,56 @@ export const pruneLedger = (entries, today, keepDays) => {
     return age >= 0 && age <= keep
   })
 }
+
+// ─── 10/03 对齐参考日报：昨日话题追踪（连续剧）───
+// 参考报的「昨日话题追踪（第 N 日）」由跨天账本确定性渲染：昨日（含前日）已报道条目 + 今日
+// confirmed 中 storyMatch 命中该事件的条目 = 「本次新增」。与 reportedBlock（软网去重）分工：
+// reportedBlock 是 report prompt 的输入（禁重复成文），本函数是 md 渲染的数据（读者可见的追踪节）。
+// 注意：同 URL 的昨日候选已被 filterReportedTargets 硬过滤、进不了今日 confirmed——
+// 能命中 todayUpdate 的只可能是「同事件换 URL/新进展」，正是追踪节该呈现的内容。
+// ledger/confirmedItems 可为空数组；today 不可解析 → []（fail-open，不渲染空骨架）。
+export const buildYesterdayTopics = (ledger, confirmedItems, today, lookbackDays = 2) => {
+  const t = normalizeDate(today)
+  if (t == null) return []
+  const ents = (Array.isArray(ledger) ? ledger : []).filter(e => {
+    const d = normalizeDate(e && e.day)
+    if (d == null) return false
+    const age = daysBetween(d, t)
+    return age > 0 && age <= lookbackDays
+  })
+  if (!ents.length) return []
+  const likeOf = c => ({ url: c && c.sourceUrl, tokens: fingerprintTokens([c && c.claim, c && c.quote].filter(Boolean).join(' ')) })
+  // 连续剧计数：该事件在此前账本里连续出现的天数（含本次 day）。从条目自身 day 往前逐天回看
+  // + storyMatch 互认（回看起点是 e.day-1——从 t 回看会命中条目自己）。
+  const streakOf = e => {
+    const eDay = normalizeDate(e && e.day)
+    if (eDay == null) return 1
+    let streak = 1
+    for (let back = 1; back <= LEDGER_KEEP_DAYS; back++) {
+      const prevDay = _calendarDayMinus(eDay, back)
+      const prev = (Array.isArray(ledger) ? ledger : []).find(x => normalizeDate(x && x.day) === prevDay && storyMatch(e, x))
+      if (!prev) break
+      streak++
+    }
+    return streak
+  }
+  return ents.map(e => {
+    const hit = (confirmedItems || []).find(c => storyMatch(likeOf(c), e))
+    return {
+      title: String(e.title || e.url || '').slice(0, 100),
+      day: e.day || '', url: e.url || '', major: !!e.major,
+      streak: streakOf(e),
+      todayUpdate: hit ? String(hit.claim || '').slice(0, 160) : null,
+    }
+  })
+}
+
+// YYYYMMDD 数值减 back 天（纯日历逆推，无 Date——realm 禁 Date；daysBetween 同风格）。
+const _calendarDayMinus = (dayNum, back) => {
+  const isLeap = y => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0
+  const dom = (y, m) => [31, isLeap(y) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1]
+  let y = Math.floor(dayNum / 10000), m = Math.floor(dayNum / 100) % 100, d = dayNum % 100
+  d -= back
+  while (d < 1) { m -= 1; if (m < 1) { m = 12; y -= 1 } ; d += dom(y, m) }
+  return +(y + String(m).padStart(2, '0') + String(d).padStart(2, '0'))
+}

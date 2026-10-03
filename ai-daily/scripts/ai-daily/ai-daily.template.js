@@ -81,9 +81,10 @@ const GROK_DIR = '/Users/mango/.claude/skills/grok-search'
 const CDP_FETCH_CLI = '/Users/mango/project/claude-project/obsidian/scripts/ai-daily/cdp-fetch.mjs'
 // 8/23 第二十一项：linuxdo 接入（登录态 CDP 独立发现组）。linuxdoCdpHost 默认 null → 组保留在
 // DISCOVER_GROUPS（板不崩）但 LINUXDO-SKIP no_cdp_host → urls:[] 不降级（命令行/手动补跑默认不启用）；
-// linuxdoMaxSources 配额默认 8（严控论坛配额，避免挤占官方/一手新闻抓取）。
+// linuxdoMaxSources 配额默认 8→12（10/03 对齐参考日报：mint 直铸不占 MAX_FETCH，扩配额成本极低；
+// 参考报社区一手内容占比高，12 席供「社区热度」叙事仍有得选，不挤占官方/一手源配额）。
 const LINUXDO_CDP_HOST = typeof args.linuxdoCdpHost === 'string' && args.linuxdoCdpHost ? args.linuxdoCdpHost : null
-const LINUXDO_MAX_SOURCES = typeof args.linuxdoMaxSources === 'number' && args.linuxdoMaxSources > 0 ? args.linuxdoMaxSources : 8
+const LINUXDO_MAX_SOURCES = typeof args.linuxdoMaxSources === 'number' && args.linuxdoMaxSources > 0 ? args.linuxdoMaxSources : 12
 // 8/27 Task 2：linux.do 预抓隔离——CDP 抓取从 Workflow realm 前移到宿主 Node（linuxdo-prefetch.mjs，
 // run-daily.sh 在调 Workflow 前预抓并把成功 JSON 注入 args.linuxdoPrefetched）。这里严格校验其成功形状：
 // ok===true 且 posts 是含 非空 url/title 的数组，才视为有效可消费；否则视同「无有效预抓数据」。
@@ -429,6 +430,8 @@ for (const g of DISCOVER_GROUPS) {
   const srcs = _ldRanked.slice(0, LINUXDO_MAX_SOURCES).map(p => ({
     url: p.url, title: p.title, found_via: 'linuxdo-cdp', date: p.date || '', board: 'linuxdo',
     snippet: p.snippet || '',
+    // 10/03 对齐参考日报：论坛硬指标（浏览/赞/回复）随候选流动 → mint 带 heat → report 素材行「社区热度」。
+    likeCount: p.likeCount || 0, views: p.views || 0, replies: p.replies || 0,
   }))
   discoverResults.push({ group: g, boards: g.boards, urls: srcs, noNews: [], nearWindow: [], majorOutOfWindow: [], degraded: false, linuxdoTopics: LDP.topics, linuxdoPosts: LDP.posts.length })
 }
@@ -1004,6 +1007,16 @@ const reportedBlock = _recentLedger.length
     _recentLedger.slice(-40).map(e => '- [' + (e.day || '?') + ']' + (e.major ? '[窗口外·重大]' : '') + ' ' + (e.title || e.url || '')).join('\n')
   : ''
 
+// ─── 10/03 对齐参考日报：昨日话题追踪（连续剧）───
+// 读者可见的确定性追踪节（buildYesterdayTopics，ledger.mjs）：昨日（含前日）已报道条目 + 今日
+// confirmed 中 storyMatch 命中 = 「本次新增」。report 代理不写它（确定性渲染，不占 report 输入体积）；
+// reportedBlock（上方软网）已负责「禁重复成文」的 prompt 侧，这里只负责 md 侧呈现。
+// confirmed 此时已含 major-out 注入（L975 之后），追踪命中含重大项。
+const yesterdayTopics = REPORTED_LEDGER ? buildYesterdayTopics(REPORTED_LEDGER, confirmed, DATE) : []
+if (yesterdayTopics.length) {
+  log('YESTERDAY-TOPICS 追踪候选 ' + yesterdayTopics.length + ' 条（今日新增命中 ' + yesterdayTopics.filter(t => t.todayUpdate).length + ' 条）')
+}
+
 // ─── Coverage self-check (deterministic) ───
 const boardClaimCount = new Map()
 for (const s of sources) { s.claims.forEach(c => boardClaimCount.set(c.board, (boardClaimCount.get(c.board) || 0) + 1)) }
@@ -1077,9 +1090,14 @@ const _bakedStatus = c => {
   if (c.externalCheck === 'unavailable') return '未核查'
   return '已核查 ' + (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount
 }
+// 10/03 对齐参考日报：论坛硬指标（浏览/赞/回复）进素材行——report 可引用「社区热度」支撑
+// 亮点/多方观点叙事。措辞不带站名（正文纪律不变）；mint 直铸的 claim 才有 c.heat。
+const _heatLine = c => (c && c.heat && (c.heat.views || c.heat.likes || c.heat.replies))
+  ? ' · 社区热度：浏览 ' + (c.heat.views || 0) + ' · 赞 ' + (c.heat.likes || 0) + ' · 回复 ' + (c.heat.replies || 0)
+  : ''
 const reportBody = (confirmed.length ? confirmed.map((c, i) =>
 	  // 8/17 第十二项：quote 截断降 report 输入体积；09-20 提到 220——140 会把已核数字截掉，成稿只能写「据报」。
-	  '### ' + (c.isMajorOut ? '[窗口外·重大] ' : '') + '[' + i + '] ' + c.claim + '\nVote: ' + (c.isMajorOut ? '—（未投票，多源公认行业里程碑）' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount) + ' · Status: ' + _bakedStatus(c) + ' · Source: ' + c.sourceUrl + ' (' + c.sourceQuality + ') · Date: ' + (c.publishDate || c.date || '?') + '\nQuote: "' + c.quote.slice(0, 220) + (c.quote.length > 220 ? '…' : '') + '"\n')
+	  '### ' + (c.isMajorOut ? '[窗口外·重大] ' : '') + '[' + i + '] ' + c.claim + '\nVote: ' + (c.isMajorOut ? '—（未投票，多源公认行业里程碑）' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount) + ' · Status: ' + _bakedStatus(c) + ' · Source: ' + c.sourceUrl + ' (' + c.sourceQuality + ') · Date: ' + (c.publishDate || c.date || '?') + _heatLine(c) + '\nQuote: "' + c.quote.slice(0, 220) + (c.quote.length > 220 ? '…' : '') + '"\n')
   .join('\n')
   : '(无已确认声明)')
 // 8/23 第二十一项：聚类主视图并列注入 reportBody 开头的「## 已聚类」区（report prompt 4.7 专门读取）——
@@ -1175,9 +1193,13 @@ const refutedOut = killed.map(c => ({ claim: c.claim, source: c.sourceUrl, vote:
 const unverifiedOut = unverified.map(c => ({ claim: c.claim, source: c.sourceUrl }))
 const outOfWindowOut = outOfWindow.map(c => ({ claim: c.claim, source: c.sourceUrl, date: c.publishDate || c.date, vote: (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, erroredCount: c.erroredCount || 0 }))
 const md = report
-  ? renderMarkdown({ date: DATE, window: WINDOW_LABEL, report, coverage, windowMisses, degraded: degradedFlags, meta: {
+  ? renderMarkdown({ date: DATE, window: WINDOW_LABEL, report, coverage, windowMisses, degraded: degradedFlags, yesterdayTopics, meta: {
       date: DATE, window: WINDOW_LABEL,
-      stats: { confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, urls_fetched: sources.length, urls_discovered: discoverRows.reduce((n, d) => n + d.urls.length, 0) },
+      // 10/03 对齐参考日报：漏斗统计（数据概览表）。community_topics=社区预抓帖合计；
+      // claims_extracted=全部提取声明；topic_groups=跨条合并话题组；included=纳入正文的条目数。
+      stats: { confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, urls_fetched: sources.length, urls_discovered: discoverRows.reduce((n, d) => n + d.urls.length, 0),
+        community_topics: discoverRows.reduce((n, d) => n + (d.linuxdoTopics || 0), 0), claims_extracted: allClaims.length,
+        topic_groups: clusteredMerged.length, included: report.sections ? report.sections.reduce((n, s) => n + ((s && s.items) || []).length, 0) : 0 },
       generated_by: generatedBy,
     } })
   : renderDegradedMarkdown({ date: DATE, window: WINDOW_LABEL, confirmed: confirmedOut, refuted: refutedOut, coverage, windowMisses, degraded: degradedFlags, noNewsCompanies: noDynamicCompanies, reportError: reportErr, generated_by: generatedBy })

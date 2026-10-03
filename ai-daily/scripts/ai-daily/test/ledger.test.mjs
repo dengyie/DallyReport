@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import {
   LEDGER_OVERLAP_MIN, LEDGER_SHARE_MIN, LEDGER_LOOKBACK_DAYS, LEDGER_KEEP_DAYS,
   fingerprintTokens, makeLedgerEntry, storyMatch, filterReportedTargets, splitSeeds, pruneLedger,
-  parseReportedLedger,
+  parseReportedLedger, buildYesterdayTopics,
 } from '../ledger.mjs'
 import { ledgerEntriesFromClaims, recordLedger, DEFAULT_LEDGER, PROD_DALLYREPORT_PREFIX, isProdOutDir } from '../finalize.mjs'
 
@@ -271,3 +271,55 @@ test('isProdOutDir：只认生产前缀，不在真实 iCloud 目录落盘', () 
   assert.equal(isProdOutDir(PROD_DALLYREPORT_PREFIX), true, '默认前缀命中生产根')
   assert.equal(isProdOutDir(path.join(os.tmpdir(), 'finalize-smoke-x')), false)
 })
+
+// ─── 10/03 对齐参考日报：昨日话题追踪（连续剧）───
+
+test('buildYesterdayTopics：昨日条目 + 今日 confirmed URL 命中 → todayUpdate；无命中 → null', () => {
+  const today = '2026-10-03'
+  const e1 = makeLedgerEntry('2026-10-02', 'https://x.ai/news/grok-4-6', 'Grok 4.6 发布，聚焦长时 Agent 能力', true)
+  const e2 = makeLedgerEntry('2026-10-02', 'https://example.org/other', '另一条昨日话题没有后续进展', false)
+  const confirmed = [
+    { sourceUrl: 'https://x.ai/news/grok-4-6', claim: 'Grok 4.6 追加评测成绩公布', quote: '' },
+  ]
+  const out = buildYesterdayTopics([e1, e2], confirmed, today)
+  assert.equal(out.length, 2, '昨日两条都进追踪节')
+  const t1 = out.find(t => t.url === 'https://x.ai/news/grok-4-6')
+  const t2 = out.find(t => t.url === 'https://example.org/other')
+  assert.equal(t1.todayUpdate, 'Grok 4.6 追加评测成绩公布', 'URL 命中 → 本次新增')
+  assert.equal(t1.major, true, 'major 标记透传')
+  assert.equal(t2.todayUpdate, null, '无后续话题 todayUpdate 为 null')
+})
+
+test('buildYesterdayTopics：同事件换 URL 走指纹路径命中（overlap≥0.8 且共享≥5）', () => {
+  const today = '2026-10-03'
+  const e1 = makeLedgerEntry('2026-10-02', 'https://a.example/day2', 'OpenClaw 2.0 开源发布 多 Agent 编排 长时任务 能力增强 社区评测', false)
+  const confirmed = [
+    { sourceUrl: 'https://b.example/followup', claim: 'OpenClaw 2.0 开源发布：多 Agent 编排、长时任务与工具链能力增强，社区评测成绩公布', quote: '' },
+  ]
+  const out = buildYesterdayTopics([e1], confirmed, today)
+  assert.ok(out[0].todayUpdate, '同事件换 URL 的今日 confirmed 命中 → 本次新增：' + out[0].todayUpdate)
+})
+
+test('buildYesterdayTopics：只看 lookback（默认 2 天），更早条目不进追踪', () => {
+  const today = '2026-10-03'
+  const old = makeLedgerEntry('2026-09-28', 'https://example.org/old', '五天前的话题早已退役出窗', false)
+  const out = buildYesterdayTopics([old], [], today)
+  assert.equal(out.length, 0)
+})
+
+test('buildYesterdayTopics：连续剧 streak——连续多天同事件计数（URL 互认）', () => {
+  const today = '2026-10-03'
+  const e1 = makeLedgerEntry('2026-10-02', 'https://a.example/day2', 'Grok 4.6 长时 Agent 能力追踪第二天', false)
+  const e0 = makeLedgerEntry('2026-10-01', 'https://a.example/day2', 'Grok 4.6 长时 Agent 能力首日报道', false)
+  const out = buildYesterdayTopics([e1, e0], [], today)
+  const t1 = out.find(t => t.day === '2026-10-02')
+  assert.ok(t1, '昨日条目在场')
+  assert.equal(t1.streak, 2, '昨日 + 前日连续同事件 → streak=2')
+})
+
+test('buildYesterdayTopics：空账本 / today 不可解析 → []（fail-open，不渲染空骨架）', () => {
+  assert.deepEqual(buildYesterdayTopics([], [], '2026-10-03'), [])
+  assert.deepEqual(buildYesterdayTopics([makeLedgerEntry('2026-10-02', 'https://x', '某条目内容', false)], [], 'garbage'), [])
+})
+
+// buildYesterdayTopics import（10/03 追踪节）

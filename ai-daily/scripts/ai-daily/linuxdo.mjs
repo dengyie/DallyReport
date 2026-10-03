@@ -58,7 +58,9 @@ export async function fetchLinuxDoNews34({ cdpHost, isNoise, deepFetch = 0 } = {
   return out
 }
 
-// --- 轻量解析：从 Discourse JSON 提取 { id, title, url, date, snippet, likes } ---
+// --- 轻量解析：从 Discourse JSON 提取 { id, title, url, date, snippet, likeCount, views, replies } ---
+// 10/03 对齐参考日报：论坛硬指标（浏览/点赞/回复）随帖流动——mint 带进 claim.heat，report 素材行
+// 可引用「社区热度」（措辞不带站名，正文纪律不变）。Discourse 列表字段：like_count/views/posts_count。
 export function extractTopicsFromJson(raw) {
   if (!raw) return null
   let obj; try { obj = JSON.parse(String(raw).trim()) } catch { return null }
@@ -66,6 +68,7 @@ export function extractTopicsFromJson(raw) {
   return obj.topic_list.topics.map(t => ({
     id: t.id, title: t.title, url: 'https://linux.do/t/' + t.id,
     date: t.created_at ? t.created_at.slice(0, 10) : '', snippet: t.excerpt || '', likeCount: t.like_count || 0,
+    views: t.views || 0, replies: (t.posts_count || 0) > 0 ? t.posts_count - 1 : 0,
   }))
 }
 
@@ -115,11 +118,17 @@ export function mintLinuxdoSource(post, date) {
   const firstSent = snippet.split(/[。！？\n]/)[0].replace(/\s+/g, ' ').trim()
   const fromBody = firstSent.slice(0, 80)
   const claim = fromBody.length >= 8 ? fromBody : title
+  // 10/03 对齐参考日报：论坛硬指标（浏览/赞/回复）随 claim 流动 → report 素材行「社区热度」。
+  // 全 0 的帖不产 heat（无热度信息不装作有）。
+  const heat = (post.likeCount || post.views || post.replies)
+    ? { likes: post.likeCount || 0, views: post.views || 0, replies: post.replies || 0 }
+    : undefined
   return {
     url, title, found_via: 'linuxdo-cdp', sourceQuality: 'forum', board: 'linuxdo', date: d,
     claims: [{
       claim, quote, importance: 'supporting',
       sourceUrl: url, sourceTitle: title, sourceQuality: 'forum', date: d, board: 'linuxdo',
+      ...(heat ? { heat } : {}),
     }],
   }
 }

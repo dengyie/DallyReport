@@ -16,15 +16,17 @@ const newsJson = JSON.stringify({
   ] },
 })
 
-test('extractTopicsFromJson：标准 Discourse 列表 → {id,title,url,date,snippet,likeCount}', () => {
+test('extractTopicsFromJson：标准 Discourse 列表 → {id,title,url,date,snippet,likeCount,views,replies}', () => {
   const ts = extractTopicsFromJson(newsJson)
   assert.equal(ts.length, 2)
   assert.deepEqual(ts[0], {
     id: 100001, title: 'DeepSeek V4-Pro 发布', url: 'https://linux.do/t/100001',
-    date: '2026-08-23', snippet: '官方正式版上线，Agent 能力增强。', likeCount: 42,
+    date: '2026-08-23', snippet: '官方正式版上线，Agent 能力增强。', likeCount: 42, views: 0, replies: 0,
   })
   assert.equal(ts[1].likeCount, 0, '缺 like_count 默认 0')
   assert.equal(ts[1].snippet, '', '缺 excerpt 默认空')
+  assert.equal(ts[1].views, 0, '缺 views 默认 0')
+  assert.equal(ts[1].replies, 0, '缺 posts_count 默认 0')
 })
 
 test('extractTopicsFromJson：容错——非 JSON / 空结构 / null → null', () => {
@@ -339,4 +341,25 @@ test('HIGH_VALUE_OUTLINK_RE：9/19 补齐域名（google 系/ai.meta.com/hf.co/m
   ]) assert.ok(HIGH_VALUE_OUTLINK_RE.test(u), '应命中: ' + u)
   assert.ok(!HIGH_VALUE_OUTLINK_RE.test('https://linux.do/t/123'), 'linux.do 自身不命中')
   assert.ok(!HIGH_VALUE_OUTLINK_RE.test('https://example.com/page'), '无关域不命中')
+})
+
+// ─── 10/03 对齐参考日报：论坛硬指标（浏览/赞/回复）随 mint 流动 → claim.heat ───
+
+test('mintLinuxdoSource：likeCount/views/replies → claim.heat 透传（社区热度）', () => {
+  const src = mintLinuxdoSource({
+    id: 2978001, title: '某模型开源', url: 'https://linux.do/t/2978001', date: '2026-10-02',
+    snippet: '社区讨论某模型开源，权重与评测全部公开，引发了大量讨论。',
+    likeCount: 41, views: 5200, replies: 33,
+  }, '')
+  assert.ok(src, '非空 snippet 必须铸出 source')
+  assert.deepEqual(src.claims[0].heat, { likes: 41, views: 5200, replies: 33 }, '硬指标完整透传进 claim.heat')
+})
+
+test('mintLinuxdoSource：全 0 硬指标不产 heat（无热度信息不装作有）', () => {
+  const src = mintLinuxdoSource({
+    id: 2978002, title: '零热度帖', url: 'https://linux.do/t/2978002', date: '2026-10-02',
+    snippet: '这是一条没有任何互动数据的帖子内容片段。',
+  }, '')
+  assert.ok(src)
+  assert.equal(src.claims[0].heat, undefined, '无热度不装作有（heat 缺席）')
 })

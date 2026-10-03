@@ -97,6 +97,13 @@ export const REPORT_SCHEMA = {
   properties: {
     oneLiner: { type: 'string' },
     execSummary: { type: 'string' },
+    // 10/03 对齐参考日报：highlights（2-4 条今日亮点）/ trend（今日技术趋势综述段）。
+    // 可选字段（required 不变）——旧 report 产物与降级路径不填照常过 schema；render 侧按存在渲染。
+    highlights: { type: 'array', maxItems: 4, items: {
+      type: 'object', required: ['title', 'why'],
+      properties: { title: { type: 'string' }, why: { type: 'string' } },
+    }},
+    trend: { type: 'string' },
     sections: { type: 'array', items: {
       type: 'object', required: ['board', 'title', 'items'],
       properties: {
