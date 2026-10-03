@@ -27,6 +27,8 @@ import os from 'node:os'
 import { makeLedgerEntry, pruneLedger } from './ledger.mjs'
 import { normURL } from './date-utils.mjs'
 import { runPoster } from './generate-poster.mjs'
+import { isCliMain } from './cli-main.mjs'
+import { WIN_PROD_DALLYREPORT_ROOT, macProdDallyReportRoot } from './host-paths.mjs'
 
 /** 展开任意 `~` 前缀为用户 home（`~/...` → `${os.homedir()}/...`）。只处理开头为 `~/` 的。 */
 export const expand = p => {
@@ -68,13 +70,11 @@ export const DEFAULT_LEDGER = path.join(os.homedir(), '.ai-daily', 'published-le
 // 生产 outDir 前缀：只有写进任一前缀下的 run 才自动记账（烟测 /tmp 隔离）。
 // P0（10-03 review 实证）：旧版只有 Mac iCloud 单前缀——Windows 迁移后生产 outDir 是
 // E:/profile/note/note/AI/DallyReport，isProdOutDir 恒 false → 生产 LEDGER-SKIP + poster 永不跑。
-// 改前缀列表：Windows 生产置首 + Mac iCloud 兜底（历史对账）。
+// F-1（10-04 review）：生产根字面量收敛到 host-paths 单一真源——Windows 生产根置首 + Mac iCloud
+// 兜底（历史对账），与 artifact-check / generate-poster 同源。
 // review S-⑤：AI_DAILY_PROD_PREFIX 惰性读取（isProdOutDir 每次调用组装）——不再在模块加载期
 // 突变导出数组，import 时序不再影响判定。
-export const PROD_DALLYREPORT_PREFIXES = [
-  'E:/profile/note/note/AI/DallyReport',
-  path.join(os.homedir(), 'Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-note/AI/DallyReport'),
-]
+export const PROD_DALLYREPORT_PREFIXES = [WIN_PROD_DALLYREPORT_ROOT, macProdDallyReportRoot()]
 const _prodPrefixes = () => (
   process.env.AI_DAILY_PROD_PREFIX
     ? [process.env.AI_DAILY_PROD_PREFIX, ...PROD_DALLYREPORT_PREFIXES]
@@ -164,11 +164,38 @@ export const finalizePayloads = ({ payloads, outDir, date }) => {
 }
 
 // ─── CLI ───
-const args = process.argv.slice(2)
-const resultPath = args.find(a => !a.startsWith('--'))
-if (resultPath) {
-  const outOverride = args.includes('--out') ? args[args.indexOf('--out') + 1] : null
-  const ledgerOverride = args.includes('--ledger') ? args[args.indexOf('--ledger') + 1] : null
+// F3（10-04 review 根因）：旧版把 CLI 无条件摊在模块顶层——测试/编排器 import 本文件时
+// process.argv 仍是宿主进程的 argv，`args.find(非 --)` 会捡到宿主脚本路径 → import 即写盘
+// （实证：import-only wrapper 真的落了产物，冒名 host-finalize 的 ob 复现也误触发）；且
+// `--out <dir> <result>` 顺序会把 dir 当 result 读 → ENOENT。根因修复：isCliMain 门控
+// （与 cli-main.mjs 约定一致：仅直接执行本文件才进 CLI）+ 旗标带值解析（位置参数与旗标
+// 值互不污染，顺序无感）。
+if (isCliMain(import.meta.url, process.argv[1])) {
+  await cliMain()
+}
+// import 方（测试/编排器）不自动执行 CLI；仅导出 finalizePayloads 等函数供调用。
+
+async function cliMain() {
+  const argv = process.argv.slice(2)
+  const flags = {}
+  const positional = []
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a.startsWith('--')) {
+      const v = argv[i + 1]
+      if (v && !v.startsWith('--')) { flags[a] = v; i++ } else { flags[a] = true }
+    } else {
+      positional.push(a)
+    }
+  }
+  const flagValue = name => (typeof flags[name] === 'string' ? flags[name] : null)
+  const resultPath = positional[0]
+  const outOverride = flagValue('--out')
+  const ledgerOverride = flagValue('--ledger')
+  if (!resultPath) {
+    console.error('FINALIZE-FAIL usage: node finalize.mjs <result-path> [--out <dir>] [--ledger <path>]')
+    process.exit(1)
+  }
   const raw = fs.readFileSync(resultPath, 'utf8')
   const obj = JSON.parse(raw)
   const spec = extractPayloads(obj)
@@ -220,7 +247,4 @@ if (resultPath) {
       console.error(`POSTER-WARN 海报生成失败（产物已落盘不受影响）: ${e && e.message}`)
     }
   }
-} else {
-  // import 方（测试/编排器）不自动执行 CLI；仅当直接运行本文件时落盘。
-  // no-op：本模块可被 import 后调用 finalizePayloads。
 }

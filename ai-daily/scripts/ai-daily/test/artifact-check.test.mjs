@@ -1,9 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { artifactPaths, summarizeArtifacts, isCliMain } from '../artifact-check.mjs'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
 
 // 8/31 P4：launchd 上下文 /bin/zsh 无 Full Disk Access，`wc -c`/`grep` 读 iCloud 产物被拒 →
 // 自检连续 6 次 run 打空壳 `ARTIFACT-OK md_bytes= confirmed= degraded=`。自检迁到 node 后，
@@ -94,4 +98,30 @@ test('P4：artifact-check 复用宿主共享 isCliMain，不得各写一份', ()
   const src = fs.readFileSync(new URL('../artifact-check.mjs', import.meta.url), 'utf8')
   assert.match(src, /from '\.\/cli-main\.mjs'/, '从 cli-main.mjs 导入，禁止本地再实现一份')
   assert.doesNotMatch(src, /export const isCliMain =/, '不得在本文件再定义 isCliMain')
+})
+
+// F2（10-04 review 根因回归）：默认目录三级解析（env > win32 生产根 > Darwin iCloud）。
+// 旧版只有 Mac iCloud 前缀——Windows 无 --dir 调用会 ARTIFACT-FAIL report_missing 假失败。
+// 环境变量覆盖经 CLI spawn 验证（三级解析在 host-paths.prodDallyReportRoot()，调用点惰性求值）。
+test('F2：AI_DAILY_REPORT_DIR env 覆盖默认目录——无 --dir 调用也能命中生产根', () => {
+  const proj = path.join(HERE, '..') // scripts/ai-daily
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'artifact-env-'))
+  const date = '2026-10-04'
+  try {
+    fs.mkdirSync(path.join(root, date), { recursive: true })
+    fs.writeFileSync(path.join(root, date, `${date}-ai日报.md`), 'x'.repeat(2840))
+    fs.writeFileSync(path.join(root, date, `${date}.meta.json`), JSON.stringify({ confirmed: 8, degraded: [] }))
+    const res = spawnSync(process.execPath, [path.join(proj, 'artifact-check.mjs'), '--date', date], {
+      encoding: 'utf8',
+      env: { ...process.env, AI_DAILY_REPORT_DIR: root },
+    })
+    assert.equal(res.status, 0, `无 --dir 时读到 env 指定根：${res.stdout}${res.stderr}`)
+    assert.match(res.stdout, /^ARTIFACT-OK md_bytes=2840/, 'env 根下命中真实产物')
+    // F-1 单一真源锁定：本文件只准引用 host-paths.prodDallyReportRoot，不得再持生产根字面量
+    const src = fs.readFileSync(path.join(proj, 'artifact-check.mjs'), 'utf8')
+    assert.match(src, /prodDallyReportRoot/, '默认目录走 host-paths 单一真源')
+    assert.doesNotMatch(src, /E:\/profile\/note\/note/, '本文件不得再持有生产根字面量（防多点漂移）')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })

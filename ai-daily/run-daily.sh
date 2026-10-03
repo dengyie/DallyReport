@@ -96,6 +96,7 @@ if [ -f "$REPORT" ]; then
   {
     echo ""
     echo "===== $STAMP skip — $REPORT already exists（当日报告已产出，自动跳过，避免无头模式下重复运行）====="
+    echo "===== $STAMP done rc=0 (skip-existing) ====="
   } >> "$LOG" 2>&1
   exit 0
 fi
@@ -184,12 +185,13 @@ fi
     done
   done
   if [ "$RC" != "0" ] && [ ! -f "$REPORT" ]; then
+    # 终端状态发射统一收在 artifact-check 之后的终态块（probe 全灭仍有 rc=2 行、宿主失败有 rc=1 行）。
+    # 本块仅保留语义提示，不再发射 done 行——done 行必须覆盖成功路径（F1 10-04 review：旧版只有
+    # ATTEMPT=0 分支写 done，成功/有尝试失败直接落 WALLCLOCK → 进度台终态永不可达）。
     if [ "$ATTEMPT" -eq 0 ]; then
-      echo "PROBE-EXHAUSTED 网关探针全阶梯失败 → 本次 run 放弃（不空拉）"
-      echo "===== $STAMP done rc=2 (probe-exhausted) ====="
-      notify "日报未生成 $TODAY" "网关探针全阶梯失败，launch 放弃"
+      echo "（终态见下方 done 行：rc=2 probe-exhausted，探针全阶梯失败 → 本次 run 放弃不空拉）"
     else
-      notify "日报未生成 $TODAY" "claude rc=$RC，编排器阶梯耗尽仍失败 slow_death=$SLOW_DEATH"
+      echo "（终态见下方 done 行：rc=1，编排器阶梯耗尽 slow_death=$SLOW_DEATH）"
     fi
   fi
 
@@ -213,6 +215,22 @@ fi
   else
     echo "（自检判定产物缺失 · claude rc=$RC）"
     notify "日报产物缺失 $TODAY" "artifact-check 未找到当日日报，claude rc=$RC"
+  fi
+
+  # 终态行（F1 根因修复：进度台 DONE_RE 唯一发射点，成功/失败/探针耗尽三态都必须有）：
+  #   rc=0  产物在场（含 host-finalize 抢救成功——抢救后 REPORT 已存在，成功语义优先于 launch rc）；
+  #   rc=2  零次 launch（网关探针全阶梯失败，无实际尝试）；
+  #   rc=1  有尝试但最终无产物（claude rc=$RC / slow-death）。
+  # 注意此前旧版：成功路径 RC 被强制 0 后 `if [ "$RC" != "0" ]` 直接跳过 done 发射 —— 进度台
+  # 会永远显示「运行中」。三态统一收口在此处，先于 WALLCLOCK 行（progress.mjs 以 done 行为终态）。
+  if [ -f "$REPORT" ]; then
+    echo "===== $STAMP done rc=0 ====="
+  elif [ "$ATTEMPT" -eq 0 ]; then
+    echo "===== $STAMP done rc=2 (probe-exhausted) ====="
+    notify "日报未生成 $TODAY" "网关探针全阶梯失败，launch 放弃"
+  else
+    echo "===== $STAMP done rc=1 ====="
+    notify "日报未生成 $TODAY" "claude rc=$RC，编排器阶梯耗尽仍失败 slow_death=$SLOW_DEATH"
   fi
 
   # 8/31 P1-② 宿主侧墙钟看门狗：realm 内 _wallMs 累加器在事件循环饱和时只会低估（8/31 实测

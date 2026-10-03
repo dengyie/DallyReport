@@ -19,7 +19,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { isCliMain } from './cli-main.mjs'
-import { aiDailyHome, claudeProjectsDir } from './host-paths.mjs'
+import { aiDailyHome, claudeProjectsDir, localDateStr } from './host-paths.mjs'
 
 export const PHASES = ['harvest', 'discover', 'fetch', 'verify', 'synth']
 
@@ -149,7 +149,10 @@ export const findLatestJournal = (projectsDir, sinceMs, io = fs) => {
 // 阶段计数（诚实版）：journal 事件带 agentId，agent-<id>.jsonl 转录首行可归类阶段。
 // per-phase：done = 有 result 事件的 agent 数；inflight = started 未归（转录在场但无 result）。
 // 注意转录文件**持久存在**，不能拿「文件存在」当在飞——必须以 journal result 归账。
-const phaseCounts = (wfDir, io) => {
+// F4/F6（10-04 review）：本函数曾私有导出缺失（无法单测）+ inflight 减后可能为负——
+//   重复 result 事件（同一 agent 二次 result，如重试续写）会让 done 超过转录计数 → 在飞显示负数。
+//   现导出供测试直达，并 clamp 到 0（负数在 UI 呈现为「-1 飞」是数据错，不是真实负在飞）。
+export const phaseCounts = (wfDir, io) => {
   const counts = {}
   for (const p of PHASES) counts[p] = { done: 0, inflight: 0 }
   const phaseOf = {} // agentId → phase
@@ -181,8 +184,8 @@ const phaseCounts = (wfDir, io) => {
     } catch { /* 半行/空行跳过 */ }
   }
   for (const id of Object.keys(phaseOf)) counts[phaseOf[id]].inflight++
-  // started 未归 = 转录在场 - 已归账
-  for (const p of PHASES) counts[p].inflight -= counts[p].done
+  // started 未归 = 转录在场 - 已归账（clamp ≥0，防重复 result 事件把在飞减成负数）
+  for (const p of PHASES) counts[p].inflight = Math.max(0, counts[p].inflight - counts[p].done)
   return { counts, probed }
 }
 
@@ -253,7 +256,7 @@ const main = () => {
   const logPath = flag('--log') || path.join(aiDailyHome(), 'run-daily.log')
   const projectsDir = flag('--projects') || claudeProjectsDir()
   const softLimitS = Number(flag('--soft-limit-s')) || 1800
-  const date = new Date().toISOString().slice(0, 10)
+  const date = localDateStr()
 
   const tick = () => {
     const nowMs = Date.now()

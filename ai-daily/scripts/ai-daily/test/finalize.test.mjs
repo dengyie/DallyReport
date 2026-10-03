@@ -9,11 +9,11 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { extractPayloads, finalizePayloads, expand, recordLedger } from '../finalize.mjs'
 import { makeLedgerEntry } from '../ledger.mjs'
 
 const makeEntry = () => makeLedgerEntry('2026-09-19', 'https://example.com/a', '示例事件 A', false)
-import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -214,5 +214,68 @@ test('CLI：落盘成功 → ledger_recorded 回写进已落盘 meta（tmp+renam
     assert.ok(!fs.readdirSync(outDir).some(f => f.endsWith('.tmp')), 'meta 原子回写无 .tmp 残留')
   } finally {
     fs.rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+// ─── F3（10-04 review 根因回归）：CLI 门控——import 不得触发写盘，旗标值不得被当 position ───
+
+test('F3：import-only 包装不得写盘（旧版 CLI 摊模块顶层，import 即副作用落盘）', () => {
+  const proj = path.join(HERE, '..')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'finalize-importside-'))
+  const finalizeUrl = pathToFileURL(path.join(proj, 'finalize.mjs')).href
+  const resultJson = path.join(dir, 'result.json')
+  // result 的 outDir 指向包装进程自己的目录：旧版会把包装 argv 里的 resultJson 当 CLI 输入，写满这里
+  const spec = { ...sample(), outDir: dir }
+  fs.writeFileSync(resultJson, JSON.stringify(spec))
+  const wrapper = path.join(dir, 'import-only.mjs')
+  fs.writeFileSync(wrapper, `import ${JSON.stringify(finalizeUrl)}\n// 仅 import：不得写盘（F3 回归）\n`)
+  // 包装进程 argv 刻意带 result 路径 + --out——旧版顶层 `args.find(非 --)` 会捡到它们并执行落盘
+  const res = spawnSync(process.execPath, [wrapper, resultJson, '--out', dir], { encoding: 'utf8' })
+  try {
+    assert.equal(res.status, 0, `import 包装进程退出码 0；stderr=${res.stderr}`)
+    assert.doesNotMatch(res.stdout, /WROTE /, 'import 不得出现落盘行')
+    assert.deepEqual(fs.readdirSync(dir).sort(), ['import-only.mjs', 'result.json'], '无 4 产物写出（import 零副作用）')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('F3：CLI 旗标值（--ledger/--out）不得被当 result 位置参数——旗标前置顺序无感', () => {
+  const proj = path.join(HERE, '..')
+  const date = '2026-08-21'
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'finalize-order-'))
+  const ledgerPath = path.join(outDir, 'ledger.json')
+  const resultJson = path.join(outDir, 'result.json')
+  fs.writeFileSync(resultJson, JSON.stringify(sample()))
+  // 旧版 args.find(非 --) 拿到 --ledger 的值当 result → 读 ledger 路径当 JSON → ENOENT/写错盘
+  const res = spawnSync(process.execPath, [path.join(proj, 'finalize.mjs'), '--ledger', ledgerPath, '--out', outDir, resultJson], { encoding: 'utf8' })
+  try {
+    assert.equal(res.status, 0, `旗标前置仍正常；stderr=${res.stderr}`)
+    assert.match(res.stdout, /WROTE /, '4 产物落盘')
+    assert.ok(fs.existsSync(path.join(outDir, `${date}-ai日报.md`)), '日报 md 落盘')
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('F3：无参调用 → usage 报错 exit 1（旧行为静默 exit 0，新契约锁定）', () => {
+  const proj = path.join(HERE, '..')
+  const res = spawnSync(process.execPath, [path.join(proj, 'finalize.mjs')], { encoding: 'utf8' })
+  assert.equal(res.status, 1, '无参必须非零退出（错误快速可见）')
+  assert.match(res.stderr, /usage:/, 'stderr 携带 usage 行')
+})
+
+test('F3：--out 作为末参（无值）→ 回落 result 自带 outDir，不写坏目录', () => {
+  const proj = path.join(HERE, '..')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'finalize-noval-'))
+  const spec = { ...sample(), outDir: dir }
+  const resultJson = path.join(dir, 'result.json')
+  fs.writeFileSync(resultJson, JSON.stringify(spec))
+  const res = spawnSync(process.execPath, [path.join(proj, 'finalize.mjs'), resultJson, '--out'], { encoding: 'utf8' })
+  try {
+    assert.equal(res.status, 0, `--out 无值回落 spec.outDir；stderr=${res.stderr}`)
+    assert.ok(fs.existsSync(path.join(dir, '2026-08-21-ai日报.md')), '产物落在 result 自带 outDir')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
   }
 })

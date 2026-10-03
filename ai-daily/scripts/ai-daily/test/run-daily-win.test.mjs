@@ -87,8 +87,44 @@ test('Windows runner：prefetch 失败日志携带 node 真实退出码（10/04 
   const failIdx = sh.indexOf('LINUXDO-PREFETCH-FAIL')
   assert.ok(failIdx >= 0, '预抓失败日志行在场')
   // 根因：`exit=$?` 若写在 printf 之后，取到的是 printf 的退出码（恒 0），node 真实 rc 被吞 →
-  // 审计时永远看到 exit=0。必须在 else 入口（$? 仍是 node 退出码）先捕获。
-  assert.match(sh, /PREFETCH_RC=\$\?/, '失败分支入口先捕获 node 退出码')
+  // 审计时永远看到 exit=0。必须在 else 口（$? 仍是 node 退出码）先捕获。
+  assert.match(sh, /PREFETCH_RC=\$\?/, '在失败分支入口先捕获退出码')
   assert.doesNotMatch(sh, /LINUXDO-PREFETCH-FAIL exit=\$\?/, '日志不得取 printf 之后的 $?（恒 0）')
   assert.match(sh, /LINUXDO-PREFETCH-FAIL exit=\$PREFETCH_RC/, '日志引用捕获的真实退出码')
+})
+
+// F1（10-04 review 根因回归）：终态 done 行三态统一收口。
+// 旧版只有 ATTEMPT=0 分支写 `done rc=2`，成功/有尝试失败直接落 WALLCLOCK → 进度台 DONE_RE
+// 永不命中，恒显示「运行中」。固定：done 行必须(1)覆盖成功路径，(2)在 artifact-check 之后
+// （先抢救+自检再判终态），(3)在 WALLCLOCK 之前（progress.mjs 视 done 行为终态边界）。
+// 定位用发射专属 needle（`$STAMP done rc=` / `printf 'WALLCLOCK`），杜绝被正文注释抢先匹配。
+test('Windows runner：F1 终态三态 done 行收口——成功后必发射，且在 WALLCLOCK 之前', () => {
+  const sh = win()
+  const artIdx = sh.indexOf('artifact-check.mjs')
+  const done0 = sh.indexOf('$STAMP done rc=0 =====')
+  const done2 = sh.indexOf('$STAMP done rc=2 (probe-exhausted)')
+  const done1 = sh.indexOf('$STAMP done rc=1')
+  const wallIdx = sh.indexOf("printf 'WALLCLOCK")
+  assert.ok(done0 >= 0 && done2 >= 0 && done1 >= 0, '三态 done 发射点都在场（rc=0 成功 / rc=2 探针耗尽 / rc=1 尝试失败）')
+  assert.ok(artIdx >= 0 && done0 > artIdx, 'done 行在 artifact-check 之后（先 host-finalize 抢救+自检再判终态）')
+  assert.ok(wallIdx > done0, 'done 行在 WALLCLOCK 之前（progress.mjs 以 done 行为终态，须先于墙钟行）')
+  assert.match(sh, /if \[ -f "\$REPORT" \]; then/, '终态块以 REPORT 在场为 rc=0 主判据（抢救成功也计成功）')
+  assert.ok(sh.includes(String.raw`done rc=0 (skip-existing)`), "幂等 skip 路径也发射终态行（进度台不显示陈旧终态）")
+  // 旧 bug 回归源："成功路径 RC 被强制 0 后 `if [ "$RC" != "0" ]` 跳过 done"——现在必须在 `[ -f "$REPORT" ]` 独立判，不得依赖 RC 分支
+  assert.match(sh, /notify "日报未生成/, '失败态通知在场（不再只在成功路径静默）')
+})
+
+test('Mac runners（run-daily.sh）：F1 终态三 done 行同样收口（与 win 对齐）', () => {
+  const MAC = path.resolve(HERE, '../../../run-daily.sh')
+  assert.ok(fs.existsSync(MAC), 'Mac parity runner 在场')
+  const sh = fs.readFileSync(MAC, 'utf8')
+  const artIdx = sh.indexOf('artifact-check.mjs')
+  const done0 = sh.indexOf('$STAMP done rc=0 =====')
+  const done2 = sh.indexOf('$STAMP done rc=2 (probe-exhausted)')
+  const done1 = sh.indexOf('$STAMP done rc=1')
+  const wallIdx = sh.indexOf("printf 'WALLCLOCK")
+  assert.ok(done0 >= 0 && done2 >= 0 && done1 >= 0, '三态 done 发射点都在场')
+  assert.ok(artIdx >= 0 && done0 > artIdx, 'done 行在 artifact-check 之后')
+  assert.ok(wallIdx > done0, 'done 行在 WALLCLOCK 之前')
+  assert.ok(sh.includes(String.raw`done rc=0 (skip-existing)`), "幂等 skip 路径也发射终态行")
 })

@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import path from 'node:path'
 import {
   PHASES,
   classifyPrompt,
@@ -7,6 +8,7 @@ import {
   countJournal,
   furthestPhase,
   findLatestJournal,
+  phaseCounts,
   renderLine,
 } from '../progress.mjs'
 
@@ -200,4 +202,73 @@ test('renderLine：超软目标打 ⚠；终态 rc=0/1 两态；编排器阶段�
   assert.match(bad, /rc=1/)
   const orch = renderLine({ date: '2026-09-02', started: true, terminal: false, elapsedS: 90, fives24: 0, ladderNext: 0, ladderOk: 0, ladderFail: 0, ladderBudget: 0, journal: null, phases: null })
   assert.match(orch, /编排器/, 'journal 未起 → 显示编排器阶段')
+})
+
+// F1/F5（10-04 review 根因回归）：真实 runner 终态发射格式——成功路径必须有 `done rc=0` 行
+// （旧版两 runner 只在 ATTEMPT=0 分支写 done，成功路径 RC 被强制 0 后 `if [ "$RC" != "0" ]`
+// 直接跳过 → 进度台恒显示「运行中」，终态永不可达）。10-04 起两 runner 都在 artifact-check 之后、
+// WALLCLOCK 之前收口三态：rc=0（产物在场）/ rc=2 (probe-exhausted) / rc=1（有尝试仍失败）。
+test('parseRunState：真实 runner 成功日志（Windows 无时区）→ 终态 rc=0', () => {
+  const winLog = [
+    '===== 2026-10-04 02:55:53  start run-daily-win（CEILING_MS=0）=====',
+    'LINUXDO-PREFETCH-OK json_bytes=8596 → 落盘',
+    '===== 2026-10-04 03:41:19  done rc=0 =====',
+    'ARTIFACT-OK md_bytes=8671 confirmed=8 killed=0 urls=13/40 degraded=[fetch_budget_dropped:32]',
+    'WALLCLOCK real=46m00s soft_target=30m → OVER by 16m（realm 累加器低估，见运维笔记 P1）',
+  ].join('\n')
+  const s = parseRunState(winLog, 0)
+  assert.equal(s.started, true)
+  assert.equal(s.terminal, true, '成功路径必须终态（F1：旧版成功不写 done 行 → 恒「运行中」）')
+  assert.equal(s.rc, 0)
+  assert.match(s.artifactLine, /^ARTIFACT-OK md_bytes=8671/)
+  assert.match(s.wallclockLine, /real=46m00s/)
+})
+
+test('parseRunState：真实 runner 成功日志（Mac CST 带时区）→ 终态 rc=0', () => {
+  const macLog = [
+    '===== 2026-10-04 03:00:00 CST start run-daily（CEILING_MS=0）=====',
+    'LINUXDO-PREFETCH-OK json_bytes=8596 → 落盘',
+    '===== 2026-10-04 03:41:19 CST done rc=0 =====',
+    'ARTIFACT-OK md_bytes=8671 confirmed=8 killed=0 urls=13/40 degraded=none',
+    'WALLCLOCK real=46m00s soft_target=30m → within',
+  ].join('\n')
+  const s = parseRunState(macLog, 0)
+  assert.equal(s.terminal, true)
+  assert.equal(s.rc, 0)
+  assert.match(s.artifactLine, /degraded=none/)
+  assert.match(s.wallclockLine, /within/)
+})
+
+// F4/F6（10-04 review 根因回归）：phaseCounts 导出 + inflight 不得为负。
+// 重复 result 事件（同一 agent 二次 result，如重试续写）会让 done 超过转录计数 → 在飞显示负数。
+test('phaseCounts：按转录首行归类阶段，done=result 事件 / inflight=转录-已归账', () => {
+  const WF = path.join('projects', 'sess', 'wf_x')
+  const io = fakeIo({
+    [WF]: { dirs: ['agent-aaa.jsonl', 'agent-bbb.jsonl', 'agent-ccc.jsonl', 'journal.jsonl'] },
+    [WF + path.sep + 'agent-aaa.jsonl']: { content: '{"message":{"content":"## 共享源 Harvest（批量 official）\\n\\n窗口：…"}}\n' },
+    [WF + path.sep + 'agent-bbb.jsonl']: { content: '{"message":{"content":"## 板块发现代理（合组：labs+opensource）\\n\\n窗口：…"}}\n' },
+    [WF + path.sep + 'agent-ccc.jsonl']: { content: '{"message":{"content":"## 共享源 Harvest（批量 official）\\n\\n窗口：…"}}\n' },
+    [WF + path.sep + 'journal.jsonl']: { content: [
+      { type: 'started', agentId: 'aaa' },
+      { type: 'started', agentId: 'bbb' },
+      { type: 'started', agentId: 'ccc' },
+      { type: 'started', agentId: 'probe1' }, // 转录不在场 → probed
+      { type: 'result', agentId: 'aaa' },
+      { type: 'result', agentId: 'ccc' },
+      { type: 'result', agentId: 'ccc' }, // 重复 result（重试续写）→ 减数超转录基数
+    ].map(x => JSON.stringify(x)).join('\n') },
+  })
+  const { counts, probed } = phaseCounts(WF, io)
+  assert.equal(probed, 1, '转录不在场的 started 计入 probed')
+  assert.deepEqual(counts.harvest, { done: 3, inflight: 0 }, '重复 result clamp 到 0，不得负在飞')
+  assert.deepEqual(counts.discover, { done: 0, inflight: 1 }, '转录在飞未归仍正数')
+  assert.deepEqual(counts.fetch, { done: 0, inflight: 0 })
+  assert.deepEqual(counts.verify, { done: 0, inflight: 0 })
+  assert.deepEqual(counts.synth, { done: 0, inflight: 0 })
+})
+
+test('phaseCounts：journal 缺失目录静默返回零计数（wfDir 不存在）', () => {
+  const { counts, probed } = phaseCounts(path.join('nonexistent', 'wf'), fakeIo({}))
+  assert.equal(probed, 0)
+  for (const p of PHASES) assert.deepEqual(counts[p], { done: 0, inflight: 0 }, `${p} 零计数`)
 })

@@ -30,3 +30,25 @@ export const claudeProjectsDir = (cwd = process.cwd()) =>
 
 /** `~/.ai-daily`——运行时文件（run-daily.log / published-ledger.json / linuxdo-prefetch.json）。 */
 export const aiDailyHome = () => process.env.AI_DAILY_HOME || path.join(os.homedir(), '.ai-daily')
+
+// ─── 生产日报根（AI/DallyReport）单一真源（10-04 F-1 收口）───
+// artifact-check / generate-poster / finalize 三处宿主 CLI 曾各写一份「win32 生产根 + Darwin
+// iCloud 兜底」字面量（artifact-check DEFAULT_DIR、generate-poster defaultReportRoot、
+// finalize PROD_DALLYREPORT_PREFIXES）→ vault 迁移要改三处，漏一处即假 FAIL / 错根。
+// 收敛到本模块；env 覆盖口子沿用 AI_DAILY_REPORT_DIR（手动/CI 钉死生产根）。
+export const WIN_PROD_DALLYREPORT_ROOT = 'E:/profile/note/note/AI/DallyReport'
+export const macProdDallyReportRoot = () =>
+  path.join(os.homedir(), 'Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-note/AI/DallyReport')
+
+/** 三级解析：AI_DAILY_REPORT_DIR env 覆盖 → win32 生产 vault 根 → Darwin iCloud 兜底（历史对账）。 */
+export const prodDallyReportRoot = () =>
+  process.env.AI_DAILY_REPORT_DIR
+    || (process.platform === 'win32' ? WIN_PROD_DALLYREPORT_ROOT : macProdDallyReportRoot())
+
+/** 本地时区日期串 YYYY-MM-DD（宿主 CLI 的「今天」）。禁用 toISOString()（UTC）——
+ *  本地 00:00–08:00（CST=UTC+8）之间 UTC 日期仍是昨天 → progress 日期标签错一天、
+ *  artifact-check/generate-poster 无参默认查错日（10-04 smoke 实证：03:00 显示 10-03）。 */
+export const localDateStr = (d = new Date()) => {
+  const p = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
