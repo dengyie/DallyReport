@@ -54,11 +54,11 @@ test('模板：cluster 双轨——major-out 注入后 clusterClaims(confirmed)�
   assert.ok(!TPL.match(/clustered:/), 'reportPrompt 输入无 clustered 新字段')
 })
 
-test('模板：linuxdo/cluster/ledger/cdp-core 已在 build MODULES 且占位符在场（成品自包含）', () => {
+test('模板：linuxdo/cluster/ledger 已在 build MODULES 且占位符在场；cdp-core 已移出（10/03 拆分）', () => {
   assert.ok(TPL.includes('/* @inline: cluster */'), 'cluster 占位符在场')
   assert.ok(TPL.includes('/* @inline: ledger */'), 'ledger 占位符在场（9/13 跨天账本）')
-  assert.ok(TPL.includes('/* @inline: cdp-core */'), 'cdp-core 占位符在场（9/13 CDP 协议层）')
   assert.ok(TPL.includes('/* @inline: linuxdo */'), 'linuxdo 占位符在场')
+  assert.ok(!TPL.includes('/* @inline: cdp-core */'), 'cdp-core 占位符已移除（10/03：CDP 传输层属宿主 linuxdo-fetch，realm 不再 inline）')
 })
 
 test('模板 P2：BREAKER-OPEN break 不得包住 linuxdo 三态消费（预抓通道与代理断路器解耦）', () => {

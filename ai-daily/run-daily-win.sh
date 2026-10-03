@@ -25,7 +25,10 @@ LOG="$LOGDIR/run-daily.log"
 # 留在前面则 LOGDIR 缺失场景下 mkdir 失败 → 全 run 静默失日志。STAMP 同理必须在导出后取。
 export PATH="/e/code/Git/usr/bin:/c/Program Files/nodejs:/c/Users/mango/AppData/Roaming/npm:$PATH"
 mkdir -p "$LOGDIR"
-STAMP="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+# P3（10-03 review）：STAMP 兜底——若 date 仍不可达（PATH 修复失效/异常），不得让所有早退日志
+# 变成「 FAIL ...」空时间戳（事后无法定位）。非空兜底至少标明「时间未知」，日志行始终可辨识。
+STAMP="$(date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null)"
+STAMP="${STAMP:-unknown-time}"
 # P0 headless 修复（8/18 Mac 实证）：关闭 print 模式 600s 后台任务上限，等 workflow 真正完成。
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0
 
@@ -194,6 +197,16 @@ fi
     else
       notify "日报未生成 $TODAY" "claude rc=$RC，编排器阶梯耗尽仍失败 slow_death=$SLOW_DEATH"
     fi
+  fi
+
+  # 09-20 夜 P0 根因：编排器可能在 realm status=completed、payloads 齐全后 422 死在 Write 前，
+  # 落盘仍 LLM-mediated → out/ 空 → artifact-check 必 FAIL。宿主侧确定性兜底：从
+  # ~/.claude/projects/<cwd-slug>/<uuid>/workflows/wf_*.json 找回 payloads 并 spawn finalize 落盘。
+  # 必须在 artifact-check 之前跑（SKILL.md §5 契约）；报告已在盘上时本 CLI 自打 SKIP 不覆写。
+  # --since-epoch 传本轮墙钟起点，防止误收上一次 run 的旧 workflow json。
+  if [ ! -f "$REPORT" ]; then
+    node "$REPO_AI/scripts/ai-daily/host-finalize.mjs" --date "$TODAY" --out "$OB_DIR" --since-epoch "$WALL_START" \
+      || echo "HOST-FINALIZE 未落盘（无匹配 workflow json 或 finalize 失败，rc=$?）→ 交 artifact-check 判定"
   fi
 
   # 8/31 P4：产物自检由宿主 Node 执行（shell 在无头上下文读 iCloud 会被拒的历史；Windows 上

@@ -162,10 +162,18 @@ const loadEnvOnlyConfig = ({ date }) => ({ date })
 
 // CLI 入口：成功 exit 0；未生成（no_headlines / 生图失败）stderr 诊断 + exit 1。
 // finalize 走 import 调 runPoster，不经此入口，不受退出码语义影响。
+// P3-⑥（10-03 review）：默认 outDir 旧版硬编码 Mac iCloud 路径——Windows 迁移后手动调用会指向不存在
+// 的目录。改为：AI_DAILY_REPORT_DIR 覆盖 → win32 用 vault 生产根（与 finalize PROD_DALLYREPORT_PREFIXES[0]
+// 同源）→ 其余平台保留 Mac iCloud 兜底（历史对账）。生产 run 恒显式传 outDir，本默认只服务手动调用。
+const defaultReportRoot = () => {
+  if (process.env.AI_DAILY_REPORT_DIR) return process.env.AI_DAILY_REPORT_DIR
+  if (process.platform === 'win32') return 'E:/profile/note/note/AI/DallyReport'
+  return path.join(os.homedir(), 'Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-note/AI/DallyReport')
+}
 if (isCliMain(import.meta.url, process.argv[1])) {
   const args = process.argv.slice(2)
   const today = new Date().toISOString().slice(0, 10)
-  const outDir = args[0] || path.join(os.homedir(), 'Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-note/AI/DallyReport', today)
+  const outDir = args[0] || path.join(defaultReportRoot(), today)
   const date = args[1] || path.basename(outDir)
   runPoster(outDir, date).then(res => {
     if (!res || res.ok !== true) {

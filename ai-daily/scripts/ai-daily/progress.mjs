@@ -9,7 +9,7 @@
 //
 // 数据源（全只读）：
 //   - ~/.ai-daily/run-daily.log            启动时间戳 / done rc / ARTIFACT / WALLCLOCK / API Error 524 / LADDER-*
-//   - ~/.claude/projects/-Users-mango-project-claude-project-obsidian/<session>/subagents/workflows/<wf>/journal.jsonl
+//   - ~/.claude/projects/<cwd-slug>/<session>/subagents/workflows/<wf>/journal.jsonl（slug 由 host-paths 推导）
 //   - 同目录 agent-*.jsonl                  首行 user prompt → classifyPrompt 阶段归类
 //
 // 用法：node progress.mjs [--once] [--log <run-daily.log>] [--projects <dir>] [--soft-limit-s 1800]
@@ -19,6 +19,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { isCliMain } from './cli-main.mjs'
+import { aiDailyHome, claudeProjectsDir } from './host-paths.mjs'
 
 export const PHASES = ['harvest', 'discover', 'fetch', 'verify', 'synth']
 
@@ -240,9 +241,10 @@ const main = () => {
     return i >= 0 && argv[i + 1] ? argv[i + 1] : null
   }
   const once = argv.includes('--once')
-  const logPath = flag('--log') || path.join(process.env.HOME || '', '.ai-daily', 'run-daily.log')
-  const projectsDir = flag('--projects') ||
-    path.join(process.env.HOME || '', '.claude', 'projects', '-Users-mango-project-claude-project-obsidian')
+  // P2（10-03 review 实证）：HOME 在无头 shell 下为空 + 硬编码 Mac 会话名 → 进度台恒读不到日志/会话。
+  // 统一走 host-paths（os.homedir() + cwd slug），--log/--projects 仍可显式覆盖。
+  const logPath = flag('--log') || path.join(aiDailyHome(), 'run-daily.log')
+  const projectsDir = flag('--projects') || claudeProjectsDir()
   const softLimitS = Number(flag('--soft-limit-s')) || 1800
   const date = new Date().toISOString().slice(0, 10)
 

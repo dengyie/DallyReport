@@ -17,8 +17,9 @@ import os from 'node:os'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const BUILD = path.join(HERE, '..', 'build.mjs')
 // 与 build.mjs 的 MODULES 常量逐字一致：url-polyfill 最先（注入 globalThis.URL），linuxdo 最后（零依赖纯导出）。
-// 9/13 增 ledger（cluster 后——import clusterTokenize）与 cdp-core（linuxdo 前——linuxdo import CDP 层）。
-const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'wallclock', 'ladder', 'fallback', 'prompts', 'render-md', 'cluster', 'ledger', 'cdp-core', 'linuxdo']
+// 9/13 增 ledger（cluster 后——import clusterTokenize）。
+// 10/03：cdp-core 移出 MODULES——linuxdo 拆分后 realm 不再需要 CDP 传输层（fetch/WebSocket 属宿主）。
+const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'wallclock', 'ladder', 'fallback', 'prompts', 'render-md', 'cluster', 'ledger', 'linuxdo']
 // 每模块一个"关键标识"：命即证模块真的被 inline 进产物（若占位符替换丢模块/依赖序错，函数名/常量必缺）。
 // 全部取自各 .mjs 导出名（grep 实证），且为该模块唯一出现于产物中的标识。
 const MARKERS = {
@@ -35,8 +36,7 @@ const MARKERS = {
   'render-md': 'buildCitationMap',
   cluster: 'clusterTokenize',
   ledger: 'filterReportedTargets',
-  'cdp-core': 'readBodyTextRaw',
-  linuxdo: 'fetchLinuxDoNews34',
+  linuxdo: 'mintLinuxdoSource',
 }
 // 模板的唯一顶层 export（bundle 顶层 decl）；剥离后 new Function 才能编译合法的脚本体。
 const TEMPLATE_EXPORT = 'export const meta = {'
@@ -110,13 +110,13 @@ test('F2 产物含 9/13 跨天账本与 9222 门控契约（ledger/webFetchViaCd
   assert.ok(!code.includes('acquireLock'), '锁信号量属宿主 CLI 实现，不得 inline 进 realm')
 })
 
-test('F2 宿主 CLI 辅助（cli-main / prefetch / artifact-check）不进 MODULES', () => {
+test('F2 宿主 CLI 辅助（cli-main / prefetch / artifact-check / host-finalize / host-paths）不进 MODULES', () => {
   const src = fs.readFileSync(BUILD, 'utf8')
   const m = src.match(/const MODULES = \[([^\]]+)\]/)
   assert.ok(m, 'build.mjs 含 MODULES 列表')
   const list = m[1]
-  for (const host of ['cli-main', 'linuxdo-prefetch', 'artifact-check', 'host-finalize']) {
-    assert.ok(!list.includes("'" + host + "'"), host + ' 是宿主 Node CLI，不得 inline')
+  for (const host of ['cli-main', 'linuxdo-prefetch', 'linuxdo-fetch', 'cdp-core', 'artifact-check', 'host-finalize', 'host-paths']) {
+    assert.ok(!list.includes("'" + host + "'"), host + ' 是宿主 Node 专用模块，不得 inline')
   }
 })
 
@@ -131,6 +131,26 @@ test('F2 产物绝不 inline linuxdo-prefetch（宿主 Node CLI 禁入 realm）'
 test('F2 产物不再裸调 fetchLinuxDoNews34（旧 8/26 版回归源）', () => {
   const code = readBuiltProduct()
   assert.ok(!code.includes('await fetchLinuxDoNews34('), 'realm 内不得再裸抓 CDP（workflow realm 无 fetch/WebSocket）')
+})
+
+// 10/03 P2-③：CDP 传输层（cdp-core/linuxdo-fetch）彻底移出 realm。旧版把 cdp-core inline 进产物，
+// 靠 `process.exit|require(` 单条护栏漏掉了 `process.stderr`/裸 `fetch(`/`new WebSocket`/`AbortSignal`
+// ——这些在 realm 内一旦执行即 ReferenceError。此处断言产物不含任一宿主网络/进程 API，且不含 CDP 标识。
+test('F2 产物不含任何宿主网络/进程 API（realm 无 fetch/WebSocket/process/AbortSignal 全局）', () => {
+  const code = readBuiltProduct()
+  const forbidden = [
+    [/\bfetch\s*\(/, '裸 fetch('],
+    [/new\s+WebSocket\b|\bWebSocket\s*\(/, 'WebSocket'],
+    [/\bprocess\s*\./, 'process.*'],
+    [/\bAbortSignal\s*\./, 'AbortSignal'],
+    [/\brequire\s*\(/, 'require('],
+  ]
+  for (const [re, label] of forbidden) {
+    assert.ok(!re.test(code), `产物不得含 ${label}（CDP 传输层属宿主，realm 无该全局）`)
+  }
+  for (const marker of ['readBodyTextRaw', 'CDP_DEFAULTS', 'closeTab', 'deepFetchTopic']) {
+    assert.ok(!code.includes(marker), `产物不得含 CDP 传输层标识 ${marker}`)
+  }
 })
 
 const runBuild = () => {

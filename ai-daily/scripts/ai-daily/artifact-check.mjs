@@ -14,10 +14,14 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
 import { isCliMain } from './cli-main.mjs'
 
+// P2（10-03 review 实证）：旧版 `process.env.HOME || ''` 在任务计划程序/launchd 非登录 shell 下为空
+// → 默认路径退化成 `/Library/...`（不存在）。统一 os.homedir()（Windows 读 USERPROFILE，两平台恒正确）。
+// 生产 runner 都显式传 --dir，本默认值只在手动/无参调用时兜底，但兜底也必须是对的。
 const DEFAULT_DIR = path.join(
-  process.env.HOME || '',
+  os.homedir(),
   'Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-note/AI/DallyReport',
 )
 

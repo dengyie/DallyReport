@@ -95,18 +95,32 @@ export const makeWallCalibrator = ({ windowMs, observe, readAccum, log, setTimer
   }
   const _setTimer = setTimer || ((fn, ms) => setTimeout(fn, ms))
   let running = false
+  // P3（10-03 review 根因）：旧版 `once().then(chain)` 对 rejection 零兜底——
+  //   ① observe/readAccum 抛错（如标定仪器自身 bug）→ 链 reject → 未处理 rejection，且标定永久停摆不可见；
+  //   ② 定时器回调内抛错（observe 同步抛）会被 setTimeout 当作宿主未捕获异常抛出，resolve 永不调用 →
+  //      Promise 永久挂起（链静默死掉，日志无痕）。
+  // 修复：定时器回调体 try/catch（异常→ resolve(null)，不挂起）+ 链尾 .catch（异常→ 一行日志 + 停链，
+  // 绝不无限空转）。标定是尽力而为的仪器，故障只允许降级、不允许拖垮 run 或静默消失。
   const once = () => new Promise(resolve => {
     const t0 = readAccum()
     _setTimer(() => {
-      const delta = readAccum() - t0
-      const f = observe(win, delta)
-      if (f && f > 1 && typeof log === 'function') {
-        log('[墙钟标定·周期] ' + Math.round(win / 1000) + 's 标定窗累加器仅计 ' + Math.round(delta / 1000) + 's → 饥饿倍率 ' + f.toFixed(2) + '×')
+      let f = null
+      try {
+        const delta = readAccum() - t0
+        f = observe(win, delta)
+        if (f && f > 1 && typeof log === 'function') {
+          log('[墙钟标定·周期] ' + Math.round(win / 1000) + 's 标定窗累加器仅计 ' + Math.round(delta / 1000) + 's → 饥饿倍率 ' + f.toFixed(2) + '×')
+        }
+      } catch (e) {
+        if (typeof log === 'function') log('[墙钟标定] 标定窗异常，本窗跳过: ' + String(e && e.message || e).slice(0, 120))
       }
       resolve(f)
     }, win)
   })
-  const chain = () => once().then(chain)
+  const chain = () => once().then(chain).catch(e => {
+    if (typeof log === 'function') log('[墙钟标定] 标定链异常终止（不再续排）: ' + String(e && e.message || e).slice(0, 120))
+    running = false
+  })
   return {
     start: () => {
       if (running || !(win > 0)) return

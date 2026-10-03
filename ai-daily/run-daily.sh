@@ -190,6 +190,15 @@ fi
     fi
   fi
 
+  # 09-20 夜 P0 根因：编排器可能在 realm status=completed、payloads 齐全后 422 死在 Write 前，
+  # 落盘仍 LLM-mediated → out/ 空 → artifact-check 必 FAIL。宿主侧确定性兜底：从
+  # ~/.claude/projects/<cwd-slug>/<uuid>/workflows/wf_*.json 找回 payloads 并 spawn finalize 落盘。
+  # 必须在 artifact-check 之前跑（SKILL.md §5 契约）；报告已在盘上时本 CLI 自打 SKIP 不覆写。
+  if [ ! -f "$REPORT" ]; then
+    node "/Users/mango/project/claude-project/obsidian/scripts/ai-daily/host-finalize.mjs" --date "$TODAY" --out "$OB_DIR" --since-epoch "$WALL_START" \
+      || echo "HOST-FINALIZE 未落盘（无匹配 workflow json 或 finalize 失败，rc=$?）→ 交 artifact-check 判定"
+  fi
+
   # 8/18 新增：完成时 artifact 摘要（md 字节数 + meta 统计）落 log，供事后检查"是否真产出、是否降级"。
   # 8/31 P4 修复：自检改由 node 执行（artifact-check.mjs）。根因是 launchd 上下文 /bin/zsh 无 Full
   #   Disk Access——`test -f`/`stat` 允许但**读取**被拒（`wc -c`/`grep` 全 operation not permitted，

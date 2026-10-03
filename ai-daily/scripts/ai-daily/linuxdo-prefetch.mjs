@@ -1,12 +1,13 @@
 // ai-daily linux.do Node prefetch 隔离层（Task 2，2026-08-27）。
 //
 // 定位：把「linux.do 登录态 CDP 抓取」从 Workflow realm 移到宿主 Node 进程（CLI 前置），
-// 与既有 linuxdo.mjs 完全复用——本文件不复制任何 CDP 协议实现，只 re-export
+// 复用 linuxdo-fetch.mjs（CDP 抓取实现）——本文件不复制任何 CDP 协议实现，只 re-export
 // fetchLinuxDoNews34 并包一层 CLI 参数解析 + 可序列化成功 JSON 输出。
+// 10/03 拆分：fetchLinuxDoNews34 从 linuxdo.mjs 移到 linuxdo-fetch.mjs（宿主专用），本文件随之改指。
 //
 // 隔离收益：
 //   - 「不启动 Chrome、不关闭用户 Chrome」：本脚本只对已运行在 127.0.0.1:9222 的现有 Chrome
-//     发 CDP /json/new + /json/close（临时标签的开/关仍由 linuxdo.mjs readBodyText 的 finally
+//     发 CDP /json/new + /json/close（临时标签的开/关仍由 cdp-core readBodyText 的 finally
 //     收敛负责）。脚本自身不 spawn 任何浏览器进程。
 //   - 出错即非零退出 + stderr 诊断，绝不把错误文本当成功 JSON 写 stdout：
 //     调用方（run-daily.sh）只认「exit 0 且 stdout 是合法 JSON」为成功。
@@ -14,11 +15,11 @@
 // 注意：本文件不加入 build.mjs MODULES（不进 .claude/workflows/ai-daily.js），它只在宿主 Node
 // 运行、不在 workflow realm 内——workflow realm 无 fetch/WebSocket/fs/process/require。
 
-import { fetchLinuxDoNews34 } from './linuxdo.mjs'
+import { fetchLinuxDoNews34 } from './linuxdo-fetch.mjs'
 import { CDP_DEFAULTS } from './cdp-core.mjs'
 import { isCliMain } from './cli-main.mjs'
 
-/** 默认 cdp host（与 linuxdo.mjs CDP_DEFAULTS.cdpHost 一致）。 */
+/** 默认 cdp host（与 cdp-core.mjs CDP_DEFAULTS.cdpHost 一致）。 */
 export const DEFAULT_CDP_HOST = CDP_DEFAULTS.cdpHost
 
 /** 默认 --max-sources 交付上限：prefetch 交付给 Workflow 的候选 buffer（Workflow 侧消费配额另设

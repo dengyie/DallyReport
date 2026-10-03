@@ -18,15 +18,19 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { isCliMain } from './cli-main.mjs'
+import { claudeProjectsDir, projectSlug } from './host-paths.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const FINALIZE = path.join(HERE, 'finalize.mjs')
 const UUID_RE = /^[0-9a-f-]{36}$/
 
-const DEFAULT_PROJECTS = path.join(
-  process.env.HOME || '',
-  '.claude', 'projects', '-Users-mango-project-claude-project-obsidian',
-)
+// P1（10-03 review 实证）：旧版硬编码 Mac 会话名 `-Users-mango-project-claude-project-obsidian`，
+// Windows 迁移后该目录不存在 → 找不到 wf_*.json → 恢复静默失败。改由 cwd 推导（见 host-paths.mjs：
+// HOME 用 os.homedir()，slug 由 process.cwd() 折出，两平台同名同源）。
+const DEFAULT_PROJECTS = claudeProjectsDir()
+
+// 兼容旧 import 点（测试/文档）——projectSlug 真源在 host-paths.mjs。
+export { projectSlug }
 
 const payloadsComplete = p => {
   if (!p || typeof p !== 'object') return false

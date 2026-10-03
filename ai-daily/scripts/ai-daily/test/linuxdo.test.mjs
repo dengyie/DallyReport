@@ -3,7 +3,9 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { extractTopicsFromJson, extractPostTextFromJson, fetchLinuxDoNews34, mintLinuxdoSource, extractHighValueOutlink, HIGH_VALUE_OUTLINK_RE } from '../linuxdo.mjs'
+import { extractTopicsFromJson, extractPostTextFromJson, mintLinuxdoSource, extractHighValueOutlink, HIGH_VALUE_OUTLINK_RE } from '../linuxdo.mjs'
+// 10/03 拆分：CDP 抓取（fetchLinuxDoNews34）移到宿主专用 linuxdo-fetch.mjs（不进 realm 产物）。
+import { fetchLinuxDoNews34 } from '../linuxdo-fetch.mjs'
 import { CDP_DEFAULTS } from '../cdp-core.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))

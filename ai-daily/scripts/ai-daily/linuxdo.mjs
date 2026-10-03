@@ -1,62 +1,15 @@
-// ai-daily linux.do 登录态抓取（2026-08-23 第二十一项 §A）——纯导出零调用模块，自身零副作用。
+// ai-daily linux.do 解析层（纯导出零调用、零副作用）——**可 inline 进 workflow realm**。
 // 背景（已核实）：Cloudflare cf_clearance 绑定浏览器 TLS 指纹，裸 fetch 必 403，唯一可靠客户端是
 // 9222 真 Chrome（登录态）。经 CDP 开启临时标签 → 等 .json 文档在 Chrome 内渲染为 body 文本 → 读回。
 //
-// 9/13 重构：CDP 协议层（closeTab/readBodyText/CDP_DEFAULTS）抽到 cdp-core.mjs（与新增宿主 CLI
-// cdp-fetch.mjs 共享）；本文件只保留 linux.do 域逻辑——Discourse JSON 解析、分页遍历、snippet 直铸。
-// export CDP_DEFAULTS 移至 cdp-core.mjs（linuxdo.test/linuxdo-prefetch 的 import 同步改指 cdp-core）。
+// 10/03 拆分（realm 死代码治理）：CDP 抓取（fetchLinuxDoNews34）依赖 cdp-core.mjs 的 fetch/WebSocket，
+// workflow realm 无这些全局——旧版把整个文件（含 CDP 抓取）inline 进产物，连带 cdp-core 一起塞进 realm
+// 死重（realm 永不执行，还让 build 护栏盯不住 process/fetch/WebSocket）。现拆为：
+//   - 本文件：纯解析导出（Discourse JSON 解析 + snippet 直铸 + 出链探测），realm 唯一需要的部分；
+//   - linuxdo-fetch.mjs：CDP 抓取（fetchLinuxDoNews34），宿主 Node 专用，不进 MODULES。
 //
-// build.mjs 只能把纯导出 inline 进产物（workflow realm 自包含）；CDP 层经 import 在 inline 后可用。
-// 本文件满足约束：无 fs/require/process；fetch/AbortSignal/setTimeout/WebSocket 引用环境全局。
-
-import { CDP_DEFAULTS, readBodyText } from './cdp-core.mjs'
-
-// 深抓单帖：GET https://linux.do/t/<id>.json 官方 JSON 接口（JSON 文档在 Chrome 内直接渲染为文本）。
-async function deepFetchTopic(host, id) {
-  return readBodyText(host, 'https://linux.do/t/' + id + '.json')
-}
-
-/**
- * 抓取 linux.do 前沿快讯（news/34）分页，返回 posts。CDP 走 9222 登录态 Chrome。
- * 9/19 重构（L1/L3 根因修复——深抓先于过滤、16 次串行 CDP 只产 8 条）：
- *   ① 先只读列表页（1 次/页）收齐全部 topic（like_count/date/excerpt 都在列表字段里）；
- *   ② 噪声过滤（isNoise 回调，正则真源在 linuxdo-prefetch）→ 按 likeCount desc + date desc 排序；
- *   ③ 只对排序后前 deepFetch 条做深抓（单帖 .json 读正文 + 探测权威出链）——深抓花在入选帖上，
- *     不再是"每页前 3 条"的活跃序盲抓；深抓与列表读合计 ≤ maxPages + deepFetch 次。
- * @param {{cdpHost?:string, isNoise?:(t:object)=>boolean, deepFetch?:number}} opts
- *   cdpHost 为 127.0.0.1:9222 形式；缺省 → ok:false 不降级。isNoise 缺省不过滤；deepFetch 缺省 0。
- * @returns {{ok:boolean, degraded:boolean, reason:string, pages:number, topics:number, posts:Array}}
- *   posts = 过滤排序后的数组（深抓条目已富化 snippet），每项 { id, title, url, date, snippet, likeCount }
- * no_cdp_host → ok:false 不降级（调用方选择不启用，板不崩）；其余失败 → ok:false + degraded:true。
- */
-export async function fetchLinuxDoNews34({ cdpHost, isNoise, deepFetch = 0 } = {}) {
-  const out = { ok: true, degraded: false, reason: '', pages: 0, topics: 0, posts: [] }
-  if (!cdpHost) { out.ok = false; out.reason = 'no_cdp_host'; return out }
-  try {
-    const all = []
-    for (let page = 1; page <= CDP_DEFAULTS.maxPages; page++) {
-      const raw = await readBodyText(cdpHost, 'https://linux.do/c/news/34.json?page=' + page)
-      const topics = extractTopicsFromJson(raw)
-      if (!topics || !topics.length) break   // 空页即到底，不再翻
-      out.pages++; out.topics += topics.length
-      all.push(...topics)
-    }
-    if (out.topics === 0) { out.ok = false; out.degraded = true; out.reason = 'empty_pages'; return out }
-    // 噪声过滤（回调注入，保持本模块与正则真源解耦）→ 质量排序（赞数优先、新帖次优先）。
-    const kept = typeof isNoise === 'function' ? all.filter(t => !isNoise(t)) : all
-    kept.sort((a, b) => (b.likeCount || 0) - (a.likeCount || 0) || String(b.date || '').localeCompare(String(a.date || '')))
-    // 深抓后置：只富化排序后前 deepFetch 条（正文片段 + 权威出链探测）。
-    for (const t of kept.slice(0, Math.max(0, deepFetch))) {
-      const deep = await deepFetchTopic(cdpHost, t.id)
-      const postText = extractPostTextFromJson(deep)
-      if (postText) t.snippet = postText.slice(0, 2400)
-    }
-    out.posts = kept
-  } catch (e) {
-    out.ok = false; out.degraded = true; out.reason = String(e && e.message || e).slice(0, 120)
-  }
-  return out
-}
+// build.mjs 只能把纯导出 inline 进产物（realm 自包含）；本文件满足约束：无 fs/require/process，
+// 无 fetch/WebSocket/AbortSignal 引用。
 
 // --- 轻量解析：从 Discourse JSON 提取 { id, title, url, date, snippet, likeCount, views, replies } ---
 // 10/03 对齐参考日报：论坛硬指标（浏览/点赞/回复）随帖流动——mint 带进 claim.heat，report 素材行

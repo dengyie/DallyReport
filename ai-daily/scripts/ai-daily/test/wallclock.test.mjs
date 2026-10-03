@@ -300,3 +300,55 @@ test('标定链·0=显式禁用与非法类型 fail-fast（首版把 0 吞进默
   assert.throws(() => makeWallCalibrator({ windowMs: -5, observe: () => 1, readAccum: () => 0 }), TypeError, '负数 fail-fast 不静默回落默认')
   assert.throws(() => makeWallCalibrator({ windowMs: '600000', observe: () => 1, readAccum: () => 0 }), TypeError, '字符串 fail-fast')
 })
+
+// 10-03 P3-⑤ 根因：标定链 rejection 兜底。旧版 observe/readAccum 抛错会让 once() 的 Promise
+// 挂起（定时器内同步抛）或链 reject（未处理 rejection）——两种都让标定静默消失/拖垮宿主。
+// 契约：窗内异常 → 记一行日志 + 本窗跳过 + 链续排；链级异常 → 记一行日志 + 停链（不空转）。
+test('标定链·窗内 observe 抛错：记日志 + 本窗跳过 + 链仍续排（不挂起、不中断标定）', async () => {
+  const clock = makeFakeClock()
+  const logs = []
+  let calls = 0
+  const cal = makeWallCalibrator({
+    windowMs: 1000,
+    observe: () => { calls += 1; throw new Error('instrument boom') },
+    readAccum: () => 0,
+    log: s => logs.push(s),
+    setTimer: clock.setTimer,
+  })
+  cal.start()
+  assert.equal(clock.count(), 1)
+  await clock.fireFirst()
+  assert.equal(calls, 1, 'observe 被调用一次')
+  assert.ok(logs.some(l => /标定窗异常，本窗跳过.*instrument boom/.test(l)), '异常须落日志: ' + logs.join(' | '))
+  assert.equal(clock.count(), 1, '本窗异常后仍续排下一窗（标定不因单窗异常停摆）')
+})
+
+test('标定链·readAccum 同步抛错：链异常被兜底 → 记日志 + 停链（不产生未处理 rejection）', async () => {
+  const clock = makeFakeClock()
+  const logs = []
+  let throwNow = true
+  const cal = makeWallCalibrator({
+    windowMs: 1000,
+    observe: () => 1,
+    readAccum: () => { if (throwNow) throw new Error('accum read boom'); return 0 },
+    log: s => logs.push(s),
+    setTimer: clock.setTimer,
+  })
+  const rejections = []
+  const onRej = e => rejections.push(e)
+  process.on('unhandledRejection', onRej)
+  try {
+    cal.start()
+    await new Promise(r => setImmediate(r))
+    await new Promise(r => setImmediate(r))
+    assert.ok(logs.some(l => /标定链异常终止.*accum read boom/.test(l)), '链异常须落日志: ' + logs.join(' | '))
+    assert.equal(clock.count(), 0, '链异常后停链，不续排')
+    // 停链后可重启（running 已复位）：修好 readAccum 再 start 应重新挂链
+    throwNow = false
+    cal.start()
+    assert.equal(clock.count(), 1, '异常停链后 start 可重新挂链（running 复位）')
+    assert.equal(rejections.length, 0, '不得产生未处理 rejection: ' + rejections.map(e => String(e && e.message)).join(','))
+  } finally {
+    process.removeListener('unhandledRejection', onRej)
+  }
+})

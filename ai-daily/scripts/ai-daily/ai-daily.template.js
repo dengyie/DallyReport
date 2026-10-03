@@ -135,7 +135,6 @@ const WEB_BUDGET_PER = 2  // 9/19 F4：WebSearch 预算改为组内独立计数�
 /* @inline: render-md */
 /* @inline: cluster */
 	/* @inline: ledger */
-	/* @inline: cdp-core */
 	/* @inline: linuxdo */
 
 	// 9/13 跨天账本（严格去重）：args.reportedLedger = 编排器 Read ~/.ai-daily/published-ledger.json 注入的

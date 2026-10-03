@@ -7,9 +7,9 @@
 ## 速读（当前有效 · 维护于 2026-10-03）
 
 - 生产 Windows 唯一：任务计划程序 `ai-daily`（每日 08:40）→ `run-daily-task.cmd` → `run-daily-win.sh` → `claude -p`（skill 编排）→ Workflow 产物 → `finalize.mjs` 落盘 vault `AI/DallyReport/<date>/`。Mac launchd 与 `~/.ai-daily` 已于 10-03 清流。
-- 逻辑真源 = `scripts/ai-daily/*.mjs`（15 个模块）+ `ai-daily.template.js`（编排骨架）；`build.mjs` inline 生成 3309 行自包含产物 `.claude/workflows/ai-daily.js`（repo 内），`--sync-vault` 一步同步产物 + SKILL.md 到 vault `.claude/`。
+- 逻辑真源 = `scripts/ai-daily/*.mjs`（14 个 inline 逻辑模块 + 12 个宿主 CLI）+ `ai-daily.template.js`（编排骨架）；`build.mjs` inline 生成 3212 行自包含产物 `.claude/workflows/ai-daily.js`（repo 内），`--sync-vault` 一步同步产物 + SKILL.md 到 vault `.claude/`。
 - 全链路预算：MAX_FETCH/MAX_VERIFY 16，五阶段墙钟切片 540/480/480/300s（总 1800s），report 单次 600s；对抗核查 2+1 票；跨天账本硬去重 + 昨日话题追踪 + 社区热度（10-03 五要素已上线）。
-- 测试：`cd scripts/ai-daily && node --test test/*.test.mjs`（**必须 cd 进目录**，repo 根跑 glob 不中）；当前 436 项 428 pass / 0 fail / 8 有意 skip。
+- 测试：`cd scripts/ai-daily && node --test test/*.test.mjs`（**必须 cd 进目录**，repo 根跑 glob 不中）；当前 452 项 443 pass / 0 fail / 9 有意 skip。
 - 纪律红线：CDP 只复用 9222 已运行登录态 Chrome；日报正文写「社区」不点名站名；secrets 不入库不进 prompt；`--date` 全量重跑禁止（Iron Rule，单节修复 only）。
 
 ## 1. 系统总览
@@ -38,13 +38,13 @@
 ```
 ai-daily/
 ├── ai-daily.template.js @ scripts/ai-daily/     # 编排骨架（1312 行）：realm 适配 + 五阶段编排
-├── scripts/ai-daily/*.mjs                       # 15 个逻辑模块真源 + 6 个宿主 CLI
+├── scripts/ai-daily/*.mjs                       # 逻辑模块真源 + 宿主 CLI
 │   ├── 纯逻辑模块（build inline 进产物）：url-polyfill date-utils schemas boards dedup budget
-│   │   wallclock ladder fallback prompts render-md cluster ledger cdp-core linuxdo
-│   ├── 宿主 CLI（绝不 inline）：linuxdo-prefetch cdp-fetch artifact-check host-finalize
-│   │   progress generate-poster finalize cli-main
-│   └── test/*.test.mjs                          # 32 个测试文件，node --test 直调模块真源
-├── .claude/workflows/ai-daily.js                # build 产物（repo 内，3354 行，勿手改）
+│   │   wallclock ladder fallback prompts render-md cluster ledger linuxdo
+│   ├── 宿主 CLI/模块（绝不 inline）：linuxdo-prefetch linuxdo-fetch cdp-fetch cdp-core
+│   │   artifact-check host-finalize host-paths progress generate-poster finalize cli-main
+│   └── test/*.test.mjs                          # 34 个测试文件，node --test 直调模块真源
+├── .claude/workflows/ai-daily.js                # build 产物（repo 内，勿手改）
 ├── .claude/skills/ai-daily/SKILL.md             # skill 编排器（vault 侧另有同步副本）
 ├── run-daily-win.sh / run-daily.sh              # Windows 生产 / Mac（已清流，保留语义参考）
 ├── run-daily-task.cmd / register-task.ps1       # 任务计划程序包装与注册
@@ -66,8 +66,8 @@ node scripts/ai-daily/build.mjs [--out <path>] [--check-only] [--sync-vault [vau
 
 四道护栏，任一失败不出产物：
 
-1. **inline 顺序即依赖序**（MODULES 数组）：url-polyfill 最先（realm 无 URL 全局，缺失 → new URL() 抛错被 catch 吞 → 完整版 0 角标）；date-utils 在 boards/dedup 前（GROUPS_RAW 闭包引用 normURL）；cluster 在 ledger 前（指纹复用 clusterTokenize）；cdp-core 在 linuxdo 前。
-2. **realm guards**：REQUIRED_MARKERS（linuxdoPrefetched / reportedLedger / webFetchViaCdp 消费入口必须在场）+ FORBIDDEN_INLINE（宿主 CLI 不得 inline、process.exit/require 禁入 realm、禁裸调 fetchLinuxDoNews34）——防止「模板已改、产物仍走旧裸抓」的静默漂移。
+1. **inline 顺序即依赖序**（MODULES 数组）：url-polyfill 最先（realm 无 URL 全局，缺失 → new URL() 抛错被 catch 吞 → 完整版 0 角标）；date-utils 在 boards/dedup 前（GROUPS_RAW 闭包引用 normURL）；cluster 在 ledger 前（指纹复用 clusterTokenize）。**10/03 起 cdp-core 移出 MODULES**——CDP 传输层（`fetch`/`WebSocket`）随 linuxdo 拆分归宿主 `linuxdo-fetch.mjs`，realm 不再需要。
+2. **realm guards**：REQUIRED_MARKERS（linuxdoPrefetched / reportedLedger / webFetchViaCdp 消费入口必须在场）+ FORBIDDEN_INLINE（宿主 CLI 不得 inline、`process.*`/`require(`/裸 `fetch(`/`WebSocket`/`AbortSignal` 禁入 realm、禁裸调 fetchLinuxDoNews34）——防止「模板已改、产物仍走旧裸抓」的静默漂移。10/03 起从单条 `process.exit|require(` 扩为「宿主 Node 专有 API 整类拦截」，CDP 传输层偷渡不再可能。
 3. **语法门**：产物 = 顶层 export(meta) + 顶层 await + 顶层 return 混合体，ESM/CJS 任一模式都非法。check 前断言顶层 export 有且仅有一行 `export const meta = {`，剥掉后整体包进 `async function __syntaxGate__(args)` 再 `node --check`（与 Workflow harness 以函数体语义加载同构）。
 4. **占位符零残留**断言。
 
@@ -180,15 +180,17 @@ meta.json 另有 `ledger_recorded`（recorded/skipped/failed，finalize 回写�
 | 脚本 | 职责 |
 |---|---|
 | `finalize.mjs` | 4 产物逐字节落盘 + 账本记账 + 海报；先落盘后记账 |
-| `host-finalize.mjs` | 编排器死在 Write 前时，从 `~/.claude/projects/<session>/workflows/wf_*.json` 找回 completed payloads 落盘（report 已在盘则 SKIP） |
-| `artifact-check.mjs` | 宿主产物自检摘要（md_bytes/confirmed/degraded/killed）；Windows 显式传 --dir（默认是 Mac iCloud 路径） |
-| `progress.mjs` | headless 终端单行进度（不画假百分比：墙钟 vs 30min / 五阶段推进 / 真实票数） |
+| `host-finalize.mjs` | 编排器死在 Write 前时，从 `~/.claude/projects/<cwd-slug>/<uuid>/workflows/wf_*.json` 找回 completed payloads 落盘（report 已在盘则 SKIP）。会话目录由 cwd 推导（`host-paths.mjs`），不再硬编码 Mac 会话名；`run-daily-win.sh`/`run-daily.sh` 都在 artifact-check **之前**调用 |
+| `host-paths.mjs` | 宿主路径单一真源：`os.homedir()` + cwd slug → Claude 会话目录；`~/.ai-daily` 运行时目录。三个宿主 CLI 共用，杜绝 `process.env.HOME || ''`（无头 shell 下为空）与硬编码会话名 |
+| `artifact-check.mjs` | 宿主产物自检摘要（md_bytes/confirmed/degraded/killed）；Windows 显式传 --dir（默认是 Mac iCloud 路径，HOME 取 `os.homedir()`） |
+| `progress.mjs` | headless 终端单行进度（不画假百分比：墙钟 vs 30min / 五阶段推进 / 真实票数）；日志/会话路径走 `host-paths` |
 | `cdp-fetch.mjs` | fetch 子代理经 Bash 调用的通用文章页 CDP 抓取（webFetchViaCdp:true 时，失败回落 WebFetch） |
+| `linuxdo-fetch.mjs` | 宿主专用 linux.do CDP 抓取（`fetchLinuxDoNews34`，10/03 自 linuxdo.mjs 拆出）；复用 `cdp-core.mjs` 传输层，不 inline 进产物 |
 
 ## 10. 测试体系
 
 - **必须 `cd scripts/ai-daily` 跑** `node --test test/*.test.mjs`（repo 根跑 glob 不中 → 0 tests 假绿）。
-- 当前 436 项：428 pass / 0 fail / 8 有意 skip（2026-10-03 第三轮：标定仪器行为级测试 6 项 + sync 失败路径 + env 前缀惰性 + 0=禁用回归锁）。
+- 当前 452 项：443 pass / 0 fail / 9 有意 skip（2026-10-03 第四轮根因修复：Windows runner 契约测试 6 项新增（此前 7 条 shim 断言在 Windows 全 SKIP）、host-paths 6 项、标定链 rejection 兜底 2 项、build 护栏「宿主 API 整类拦截」1 项）。
 - 测试原则：**纯函数直调**（测试直调 buildFallback/externalCheckState 等真实实现，不 grep 模板源码——消除 forward-test 缺陷）；realm 隔离（wallclock/budget 时钟注入 mock）；fail-open 契约固化（坏输入→null/[]，不抛穿）；skill-doc-contract 锁 SKILL.md 关键字面量（改 SKILL.md 前先看该测试）。
 - 改动门禁：模块/模板改动 → 全量测试 + `node scripts/ai-daily/build.mjs --check-only` + 产物 cp 同步 vault + 两仓提交。
 
@@ -225,7 +227,7 @@ meta.json 另有 `ledger_recorded`（recorded/skipped/failed，finalize 回写�
   - **[P3] build.mjs**：去掉 `export syncVault`（脚本即入口形态不得 export——import 即触发底部 main() 写盘真实产物，build.test.mjs 头注释记载的事故形态）；补同步失败路径测试（vault 目标不可写 → VAULT-SYNC-WARN 且 exit 0、产物不受影响）。
   - **[P3] run-daily-win.sh**：`mkdir -p "$LOGDIR"` 挪到 PATH 导出后（纪律收口：PATH 导出点之前不得有外部命令——mkdir 也是 /usr/bin 外部命令，留在前面则 LOGDIR 缺失场景全 run 静默失日志）；notify() 加 `ps_escape`（单引号翻倍转义），含撇号文案端到端 toast 验证通过。
   - **[Suggestion] finalize.mjs**：`AI_DAILY_PROD_PREFIX` 改惰性读取（isProdOutDir 每次调用组装前缀，不再模块加载期突变导出数组）；补子进程 env 覆盖测试（命中/不命中/导出数组不被突变三断言）。
-  - 测试 436 项 428 pass / 0 fail / 8 skip；产物 3354 行；`--sync-vault` 已同步（SKILL.md identical 自动跳过）。下次生效 10-04 08:40。
+  - 测试 452 项 443 pass / 0 fail / 9 skip；产物 3212 行；`--sync-vault` 已同步（SKILL.md identical 自动跳过）。下次生效 10-04 08:40。
 - **2026-10-03（第二轮 · 按 §12 清偿 + 生产 P0 修复）**：
   - **P0-A run-daily-win.sh 整轮空转修复**（10-03 08:40 生产实证）：任务计划程序调起的 bash.exe 非登录 shell，PATH 无 Git `/usr/bin` → `date/seq/tr/wc` 全部 command not found，四档探针被 `seq` 失败全灭、**零 launch** 即 rc=2 放弃，10-03 日报缺口。修：PATH 前插 `/e/code/Git/usr/bin`、STAMP 挪到 PATH 导出后、TODAY 空值守卫早退。最小 PATH 模拟验证通过。**10-03 无日报（09-25 以来第二个缺口日），如需补偿须用户授权单日跑（Iron Rule：已有产物日期禁 --date 全量重跑）。**
   - **P0-B finalize.mjs 生产前缀 Windows 化**：`PROD_DALLYREPORT_PREFIX`（Mac iCloud 单前缀）→ `PROD_DALLYREPORT_PREFIXES` 列表（Windows vault 置首 + Mac 兜底 + AI_DAILY_PROD_PREFIX 覆盖）。旧版在 Windows 上 isProdOutDir 恒 false → 生产 LEDGER-SKIP（跨天去重失效）+ poster 永不跑。**注意：10-02 产物若出自 Windows 路径，其账本未记账；10-04 起恢复正常。**

@@ -29,8 +29,10 @@ const DEFAULT_OUT = path.resolve(HERE, '../../.claude/workflows/ai-daily.js')
 // （模板接线点在 probeGateway 之后，inline 顺序只需早于使用点；DEFAULT_LADDER 被 render-md import）。
 // ledger（9/13）：跨天已报道账本纯函数（filterReportedTargets/splitSeeds/storyMatch/prune），import
 // clusterTokenize（cluster）与 normURL/normalizeDate/daysBetween（date-utils）→ 必须排在 cluster 之后。
-// cdp-core（9/13）：CDP 协议层（closeTab/readBodyText*/CDP_DEFAULTS），linuxdo.mjs import 它 → 排在 linuxdo 前。
-const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'wallclock', 'ladder', 'fallback', 'prompts', 'render-md', 'cluster', 'ledger', 'cdp-core', 'linuxdo']
+// linuxdo（10/03 拆分后）：只剩纯解析导出（Discourse JSON 解析/snippet 直铸/出链探测），零依赖 →
+// 排最后即可。CDP 抓取（fetchLinuxDoNews34）已移到 linuxdo-fetch.mjs（宿主 Node 专用，不进 MODULES）；
+// 旧版连 cdp-core.mjs（fetch/WebSocket 传输层）一起 inline 进 realm 是死重，10/03 一并剥离。
+const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'wallclock', 'ladder', 'fallback', 'prompts', 'render-md', 'cluster', 'ledger', 'linuxdo']
 
 // 剥模块为可 inline 文本：去 import 行（依赖由顺序保证）、export 前缀、模块头注释。
 const stripModule = name => {
@@ -61,7 +63,10 @@ const build = () => {
 //   ① 含 linuxdoPrefetched 消费入口（run-daily.sh 预抓注入契约）；
 //   ② 不含 linuxdo-prefetch 模块文本（未被误加进 MODULES）；
 //   ③ 不含裸 `await fetchLinuxDoNews34(`（realm 内不得再裸抓 CDP——旧 8/26 版回归源）。
-// 任一违规即构建失败，防止「模板已改、产物仍走旧裸抓」的静默漂移（2921db72 曾提交该漂移状态）。
+// 10/03 收紧（P2-③ 根因）：旧护栏只查 `process.exit|require(`，漏掉 `process.stderr`/裸 `fetch(`/
+// `new WebSocket`/`AbortSignal` —— CDP 传输层（cdp-core.mjs）正是靠这些全局偷渡进产物（realm 无
+// 这些全局，一旦真被调用即 ReferenceError）。现按「宿主 Node 专有 API」整类拦截，任何模块把这类
+// 代码带进 realm 一律构建失败。
 const REQUIRED_MARKERS = [
   [/linuxdoPrefetched/, '产物须含 linuxdoPrefetched 消费入口（Task 2 预抓注入契约）'],
   [/reportedLedger/, '产物须含 args.reportedLedger 消费入口（9/13 跨天账本契约）'],
@@ -69,7 +74,13 @@ const REQUIRED_MARKERS = [
 ]
 const FORBIDDEN_INLINE = [
   [/prefetchLinuxDo|runPrefetch/, 'linuxdo-prefetch（宿主 Node CLI）不得 inline 进 workflow'],
-  [/process\.exit|require\(/, 'workflow realm 不得含宿主 Node CLI 进程/模块 API'],
+  // realm 无 process/require：宿主 Node CLI 的进程与模块 API 一律不得入产物。
+  [/\bprocess\s*\./, 'workflow realm 不得含 process.*（宿主 Node 进程 API）'],
+  [/\brequire\s*\(/, 'workflow realm 不得含 require(（宿主 Node 模块 API）'],
+  // realm 无 fetch/WebSocket/AbortSignal 全局：CDP 传输层（cdp-core/linuxdo-fetch）不得入产物。
+  [/\bfetch\s*\(/, 'workflow realm 不得含裸 fetch(（CDP/网络传输层属宿主，realm 无 fetch 全局）'],
+  [/new\s+WebSocket\b|\bWebSocket\s*\(/, 'workflow realm 不得含 WebSocket（CDP 传输层属宿主）'],
+  [/\bAbortSignal\s*\./, 'workflow realm 不得含 AbortSignal（CDP 超时属宿主）'],
   [/await fetchLinuxDoNews34\(/, 'realm 内不得再裸调 fetchLinuxDoNews34（无 fetch/WebSocket 全局，旧版回归）'],
 ]
 const assertRealmGuards = code => {
