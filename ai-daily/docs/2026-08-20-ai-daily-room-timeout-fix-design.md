@@ -1,3 +1,5 @@
+> ⚠️ **历史设计快照（已归档）**：本文描述实现时点的设计，部分机制已被后续迭代取代（见 [development.md](development.md) §13 变更记录）。当前权威开发文档 = [development.md](development.md)。
+
 # ai-daily room-as-timeoutMs 错配修复设计
 
 > 日期：2026-08-20 · 关联：第十四项墙钟治理（2026-08-13-ai-daily-report-design.md）的回归修复

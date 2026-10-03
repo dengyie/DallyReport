@@ -1,3 +1,5 @@
+> ⚠️ **历史设计快照（已归档）**：本文描述实现时点的设计，部分机制已被后续迭代取代（见 [development.md](development.md) §13 变更记录）。当前权威开发文档 = [development.md](development.md)。
+
 # ai-daily 大改设计：headless 修复 + md 去代理化 + workflow 模块化
 
 日期：2026-08-18

@@ -1,3 +1,5 @@
+> ⚠️ **历史设计快照（已归档）**：本文描述实现时点的设计，部分机制已被后续迭代取代（见 [development.md](development.md) §13 变更记录）。当前权威开发文档 = [development.md](development.md)。
+
 # ai-daily 完整版日报三契约缺口修复设计
 
 > **For agentic workers:** 实现按 SDD 派子 agent，TDD（红→绿→重构），改完跑全测 + rebuild + 双端同步 + commit/push。本 spec 已用户批准三层全修、A+C 兜底、直接派 agent 实现（跳过 plan 步骤）。
