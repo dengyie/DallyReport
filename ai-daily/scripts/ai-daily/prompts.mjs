@@ -83,6 +83,7 @@ export const fetchPrompt = (src, ctx) => {
   indexNote +
   '2. 判定来源质量：primary(官方/一手) / secondary(主流媒体报道) / blog / forum / unreliable。\n' +
   '3. 提取 2-3 条与本板块日报问题相关、可核实、具体的声明（非空泛结论）；**每条 claim 只写一个可独立核验的事实**（数字/专名/对比拆开，禁止把 Star/Fork/npm/TUI 塞进同一条——一条 claim 塞多事实会被 quote≤220 截断，核查票因「细节未全覆盖」误否决）。每条必须带原文引语 quote（**逐字抄录支撑该声明的完整原句，≤220 字，且必须包含声明中的全部具体细节——日期/数字/机构名/对比结论**，只截 40 字短句会导致核查票无据可依而误否决）、重要性 central/supporting/tangential；若实际引用页与上方 URL 不同（索引页选中的文章页），每条 claim 另带字段 sourceUrl=该文章真实 URL。\n' +
+  '   ⚠️ **声明卫生（10-04 实证新增）**：只提取完整主谓结构、可证伪的事实陈述（谁/什么/做了什么，含数字或专名）。不得提取为 claim：附件与图片的尺寸标注（如 image 580×286 7.97 KB）、「如图」开头的图片说明、无主语的评论碎片、纯 URL 或链接列表、楼层引用残留。论坛帖只提取主帖正文的事实性内容，评论区文字不提取。\n' +
   '4. 注明页面/事件日期 publishDate（YYYY-MM-DD 或 MM-DD）；无日期则空。\n' +
   '5. 页面较长时只精读与日报相关且日期在窗口内的部分，其余快速略读；抓取失败/付费墙/无关页面 → 返回 claims:[] 且 sourceQuality:"unreliable"。\n\nStructured output only.'
 }

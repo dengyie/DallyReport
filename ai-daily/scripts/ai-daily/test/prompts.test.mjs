@@ -206,3 +206,11 @@ test('reportPrompt：多方观点并陈纪律在场（summary 支持与质疑两
   assert.match(PROMPTS, /素材含多方观点时必须并陈/, '多方观点指令在场')
   assert.match(PROMPTS, /不替读者下结论/, '不单方口径')
 })
+
+test('fetchPrompt：声明卫生规则在场（10-04 附件标注穿透管线根因治理）', () => {
+  assert.match(PROMPTS, /声明卫生（10-04 实证新增）/, '卫生规则标题在场')
+  assert.match(PROMPTS, /不得提取为 claim：附件与图片的尺寸标注/, '附件标注禁令在场')
+  assert.match(PROMPTS, /无主语的评论碎片、纯 URL 或链接列表/, '评论碎片/纯 URL 禁令在场')
+  assert.match(PROMPTS, /论坛帖只提取主帖正文的事实性内容，评论区文字不提取/, '论坛主帖优先纪律在场')
+  assert.match(PROMPTS, /## Source Extractor/, '锚点首行不变（progress classifyPrompt 依赖）')
+})

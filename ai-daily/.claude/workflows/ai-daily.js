@@ -1110,6 +1110,7 @@ const fetchPrompt = (src, ctx) => {
   indexNote +
   '2. 判定来源质量：primary(官方/一手) / secondary(主流媒体报道) / blog / forum / unreliable。\n' +
   '3. 提取 2-3 条与本板块日报问题相关、可核实、具体的声明（非空泛结论）；**每条 claim 只写一个可独立核验的事实**（数字/专名/对比拆开，禁止把 Star/Fork/npm/TUI 塞进同一条——一条 claim 塞多事实会被 quote≤220 截断，核查票因「细节未全覆盖」误否决）。每条必须带原文引语 quote（**逐字抄录支撑该声明的完整原句，≤220 字，且必须包含声明中的全部具体细节——日期/数字/机构名/对比结论**，只截 40 字短句会导致核查票无据可依而误否决）、重要性 central/supporting/tangential；若实际引用页与上方 URL 不同（索引页选中的文章页），每条 claim 另带字段 sourceUrl=该文章真实 URL。\n' +
+  '   ⚠️ **声明卫生（10-04 实证新增）**：只提取完整主谓结构、可证伪的事实陈述（谁/什么/做了什么，含数字或专名）。不得提取为 claim：附件与图片的尺寸标注（如 image 580×286 7.97 KB）、「如图」开头的图片说明、无主语的评论碎片、纯 URL 或链接列表、楼层引用残留。论坛帖只提取主帖正文的事实性内容，评论区文字不提取。\n' +
   '4. 注明页面/事件日期 publishDate（YYYY-MM-DD 或 MM-DD）；无日期则空。\n' +
   '5. 页面较长时只精读与日报相关且日期在窗口内的部分，其余快速略读；抓取失败/付费墙/无关页面 → 返回 claims:[] 且 sourceQuality:"unreliable"。\n\nStructured output only.'
 }
@@ -1956,6 +1957,52 @@ const _calendarDayMinus = (dayNum, back) => {
   while (d < 1) { m -= 1; if (m < 1) { m = 12; y -= 1 } ; d += dom(y, m) }
   return +(y + String(m).padStart(2, '0') + String(d).padStart(2, '0'))
 }
+	// ─── inline: claim-gate ───
+// claim-gate — 声明质量门（纯函数，realm 安全：无 process/fs/Date.now/fetch/WebSocket）。
+//
+// 10-04 日报质量审计实证（docs/2026-10-04-claim-quality-gate-design.md §1）：论坛附件标注被
+// 提取为可证伪声明（"image 580×286 7.97 KB"）→ 通过 2-0 核查投票 → 写入生产账本；连带把
+// Antigravity Opus 5.5 发布（两帖印证的当日最大模型新闻）挤出正文。本模块在 allClaims 汇合点
+// （fetch 提取与 linuxdo mint 双路）单点拦截：垃圾声明不进 verify、不进正文、不进账本。
+//
+// 设计原则（宁漏勿滥）：模式表只收"机械可识别"形态；漏网的语义垃圾由 needsVerification 挡在
+// verify 之外（最多落 unverified 池，永不可能 confirmed）；再漏的靠 fetch prompt 提取卫生规则
+// 减少发生——三层防御，危害上限被 substance 门封顶（设计 §4/§5）。
+
+// 确定性垃圾模式（全部锚定 10-04 实证形态；正则即文档，测试用当日真实垃圾原文做 fixture）
+const JUNK_RES = [
+  /^image\s+\d+×\d+/i,                                 // 附件尺寸标注开头（image 580×286 7.97 KB）
+  /^\d+(\.\d+)?\s*(KB|MB|GB)\b/i,                      // 纯大小串开头
+  /(^|\s)image\s+\d+×\d+\s+\d+(\.\d+)?\s*(KB|MB)\b/i,  // 内嵌附件标注（"如图： image 487×438 13.4 KB …"）
+  /^如图[：:，,]?\s*(image|$)/i,                        // 「如图」图片说明碎片——收窄到紧跟附件标注或到此为止，
+                                                       // 防误杀「如图 3 所示，营收增长 30%」（设计 §5）
+]
+
+/** 垃圾声明判定：过短（<8 字符，不可证伪）或命中任一垃圾模式。 */
+const isJunkClaim = c => {
+  const t = (c && typeof c.claim === 'string') ? c.claim.trim() : ''
+  if (t.length < 8) return true
+  if (JUNK_RES.some(re => re.test(t))) return true
+  // URL 转发残片：以链接开头、去掉链接后剩余文字 < 12 字符（如 "https://… The Times"）——
+  // 可证伪声明需要文字陈述事实，链接后只剩几个词属转发残片（10-04 实证 #5）
+  if (/^https?:\/\/\S+/.test(t) && t.replace(/^https?:\/\/\S+\s*/, '').length < 12) return true
+  return false
+}
+
+/** verify substance 门：无数字、无拉丁实体、CJK 不足一句的声明不值得 2-3 张核查票——
+ *  不丢数据（落 unverified 池照常渲染），只不进 rankedClaims（核查预算留给真声明）。 */
+const needsVerification = c => {
+  const t = (c && typeof c.claim === 'string') ? c.claim : ''
+  return /\d/.test(t) || /[A-Za-z]{2,}/.test(t) || (t.match(/[\u4e00-\u9fff]/g) || []).length >= 10
+}
+
+/** 批量分账：clean/dropped 两桶，对象引用原样透传（不改写不复制）。 */
+const gateClaims = claims => {
+  const clean = []
+  const dropped = []
+  for (const c of claims || []) (isJunkClaim(c) ? dropped : clean).push(c)
+  return { clean, dropped }
+}
 	// ─── inline: linuxdo ───
 // ai-daily linux.do 解析层（纯导出零调用、零副作用）——**可 inline 进 workflow realm**。
 // 背景（已核实）：Cloudflare cf_clearance 绑定浏览器 TLS 指纹，裸 fetch 必 403，唯一可靠客户端是
@@ -2670,20 +2717,33 @@ for (const batch of fetchBatches) {
   if (salvageFirst) salvaged = true  // 抓完救护首批后置位：下一个循环迭代整批 break 跳出
 }
 const sources = extracted.filter(Boolean)
-const allClaims = sources.flatMap(s => s.claims)
+// ─── 10-04 claim-gate（设计 docs/2026-10-04-claim-quality-gate-design.md §4.A/B1）───
+// fetch 提取与 linuxdo mint 两路的唯一汇合点：垃圾声明（附件标注/评论碎片/纯 URL/转发残片）
+// 单点拦截——不进 verify、不进正文、不进账本。模式表与 substance 门全为确定性纯函数。
+const _gate = gateClaims(sources.flatMap(s => s.claims))
+const allClaims = _gate.clean
+const noiseDropped = _gate.dropped.length
+if (noiseDropped) log('CLAIM-GATE dropped=' + noiseDropped + ' :: ' + _gate.dropped.slice(0, 3).map(c => (c.claim || '').slice(0, 30)).join(' | '))
 log('Fetch: ' + sources.length + ' sources → ' + allClaims.length + ' claims')
 
 // ─── Phase Verify: 3-vote adversarial, window-enforced ───
 // Verify 预算按板块按比例分配：保证每个板块的头条都被核查，
 // 避免重板块（如 arXiv 的 primary 学术声明）把财经/战略头条整体挤出前 60。
 const claimsByBoard = new Map()
+const substanceSkippedClaims = []
 for (const c of allClaims) {
+  // 10-04 §4.B2：无实质内容（无数字/无拉丁实体/CJK 不足一句）的声明不烧核查票——直落 unverified
+  // 池（照常渲染，永不可能 confirmed）。**必须先过滤再配额**：否则垃圾占 MAX_VERIFY 席位、
+  // 真声明被挤（10-04 次生伤害形态），workflow-integration 测试锁死此顺序。
+  if (!needsVerification(c)) { substanceSkippedClaims.push(c); continue }
   if (!claimsByBoard.has(c.board)) claimsByBoard.set(c.board, [])
   claimsByBoard.get(c.board).push(c)
 }
+const substanceSkipped = substanceSkippedClaims.length
+if (substanceSkipped) log('CLAIM-GATE substance-skip ' + substanceSkipped + ' 条无实质声明 → unverified（不烧核查票）')
 for (const arr of claimsByBoard.values()) arr.sort((a, b) => (impRank[a.importance] - impRank[b.importance]) || (qualRank[a.sourceQuality] - qualRank[b.sourceQuality]))
 const boardKeysV = [...claimsByBoard.keys()]
-const totalClaims = allClaims.length
+const totalClaims = allClaims.length - substanceSkipped  // 配额比例分母 = 过滤后可核声明数（10-04 §4.B2）
 const quota = new Map()
 let assignedV = 0
 if (totalClaims > 0) {
@@ -2780,6 +2840,28 @@ for (const batch of chunkArr(rankedClaims, VERIFY_BATCH)) {
   voted.push(...batchRes.filter(Boolean))
 }
 
+// ─── 10-04 §4.C VERIFY-RETRY：全错票一次性补投 ───
+// 524 风暴下 verify 票全灭（当日实证 verify_agent_errors:6、0/16 确认）时，verdicts 为空的 claim
+// 直接落 unverified 无第二次机会。这里对「所有票都是代理失败、无任何信号」的 claim 补投一轮自适应
+// 2+1：有分歧/部分成功的不重投（2+1 终判已有信号，重投不改变结论）。预算走纯读 roomTo 门控（不
+// 重复记账，遵守 8/28 stageVerifyRan 纪律）；上限一个批次，墙钟由既有软目标契约覆盖。
+const verifyRetry = { targets: 0, recovered: 0 }
+{
+  const retryTargets = voted.filter(c => c && c.erroredCount > 0 && c.verdicts.length === 0)
+  verifyRetry.targets = retryTargets.length
+  if (retryTargets.length && budgetGate.roomTo('Verify') > 0) {
+    log('VERIFY-RETRY 全错票补投 ' + retryTargets.length + ' 条（自适应 2+1 重跑，预算纯读门控）')
+    const retried = await parallel(retryTargets.map(c => () => voteClaim(c, AGENT_TIMEOUT_MS)))
+    retried.forEach((nv, i) => {
+      if (!nv) return
+      const idx = voted.indexOf(retryTargets[i])
+      if (idx >= 0) voted[idx] = nv
+      if (nv.verdicts.length > 0) verifyRetry.recovered++
+    })
+    log('VERIFY-RETRY recovered=' + verifyRetry.recovered + '/' + retryTargets.length)
+  }
+}
+
 // ─── 9/19 F1 外部抽查票：forum/blog 存活 claim 的独立佐证 ───
 // 2+1 内部票禁外部搜索（省 token），只做文本自洽判断——「引语整齐但事件不实」的论坛转述/软文
 // 恰好能通关并以「已核查 N-N」肯定态进正文（9/17 实证：网信办条目唯一来源是论坛转帖）。
@@ -2839,7 +2921,11 @@ const skippedUnverified = rankedClaims.filter(c => !votedKeys.has(votedKey(c))).
 if (skippedUnverified.length) {
   log('VERIFY-SKIP 配额内未投票 ' + skippedUnverified.length + ' 条（salvage/BUDGET-BREAK 截断，记 unverified 不蒸发）')
 }
-const unverified = voted.filter(c => !c.survives && !c.isRefuted).concat(skippedUnverified)
+// 10-04 §4.B2：substance 门跳过的声明与 salvage/BUDGET-BREAK 截断同样不蒸发——进 unverified 池
+const substanceUnverified = substanceSkippedClaims.map(c => ({
+  ...c, survives: false, isRefuted: false, verdicts: [], refutedCount: 0, erroredCount: 0,
+}))
+const unverified = voted.filter(c => !c.survives && !c.isRefuted).concat(skippedUnverified, substanceUnverified)
 const toolError = voted.filter(c => c.erroredCount >= 1).length  // 8/17 全量修复（观察项③）：阈值 2→1，单票错误不再被成品抹掉
 log('Verify done: ' + voted.length + ' → ' + confirmedVerify.length + ' verified, ' + killed.length + ' refuted, ' + unverified.length + ' unverified')
 
@@ -3140,7 +3226,7 @@ const claimsJson = JSON.stringify({ date: DATE, window: WINDOW_LABEL, confirmed:
 // 改为：workflow 把 payload 原样返回 → 主会话用 Write 逐字节落盘（见下方 payloads 字段）。
 const claimsPath = OUT + '/' + DATE + '.verified-claims.json'
 const sourcesPath = OUT + '/' + DATE + '.sources.json'
-const sourcesJson = JSON.stringify({ date: DATE, sources: sources.map(s => ({ url: s.url, title: s.title, board: s.board, found_via: s.found_via, sourceQuality: s.sourceQuality, publishDate: s.publishDate || s.date, claimCount: s.claims.length, confirmed: confirmed.filter(c => c.sourceUrl === s.url).length })) }, null, 1)
+const sourcesJson = JSON.stringify({ date: DATE, sources: sources.map(s => ({ url: s.url, title: s.title, board: s.board, found_via: s.found_via, sourceQuality: s.sourceQuality, publishDate: s.publishDate || s.date, claimCount: s.claims.length, confirmed: confirmed.filter(c => c.sourceUrl === s.url).length, claimUrls: [...new Set(s.claims.map(c => c.sourceUrl).filter(u => u && u !== s.url))] })) }, null, 1)
 const artifacts = [claimsPath, sourcesPath]  // md 由 orchestrator 从 payloads.md 落盘，artifact 清单列 JSON（3 个见下）
 
 const metaJson = JSON.stringify({
@@ -3149,6 +3235,10 @@ const metaJson = JSON.stringify({
   claims_verified: voted.length, confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, unverified: unverified.length, out_of_window_confirmed: outOfWindow.length,
   window_misses: windowMisses,
   url_dupes: dupes.length, fetches_dropped: budgetDropped.length, verify_agent_errors: toolError,
+  // 10-04 §4.B3/C：声明质量门与 verify 补投记账——dropped=垃圾声明拦截数（CLAIM-GATE）、
+  // substance_skipped=无实质声明跳过核查数（落 unverified 不蒸发）、verify_retry=全错票补投账。
+  claim_gate: { dropped: noiseDropped, substance_skipped: substanceSkipped },
+  verify_retry: verifyRetry,
   // 9/13 跨天账本书账：reported_deduped = 硬过滤丢弃的已报道候选数；major_dup_skipped = MAJOR-DUP
   // 跳过的 major-out/种子注入数；ledger_entries = 注入账本条目数（0 = 无账本，见 degraded.ledger_unavailable）。
   reported_deduped: reportedDeduped,
@@ -3204,7 +3294,7 @@ artifacts.push(metaPath)
 return {
   date: DATE, window: WINDOW_LABEL, outDir: OUT, artifacts,
   payloads: { claims: claimsJson, sources: sourcesJson, meta: metaJson, md },
-  stats: { boards: boards.length, urls_discovered: discoverRows.reduce((n, d) => n + d.urls.length, 0), urls_fetched: sources.length, claims_extracted: allClaims.length, claims_verified: voted.length, confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, unverified: unverified.length },
+  stats: { boards: boards.length, urls_discovered: discoverRows.reduce((n, d) => n + d.urls.length, 0), urls_fetched: sources.length, claims_extracted: allClaims.length, claims_verified: voted.length, confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, unverified: unverified.length, claims_dropped_noise: noiseDropped, claims_substance_skipped: substanceSkipped },
   headline: report ? report.oneLiner : null,
   summary: report ? report.execSummary : (confirmed.length ? 'synthesis failed; ' + confirmed.length + ' verified claims archived' : 'no confirmed claims'),
   coverage: coverage,

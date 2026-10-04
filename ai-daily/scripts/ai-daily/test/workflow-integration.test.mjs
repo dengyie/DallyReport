@@ -543,3 +543,24 @@ test('模板：discover major-out 必须走 14 天 age gate（09-20 Fable 19d / 
 test('模板：reportBody quote 截断 ≥220，已核查数字才进得了终稿', () => {
   assert.match(TPL, /c\.quote\.slice\(0,\s*220\)/, '合成素材 quote 至少 220 字（旧 140 把数字截掉 → 成稿含糊）')
 })
+
+test('模板：claim-gate 接线顺序（10-04 声明质量门）——过滤先于配额、补投先于外部抽查', () => {
+  // 单点接线：allClaims 汇合点（fetch 提取 + linuxdo mint 双路）垃圾拦截，且在 claimsByBoard 之前
+  assert.match(TPL, /gateClaims\(sources\.flatMap/, 'allClaims 汇合点单门拦截（fetch+mint 双路覆盖）')
+  assert.match(TPL, /CLAIM-GATE dropped=/, '垃圾拦截日志在场')
+  assert.ok(TPL.indexOf('gateClaims(sources.flatMap') < TPL.indexOf('const claimsByBoard'), '门在板块分组之前')
+  // 顺序硬约束（10-04 次生伤害形态）：substance 过滤必须先于 MAX_VERIFY 配额分配——否则垃圾占席、真声明被挤
+  assert.match(TPL, /if \(!needsVerification\(c\)\) \{ substanceSkippedClaims\.push\(c\); continue \}/, 'substance 门在 claimsByBoard 构建处')
+  assert.ok(TPL.indexOf('substanceSkippedClaims.push(c)') < TPL.indexOf('Math.floor(MAX_VERIFY'), '过滤先于配额分配')
+  assert.match(TPL, /const totalClaims = allClaims\.length - substanceSkipped/, '配额分母 = 过滤后可核声明数')
+  // verify-retry：全错票补投，先于外部抽查（复活的 forum claim 仍获佐证），后于主批次
+  assert.match(TPL, /VERIFY-RETRY 全错票补投/, '补投轮在场')
+  assert.ok(TPL.indexOf('VERIFY-RETRY') > TPL.indexOf('voted.push(...batchRes.filter(Boolean))'), '补投在主批次之后')
+  assert.ok(TPL.indexOf('VERIFY-RETRY') < TPL.indexOf('9/19 F1 外部抽查票'), '补投先于外部抽查')
+  // 记账三处（meta 顶层 + return stats）
+  assert.match(TPL, /claim_gate: \{ dropped: noiseDropped, substance_skipped: substanceSkipped \}/, 'meta claim_gate 记账在场')
+  assert.match(TPL, /verify_retry: verifyRetry/, 'meta verify_retry 记账在场')
+  assert.match(TPL, /claims_dropped_noise: noiseDropped, claims_substance_skipped: substanceSkipped/, 'stats 记账在场')
+  // substance-skipped 不蒸发（与 salvage/BUDGET-BREAK 截断同款契约）
+  assert.match(TPL, /concat\(skippedUnverified, substanceUnverified\)/, 'substance 声明落 unverified 池')
+})

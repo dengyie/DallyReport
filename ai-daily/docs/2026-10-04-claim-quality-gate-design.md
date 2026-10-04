@@ -1,6 +1,6 @@
 # 声明质量门改造设计（claim-quality-gate）
 
-> 2026-10-04 · 依据当日日报质量审计实证 · 状态：**设计定稿，待实施**
+> 2026-10-04 · 依据当日日报质量审计实证 · 状态：**已实施（同日，全量 476 测 467 pass / 0 fail / 9 有意 skip，产物 3303 行已 --sync-vault）**
 > 审计对象：`AI/DallyReport/2026-10-04/`（四件套 + wf_0a0edc92/wf_9b02f3f6 两个 workflow payload + 生产账本）
 
 ## 0. 一句话
@@ -198,23 +198,23 @@ claimUrls: [...new Set(s.claims.map(c => c.sourceUrl).filter(u => u && u !== s.u
 
 | 测试 | 内容 |
 |---|---|
-| `test/claim-gate.test.mjs`（新） | ① 10-04 五条真实垃圾原文逐条 `isJunkClaim === true`（回归金标准）；② 反例不误杀：`Gboard 已用 TEE 联邦学习训练英语与日语下一词预测模型`、`微软把 Rust 提为一级语言`、含数字短声明；③ `needsVerification` 三分支（数字/拉丁/CJK≥10）与边界（9 CJK 拒、10 CJK 收）；④ `gateClaims` 分账不丢不改写 |
+| `test/claim-gate.test.mjs`（新） | ① 10-04 实证垃圾中**机械可拦截的三条**（#1 附件标注 / #2 内嵌附件 / #5 URL 残片）逐字断言 `isJunkClaim === true`（回归金标准）；② 两条语义残余（#3/#4 评论碎片）如实断言 `isJunkClaim === false` 并注明由 prompt 层（§4.D）负责——§5 坦白的覆盖边界，测试不说谎；③ 反例不误杀（含「如图 3 所示，营收增长 30%」——§5 收窄模式的防误杀锁）；④ `needsVerification` 三分支与边界（9 CJK 拒 / 10 CJK 收 / 数字 / 拉丁 / 空串 / null）；⑤ `gateClaims` 分账引用透传 |
 | `test/build.test.mjs`（更新） | MODULES 含 `claim-gate`；realm 守栏自动覆盖新模块（FORBIDDEN_INLINE 断言跑在产物上） |
 | `test/workflow-integration.test.mjs`（更新） | 模拟 fetch+mint 混合输入：垃圾 claim 不入 allClaims、quota 按过滤后分配（锁「过滤先于配额」）、substance-skipped 落 unverified 不进 rankedClaims |
 | `test/prompts.test.mjs`（更新） | fetch prompt 含提取卫生规则文本；`## Source Extractor` 锚点首行不变 |
 | 全量 + 部署 | `node --test`；`build.mjs --sync-vault`；产物零漂移检查照常 |
 
-## 7. 实施清单（文件级）
+## 7. 实施清单（文件级）——全部完成 ✓
 
-1. [ ] `scripts/ai-daily/claim-gate.mjs`（新，A 节三导出）
-2. [ ] `scripts/ai-daily/test/claim-gate.test.mjs`（新，§6）
-3. [ ] `ai-daily.template.js`：`/* @inline: claim-gate */` 占位符（置于 ledger inline 块后）+ B1/B2/C 接线
-4. [ ] `scripts/ai-daily/build.mjs`：MODULES 追加 `'claim-gate'`（顺序在 `ledger` 后、`linuxdo` 前）
-5. [ ] prompts 区块（template 内 fetchPrompt）：D 节规则
-6. [ ] L3143 sourcesJson：E 节 `claimUrls`
-7. [ ] meta/stats：B3 + C 节记账字段
-8. [ ] 测试四件（§6）+ 全量跑绿 + `build.mjs --sync-vault`
-9. [ ] `docs/development.md` 变更记录 + 本文档状态改「已实施」
+1. [x] `scripts/ai-daily/claim-gate.mjs`（新，A 节三导出）
+2. [x] `scripts/ai-daily/test/claim-gate.test.mjs`（新，§6——含 10-04 真实垃圾原文 fixtures）
+3. [x] `ai-daily.template.js`：`/* @inline: claim-gate */` 占位符（ledger/linuxdo 之间）+ B1 allClaims 门 + B2 substance 门（先于配额）+ C VERIFY-RETRY + F substance-unverified 不蒸发
+4. [x] `scripts/ai-daily/build.mjs`：MODULES 追加 `'claim-gate'`（ledger 后、linuxdo 前）
+5. [x] `scripts/ai-daily/prompts.mjs`：D 节声明卫生规则（rule 3 子行，锚点首行不动）
+6. [x] sourcesJson：E 节 `claimUrls`
+7. [x] meta（`claim_gate` + `verify_retry`）与 return stats（`claims_dropped_noise` + `claims_substance_skipped`）记账
+8. [x] 测试：claim-gate 6 组 + prompts.test 卫生规则断言 + workflow-integration 接线顺序锁（含「过滤先于配额」「补投先于外部抽查」两条硬顺序）；全量 476 项 467 pass / 0 fail / 9 有意 skip；`build.mjs --sync-vault` 已同步（产物 3303 行）
+9. [x] `docs/development.md` 变更记录 + 本文档状态改「已实施」
 
 预估：模块+测试 ~150 行，模板接线 ~40 行，prompt ~3 行。半天内含测试可完成。
 

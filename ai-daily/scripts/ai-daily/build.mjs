@@ -32,7 +32,9 @@ const DEFAULT_OUT = path.resolve(HERE, '../../.claude/workflows/ai-daily.js')
 // linuxdo（10/03 拆分后）：只剩纯解析导出（Discourse JSON 解析/snippet 直铸/出链探测），零依赖 →
 // 排最后即可。CDP 抓取（fetchLinuxDoNews34）已移到 linuxdo-fetch.mjs（宿主 Node 专用，不进 MODULES）；
 // 旧版连 cdp-core.mjs（fetch/WebSocket 传输层）一起 inline 进 realm 是死重，10/03 一并剥离。
-const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'wallclock', 'ladder', 'fallback', 'prompts', 'render-md', 'cluster', 'ledger', 'linuxdo']
+// claim-gate（10-04）：声明质量门——附件标注/评论碎片/纯 URL 拦截 + verify substance 门 +
+// gateClaims 批量分账，纯函数零依赖 → 排 ledger 后（无依赖关系，纯约定）、linuxdo 前。
+const MODULES = ['url-polyfill', 'date-utils', 'schemas', 'boards', 'dedup', 'budget', 'wallclock', 'ladder', 'fallback', 'prompts', 'render-md', 'cluster', 'ledger', 'claim-gate', 'linuxdo']
 
 // 剥模块为可 inline 文本：去 import 行（依赖由顺序保证）、export 前缀、模块头注释。
 const stripModule = name => {
