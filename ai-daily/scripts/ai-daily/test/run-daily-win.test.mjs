@@ -112,6 +112,7 @@ test('Windows runner：F1 终态三态 done 行收口——成功后必发射，
   assert.ok(sh.includes(String.raw`done rc=0 (skip-existing)`), "幂等 skip 路径也发射终态行（进度台不显示陈旧终态）")
   // 旧 bug 回归源："成功路径 RC 被强制 0 后 `if [ "$RC" != "0" ]` 跳过 done"——现在必须在 `[ -f "$REPORT" ]` 独立判，不得依赖 RC 分支
   assert.match(sh, /notify "日报未生成/, '失败态通知在场（不再只在成功路径静默）')
+  assert.match(sh, /timeout 120 claude -p/, '探针带 120s 墙钟上限（10-04 实证：源站抖动时 CLI 被 hold 12min+，挂起须快速失败）')
 })
 
 test('Mac runners（run-daily.sh）：F1 终态三 done 行同样收口（与 win 对齐）', () => {

@@ -79,7 +79,9 @@ try {
 probe_gateway() {
   local model="${1:?}"
   local out
-  out="$(claude -p "Read the file ${REPO_AI}/scripts/ai-daily/test/run-daily-shim.test.mjs. Reply with exactly the GATEWAY-TOOL-PROBE-SENTINEL token from that file. Do not run any skill or workflow." --model "$model" --dangerously-skip-permissions 2>&1 || true)"
+  # 10-04 上午实证：网关源站抖动时 CLI 请求可能被 hold 12 分钟+（SDK 自身超时 3000s），
+  # 探针必须自带墙钟上限——挂起快速失败（rc=124 → out 空 → 判 FAIL），否则 PROBE_RETRY=3 每档烧 30+ 分钟。
+  out="$(timeout 120 claude -p "Read the file ${REPO_AI}/scripts/ai-daily/test/run-daily-shim.test.mjs. Reply with exactly the GATEWAY-TOOL-PROBE-SENTINEL token from that file. Do not run any skill or workflow." --model "$model" --dangerously-skip-permissions 2>&1 || true)"
   [[ "$out" != *"API Error"* ]] || return 1
   [[ "$out" != *"unapproved channel"* ]] || return 1
   [[ "$out" != *"11128"* ]] || return 1
