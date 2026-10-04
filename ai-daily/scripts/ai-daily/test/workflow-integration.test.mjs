@@ -363,13 +363,19 @@ test('模板：withDeadline reject 透传错误，不得抹成 null', () => {
   assert.match(probeSeg, /catch/, 'probeGateway reject → 视同探针失败，不得炸 workflow')
 })
 
-test('模板：verify 票共享阶段阶梯 t0，不得每票独立 now()', () => {
+test('模板：verify 主批次票共享阶段阶梯 t0，不得每票独立 now()；补投轮是唯一独立 t0 例外（10-04 复审）', () => {
   // P2-2：_voteBatch 若把满额 LADDER_BUDGET_MS 配每票自己的 t0，后批/补票会重新吃满 15min。
+  // 主批次/救护批共享 verifyLadderT0（默认第 5 参回落）；VERIFY-RETRY 补投轮是**唯一**独立 t0 例外
+  // （10-04 复审 Suggestion-1：风暴耗尽共享预算后补投无换级能力 → 独立 t0，整轮一个、非每票一个）。
   assert.match(TPL, /const verifyLadderT0 = now\(\)/, 'Verify 阶段钉一次 t0')
   assert.ok(TPL.indexOf('const verifyLadderT0 = now()') > TPL.indexOf("phase('Verify')"), 't0 在 phase Verify 之后')
   assert.ok(TPL.indexOf('const verifyLadderT0 = now()') < TPL.indexOf('const _voteBatch'), 't0 在 _voteBatch 之前，救护批也共享')
-  assert.match(TPL, /MODEL_LADDER, LADDER_BUDGET_MS, verifyLadderT0\)/, '票调用传入共享 t0')
+  assert.match(TPL, /MODEL_LADDER, LADDER_BUDGET_MS, ladderT0 \|\| verifyLadderT0\)/, '票调用默认回落共享 t0')
   assert.doesNotMatch(TPL, /opts\.ladderT0/, '共享 t0 走第 5 参，不得塞进 agent opts')
+  const retrySeg = TPL.slice(TPL.indexOf('const verifyRetry = { targets: 0, recovered: 0 }'), TPL.indexOf('9/19 F1 外部抽查票'))
+  assert.match(retrySeg, /const verifyRetryLadderT0 = now\(\)/, '补投轮整轮钉一次独立 t0')
+  assert.match(retrySeg, /voteClaim\(c, AGENT_TIMEOUT_MS, verifyRetryLadderT0\)/, '补投票传入独立 t0')
+  assert.ok(retrySeg.indexOf('const verifyRetryLadderT0 = now()') === retrySeg.lastIndexOf('const verifyRetryLadderT0 = now()'), '整轮一次，不是每票一个 now()')
 })
 
 test('模板：超时日志不再写 report 有内容至多 2 试', () => {
@@ -563,4 +569,7 @@ test('模板：claim-gate 接线顺序（10-04 声明质量门）——过滤先
   assert.match(TPL, /claims_dropped_noise: noiseDropped, claims_substance_skipped: substanceSkipped/, 'stats 记账在场')
   // substance-skipped 不蒸发（与 salvage/BUDGET-BREAK 截断同款契约）
   assert.match(TPL, /concat\(skippedUnverified, substanceUnverified\)/, 'substance 声明落 unverified 池')
+  // 10-04 复审 P3-1：垃圾同步剥离出 sources[].claims——boardClaimCount（覆盖自检）/sourcesJson
+  // claimCount+claimUrls 三处消费方与 allClaims 同一口径（否则同一报告页两个 claims 数对不上）
+  assert.match(TPL, /for \(const s of sources\) s\.claims = s\.claims\.filter\(c => !_droppedSet\.has\(c\)\)/, '垃圾同步剥离出 sources[].claims（三处消费方口径一致）')
 })

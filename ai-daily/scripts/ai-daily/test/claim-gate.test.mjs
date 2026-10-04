@@ -17,6 +17,11 @@ test('isJunkClaim：10-04 实证垃圾原文逐条拦截（回归金标准）', 
   for (const t of JUNK_10_04) assert.equal(isJunkClaim({ claim: t }), true, JSON.stringify(t))
 })
 
+test('isJunkClaim：ASCII x 尺寸分隔符变体同样拦截（10-04 复审 Suggestion-3）', () => {
+  assert.equal(isJunkClaim({ claim: 'image 580x286 7.97 KB' }), true, '提取器产出 ASCII x 不漏')
+  assert.equal(isJunkClaim({ claim: '如图： image 487x438 13.4 KB 不用忍受被封号' }), true, '内嵌变体')
+})
+
 test('isJunkClaim：模式表边界（附件标注变体 / 过短 / 纯 URL）', () => {
   assert.equal(isJunkClaim({ claim: 'image 487×438' }), true, '附件标注无大小后缀仍拦')
   assert.equal(isJunkClaim({ claim: '13.4 KB' }), true, '纯大小串')
@@ -37,7 +42,7 @@ test('isJunkClaim：真实声明不误杀（反例锁死）', () => {
   for (const t of REAL) assert.equal(isJunkClaim({ claim: t }), false, JSON.stringify(t))
 })
 
-test('isJunkClaim：残余语义噪声如实不拦（设计 §5 覆盖边界——靠 prompt 层减少，危害被 substance 门封顶）', () => {
+test('isJunkClaim：残余语义噪声如实不拦（设计 §5 覆盖边界——靠 prompt 层减少；注意 CJK≥10 碎片仍可过 substance 门到达 verify，测试如实锁定边界不夸大）', () => {
   const RESIDUAL = [
     '这个参数和模型的数据知识量有关',                                                          // 无主语评论碎片
     '虽然技术报告都看过，但是看到切开来的电镜图还是有点起鸡皮疹药 哔哩哔哩 逻辑折叠深度解析', // 评论转述

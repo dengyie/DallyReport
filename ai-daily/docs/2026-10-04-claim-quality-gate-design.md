@@ -83,9 +83,9 @@ voted → confirmed / refuted / unverified            → payloads（L3143 sourc
 // A1 确定性垃圾模式（精度优先，全部锚定当日实证形态；宁漏勿滥——被漏的垃圾
 //     由 D 节 substance 门挡在 verify 外，不会被确认为"已核实事实"）
 const JUNK_RES = [
-  /^image\s+\d+×\d+/i,                      // 附件尺寸标注开头（image 580×286 7.97 KB）
+  /^image\s+\d+[×xX]\d+/i,                 // 附件尺寸标注开头（image 580×286 7.97 KB；[×xX] 兼容 ASCII x，复审 S-3）
   /^\d+(\.\d+)?\s*(KB|MB|GB)\b/i,           // 纯大小串开头
-  /(^|\s)image\s+\d+×\d+\s+\d+(\.\d+)?\s*(KB|MB)\b/i, // 内嵌附件标注（"如图： image 487×438 …"）
+  /(^|\s)image\s+\d+[×xX]\d+\s+\d+(\.\d+)?\s*(KB|MB)\b/i, // 内嵌附件标注（"如图： image 487×438 …"）
   /^如图[：:，,]?/,                           // 「如图」开头的图片说明碎片
   /^https?:\/\/\S+\s*$/,                    // 纯 URL 粘贴（无文字内容）
 ]
@@ -161,9 +161,10 @@ if (retryTargets.length && stageVerifyRan && budgetGate.roomTo('Verify') > 0) {
 ```
 
 - **只补"全错票"**（`verdicts.length === 0`）——有分歧/部分成功的 claim 已有信号，重投不改变结论（2 票已定，补票语义由既有 2+1 终判规则覆盖）。
-- **预算纪律**：复用 `budgetGate` 与 `verifyLadderT0` 共享阶梯预算；遵守 8/28 一次性状态注释（`stageVerifyRan` 已置位时不得重复调 `budgetGate('Verify')` 记账）。
+- **预算纪律**：roomTo 纯读门控 + 遵守 8/28 一次性状态注释（不重复调 `budgetGate('Verify')` 记账）。
+- **独立阶梯 t0（10-04 复审 S-1 根因修复）**：补投轮用 `verifyRetryLadderT0 = now()`——风暴耗尽共享 900s 预算后，复用旧 t0 的补投无换级能力（摆设化）；独立 t0 让补投在风暴尾巴上仍有完整降级链，额外墙钟 ≤LADDER_BUDGET_MS 有界。主批次/救护批仍共享 `verifyLadderT0`（P2-2 纪律不变）。
 - **记账**：meta 顶层 `verify_retry: { targets: N, recovered: M }`（recovered = 补投后 verdicts 非空数）。
-- **墙钟安全**：上限一个批次 + roomTo 门控，最坏增加 ≤VERIFY_BATCH×2 票 ×AGENT_TIMEOUT_MS，由既有"墙钟是软目标，尾批可超"契约覆盖。
+- **墙钟安全**：上限一个批次 + roomTo 门控，最坏增加 ≤VERIFY_BATCH×2 票 ×AGENT_TIMEOUT_MS + LADDER_BUDGET_MS，由既有"墙钟是软目标，尾批可超"契约覆盖。
 
 ### D. fetch prompt 硬化（prompts 区块，'## Source Extractor'）
 
@@ -190,9 +191,10 @@ claimUrls: [...new Set(s.claims.map(c => c.sourceUrl).filter(u => u && u !== s.u
 
 ## 5. 不确定性坦白
 
-- **评论碎片无法全靠模式根除**：「这个参数和模型的数据知识量有关」（13 个 CJK 字符）能通过 A2 substance 门（≥10 CJK）。此类靠 D 节 prompt 硬化减少发生；确定性门槛只能拦"机械可识别"形态。设计上接受残余噪声落在 unverified 池（不进 verify、不可能 confirmed）——**危害上限被 A2 封死**。
+- **评论碎片无法全靠模式根除**：「这个参数和模型的数据知识量有关」（13 个 CJK 字符）能通过 A2 substance 门（≥10 CJK）——**此类流畅碎片仍可到达 verify，若核查票宽松仍可能被确认入账本**（复审修正：原稿"危害上限被 A2 封死"表述过强）。此类靠 D 节 prompt 硬化减少发生；一旦漏网被确认，按 §4.F 账本语义处理（记录在案、60 天自愈）。机械可拦截形态（附件标注/纯大小串/纯 URL/转发残片）则被 A1 完全根除。
 - **误杀风险**：`^如图` 模式可能误杀"如图 X 所示，营收增长 30%"这类以图引入的正文声明——但该形态 claim 必含数字，建议模式改为 `/^如图[：:，,]?\s*(image|$)/i`（「如图」后紧跟附件标注或结尾才算），实施时以此为准。
 - **配额顺序约束**：B2 若先分配后过滤，会复现"垃圾占配额"伤害。实施 checklist 单列此项，测试必须锁「过滤先于配额分配」。
+- **sources[].claims 同步剥离（10-04 复审 P3-1 补充）**：gate 必须同时把垃圾从 `sources[].claims` 剥离——否则 boardClaimCount（覆盖自检）/sourcesJson claimCount/claimUrls 三处消费方与 allClaims 口径分裂，同一报告页出现两个对不上的 claims 数。
 
 ## 6. 测试计划
 

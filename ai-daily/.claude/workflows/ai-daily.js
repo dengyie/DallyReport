@@ -1969,11 +1969,12 @@ const _calendarDayMinus = (dayNum, back) => {
 // verify 之外（最多落 unverified 池，永不可能 confirmed）；再漏的靠 fetch prompt 提取卫生规则
 // 减少发生——三层防御，危害上限被 substance 门封顶（设计 §4/§5）。
 
-// 确定性垃圾模式（全部锚定 10-04 实证形态；正则即文档，测试用当日真实垃圾原文做 fixture）
+// 确定性垃圾模式（全部锚定 10-04 实证形态；正则即文档，测试用当日真实垃圾原文做 fixture。
+// 尺寸分隔符收 [×xX]——提取器可能产出 ASCII x（image 580x286），10-04 复审 Suggestion-3）
 const JUNK_RES = [
-  /^image\s+\d+×\d+/i,                                 // 附件尺寸标注开头（image 580×286 7.97 KB）
+  /^image\s+\d+[×xX]\d+/i,                                 // 附件尺寸标注开头（image 580×286 7.97 KB）
   /^\d+(\.\d+)?\s*(KB|MB|GB)\b/i,                      // 纯大小串开头
-  /(^|\s)image\s+\d+×\d+\s+\d+(\.\d+)?\s*(KB|MB)\b/i,  // 内嵌附件标注（"如图： image 487×438 13.4 KB …"）
+  /(^|\s)image\s+\d+[×xX]\d+\s+\d+(\.\d+)?\s*(KB|MB)\b/i,  // 内嵌附件标注（"如图： image 487×438 13.4 KB …"）
   /^如图[：:，,]?\s*(image|$)/i,                        // 「如图」图片说明碎片——收窄到紧跟附件标注或到此为止，
                                                        // 防误杀「如图 3 所示，营收增长 30%」（设计 §5）
 ]
@@ -2723,6 +2724,11 @@ const sources = extracted.filter(Boolean)
 const _gate = gateClaims(sources.flatMap(s => s.claims))
 const allClaims = _gate.clean
 const noiseDropped = _gate.dropped.length
+// 同步剥离 sources[].claims 里的垃圾（10-04 复审 P3-1）：boardClaimCount（覆盖自检）/
+// sourcesJson claimCount+claimUrls 三处消费方与 allClaims 保持同一口径，否则同一报告页
+// 出现两个对不上的 claims 数。引用同一性安全：allClaims 成员与过滤后 s.claims 成员同对象。
+const _droppedSet = new Set(_gate.dropped)
+for (const s of sources) s.claims = s.claims.filter(c => !_droppedSet.has(c))
 if (noiseDropped) log('CLAIM-GATE dropped=' + noiseDropped + ' :: ' + _gate.dropped.slice(0, 3).map(c => (c.claim || '').slice(0, 30)).join(' | '))
 log('Fetch: ' + sources.length + ' sources → ' + allClaims.length + ' claims')
 
@@ -2774,19 +2780,19 @@ phase('Verify')
 // 全 Verify 阶段共享一个阶梯 t0：6 票并发不得各自重新吃满 LADDER_BUDGET_MS（烟测 420s 已见后票把预算叠高）。
 const verifyLadderT0 = now()
 
-const _voteBatch = (c, n, startIdx, timeoutMs) => parallel(Array.from({ length: n }, (_, v) => () => {
+const _voteBatch = (c, n, startIdx, timeoutMs, ladderT0) => parallel(Array.from({ length: n }, (_, v) => () => {
   const label = 'v' + (startIdx + v) + ':' + (c.claim || '').slice(0, 30)
-  return safeAgentWithLadder(verifyPrompt(c, ctxP), { label, phase: 'Verify', schema: VERDICT_SCHEMA, effort: 'low', timeoutMs }, MODEL_LADDER, LADDER_BUDGET_MS, verifyLadderT0).then(r => {
+  return safeAgentWithLadder(verifyPrompt(c, ctxP), { label, phase: 'Verify', schema: VERDICT_SCHEMA, effort: 'low', timeoutMs }, MODEL_LADDER, LADDER_BUDGET_MS, ladderT0 || verifyLadderT0).then(r => {
     BREAKER.record(!!r, label)
     return r
   })
 }))
 // 8/15 自适应 2+1（语义无损）：round0 并发 2 票。双否→kill（2 票）；双非否→存活（2 票）；分歧/缺票→补 1 票终判。
 // 终判规则与 3 票时代逐字一致：survives ⇔ valid≥2 且 refuted<2；isRefuted ⇔ refuted≥2。平均 2.0-2.3 票/claim。
-const voteClaim = async (c, timeoutMs) => {
+const voteClaim = async (c, timeoutMs, ladderT0) => {
   const valid = []
   let agentFails = 0  // 真正的代理失败（null）数；与"够票早停"分开，避免把主动停算成 error
-  const round0 = await _voteBatch(c, Math.min(2, VOTES_PER_CLAIM), 0, timeoutMs)
+  const round0 = await _voteBatch(c, Math.min(2, VOTES_PER_CLAIM), 0, timeoutMs, ladderT0)
   agentFails += round0.filter(x => !x).length
   valid.push(...round0.filter(Boolean))
   const ref0 = valid.filter(x => x.refuted).length
@@ -2794,7 +2800,7 @@ const voteClaim = async (c, timeoutMs) => {
   // 非收敛（1-1 分歧，或两票里有失败缺位）→ 补 1 票；双否/双过都直接收束在 2 票。
   const need1 = VOTES_PER_CLAIM - valid.length
   if (need1 > 0 && !(ref0 >= REFUTATIONS_REQUIRED || ok0 >= REFUTATIONS_REQUIRED)) {
-    const round1 = await _voteBatch(c, Math.min(1, need1), valid.length, timeoutMs)
+    const round1 = await _voteBatch(c, Math.min(1, need1), valid.length, timeoutMs, ladderT0)
     agentFails += round1.filter(x => !x).length
     valid.push(...round1.filter(Boolean))
   }
@@ -2850,8 +2856,12 @@ const verifyRetry = { targets: 0, recovered: 0 }
   const retryTargets = voted.filter(c => c && c.erroredCount > 0 && c.verdicts.length === 0)
   verifyRetry.targets = retryTargets.length
   if (retryTargets.length && budgetGate.roomTo('Verify') > 0) {
-    log('VERIFY-RETRY 全错票补投 ' + retryTargets.length + ' 条（自适应 2+1 重跑，预算纯读门控）')
-    const retried = await parallel(retryTargets.map(c => () => voteClaim(c, AGENT_TIMEOUT_MS)))
+    // 10-04 复审 Suggestion-1 根因修复：补投轮用**独立阶梯 t0**（verifyRetryLadderT0 = now()）——
+    // 风暴耗尽共享 900s 阶梯预算后，复用旧 t0 的补投无换级能力、恢复只靠主档健康（摆设化）；
+    // 独立 t0 让补投在风暴尾巴上仍有完整降级链，额外墙钟 ≤LADDER_BUDGET_MS 有界（上限一个批次）。
+    const verifyRetryLadderT0 = now()
+    log('VERIFY-RETRY 全错票补投 ' + retryTargets.length + ' 条（自适应 2+1 重跑，独立阶梯 t0）')
+    const retried = await parallel(retryTargets.map(c => () => voteClaim(c, AGENT_TIMEOUT_MS, verifyRetryLadderT0)))
     retried.forEach((nv, i) => {
       if (!nv) return
       const idx = voted.indexOf(retryTargets[i])
