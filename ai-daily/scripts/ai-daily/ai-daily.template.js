@@ -721,6 +721,7 @@ for (let i = FETCH_FIRST_BATCH; i < fetchTargets.length; i += FETCH_BATCH) fetch
 phase('Fetch')
 let stageFetchRan = false  // 8/27 一次性状态：Fetch 首批是否已正常启动（预算记账过 + 会在 await 前置位）
 let salvaged = false  // 8/26 修复：救护首批已标记——余批整批 break，不再碰 budgetGate('Fetch')，避免把已抓过批的 Fetch 误记成「整段跳过」
+let fetchAgentErrors = 0  // 10-05 P3：抓取代理 null 的来源数——旧行为 filter(Boolean) 静默蒸发，meta 对不上账（18 发现 − 2 去重 − 1 已报道 ≠ 12 抓取，3 条无痕）
 for (const batch of fetchBatches) {
   if (salvaged) break  // 救护首批已跑：余批不再处理（budgetGate('Fetch') 不再被调用 → budgetSkipped 不记 Fetch）
   // 8/27 预算书账（stageFetchRan 一次性）：
@@ -759,6 +760,10 @@ for (const batch of fetchBatches) {
         return { ...src, sourceQuality: 'unreliable', claims: [] }
       })
   ))
+  // 10-05 P3：null = safeAgent 两轮尽头（含超时）——旧版 filter(Boolean) 静默蒸发，漏斗账对不上。
+  // 计数进 meta.fetch_agent_errors（web 波动属常态，只计数不降级；journal 里 safeAgent fail 有逐条日志）。
+  const _fetchNulls = batchRes.filter(r => r == null).length
+  if (_fetchNulls) { fetchAgentErrors += _fetchNulls; log('FETCH-AGENT-NULL ' + _fetchNulls + ' 条 URL 抓取代理无产出 → 不进 sources（meta.fetch_agent_errors）') }
   extracted.push(...batchRes)
   if (salvageFirst) salvaged = true  // 抓完救护首批后置位：下一个循环迭代整批 break 跳出
 }
@@ -1261,11 +1266,18 @@ const generatedBy = 'ai-daily (' + reportModelUsed + ')'
 // 归档 payload 数组（claimsJson 与降级 md 共用同一份同构数据，避免两处映射漂移）。
 // 9/19 F12：major-out 未投票，confidence 置 null——旧版硬给 'high'，JSON 归档与正文「未核查措辞」口径漂移。
 const confirmedOut = confirmed.map(c => ({ claim: c.claim, quote: c.quote, source: c.sourceUrl, sourceQuality: c.sourceQuality, date: c.publishDate || c.date, window: c.isMajorOut ? 'major-out' : claimWindow(c), vote: c.isMajorOut ? '—' : (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, verifiedByVote: !c.isMajorOut, erroredCount: c.erroredCount || 0, externalCheck: c.externalCheck || null, confidence: (c.verdicts.filter(v => !v.refuted)[0] || {}).confidence || (c.isMajorOut ? null : 'low') }))
+// 10-05 P3：参考来源「未抓取」标注的数据面——抓取期真实访问过的 URL 全集（来源页 url +
+// 索引页提取的真实文章 claimUrl）。集合之外进参考来源的编号是发现期提供、从未抓取验证的链接。
+const _fetchedUrlSet = new Set()
+for (const s of sources) {
+  if (s.url) _fetchedUrlSet.add(normURL(s.url))
+  for (const c of (s.claims || [])) if (c.sourceUrl) _fetchedUrlSet.add(normURL(c.sourceUrl))
+}
 const refutedOut = killed.map(c => ({ claim: c.claim, source: c.sourceUrl, vote: (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, erroredCount: c.erroredCount || 0 }))
 const unverifiedOut = unverified.map(c => ({ claim: c.claim, source: c.sourceUrl }))
 const outOfWindowOut = outOfWindow.map(c => ({ claim: c.claim, source: c.sourceUrl, date: c.publishDate || c.date, vote: (c.verdicts.length - c.refutedCount) + '-' + c.refutedCount, erroredCount: c.erroredCount || 0 }))
 const md = report
-  ? renderMarkdown({ date: DATE, window: WINDOW_LABEL, report, coverage, windowMisses, degraded: degradedFlags, yesterdayTopics, meta: {
+  ? renderMarkdown({ date: DATE, window: WINDOW_LABEL, report, coverage, windowMisses, degraded: degradedFlags, yesterdayTopics, fetchedUrls: _fetchedUrlSet, meta: {
       date: DATE, window: WINDOW_LABEL,
       // 10/03 对齐参考日报：漏斗统计（数据概览表）。community_topics=社区预抓帖合计；
       // claims_extracted=全部提取声明；topic_groups=跨条合并话题组；included=纳入正文的条目数。
@@ -1290,15 +1302,18 @@ const metaJson = JSON.stringify({
   claims_verified: voted.length, confirmed: confirmed.length, major_out: majorOutClaims.length, killed: killed.length, unverified: unverified.length, out_of_window_confirmed: outOfWindow.length,
   window_misses: windowMisses,
   url_dupes: dupes.length, fetches_dropped: budgetDropped.length, verify_agent_errors: toolError,
+  fetch_agent_errors: fetchAgentErrors,
   // 10-04 §4.B3/C：声明质量门与 verify 补投记账——dropped=垃圾声明拦截数（CLAIM-GATE）、
   // substance_skipped=无实质声明跳过核查数（落 unverified 不蒸发）、verify_retry=全错票补投账。
   claim_gate: { dropped: noiseDropped, substance_skipped: substanceSkipped },
   verify_retry: verifyRetry,
   // 9/13 跨天账本书账：reported_deduped = 硬过滤丢弃的已报道候选数；major_dup_skipped = MAJOR-DUP
-  // 跳过的 major-out/种子注入数；ledger_entries = 注入账本条目数（0 = 无账本，见 degraded.ledger_unavailable）。
+  // 跳过的 major-out/种子注入数；ledger_injected = 注入 workflow 的账本条目数（消费端候选，0 = 无账本，
+  // 见 degraded.ledger_unavailable）。10-05 P3 由 ledger_entries 改名——它不是本轮新增记账数
+  // （新增数由 finalize 宿主回写 meta.ledger_recorded_count），旧名屡被误读成「今日记账 N 条」。
   reported_deduped: reportedDeduped,
   major_dup_skipped: majorDupSkipped + seedDupSkipped,
-  ledger_entries: REPORTED_LEDGER ? REPORTED_LEDGER.length : 0,
+  ledger_injected: REPORTED_LEDGER ? REPORTED_LEDGER.length : 0,
   // 8/27 Task 2 (dropped 明细可审计)：fetch_budget_dropped 只给总数，不够归因。
   // dropped_detail 给出"丢的到底是谁"的逐类账：linuxdo_cdp（预抓的帖/URL 被预算丢）、
   // static_fallback（静态兜底被丢）、其它（普通 discover 候选被丢）。
@@ -1320,8 +1335,11 @@ const metaJson = JSON.stringify({
   report_source_hallucination: reportSourceHallucinated,
   degraded: degradedFlags, report_error: reportErr,
   // 8/31 P1：墙钟标定与断路器的账。realm 唯一时钟是 tick 累加器，饱和下只低估——
-  // wallclock_raw_s（累加器原始读数）与 wallclock_calibrated_s（标定后下界）之差即被吞掉的时间，
-  // 配合宿主侧 run-daily.sh 的真实 epoch（P1-②）三方对账，才能判断闸门是真放行还是被骗放行。
+  // raw_s（累加器原始读数）与 calibrated_s（标定后下界）之差即事件循环饱和吞掉的时间。
+  // 10-05 P1 语义收紧：本对象只测 **workflow 内段**——runner 起始到 workflow 启动之间的
+  // 探针/模型换档/快死重试段 realm 根本看不见（10-05 实测内段 2383s vs 全程 3661s）。
+  // 全 run 真实总墙钟由 finalize 宿主实测回写 wallclock.real_s（AI_DAILY_RUN_START_EPOCH），
+  // 宿主 WALLCLOCK 行 + real_s + 本对象三方对账。
   wallclock: {
     raw_s: Math.round(RUN_ELAPSED_RAW() / 1000),
     calibrated_s: Math.round(RUN_ELAPSED() / 1000),

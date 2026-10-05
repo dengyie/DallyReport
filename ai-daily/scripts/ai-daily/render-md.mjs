@@ -10,6 +10,7 @@
 // node:test 直跑时全局 URL 已存在，installUrlPolyfill 幂等跳过。
 import { installUrlPolyfill } from './url-polyfill.mjs'
 import { DEFAULT_LADDER } from './ladder.mjs'
+import { normURL } from './date-utils.mjs'
 installUrlPolyfill()
 // 供 test/realm-url.test.mjs 模拟 realm（删 globalThis.URL）后重新注入用。
 export const setUrlPolyfillForRealm = () => { installUrlPolyfill() }
@@ -39,11 +40,16 @@ const isUncheckedStatus = s => {
 
 // 跨 section 唯一 URL 引用图：按「首次出现序」给每个唯一 URL 分配 1-based 编号（spec A.1）。
 // 非 URL 来源（如 (多源公认)）不参与编号——正文不挂角标、不进参考列表。
-// 返回 { map: Map<href, n>, list: [{ n, url, title }] }；list 即「### 参考来源」节的数据源，title 取 hostname。
-export const buildCitationMap = sections => {
+// 10-05 P3 诚实标注：fetchedUrls（抓取期真实访问过的 URL 集合，normURL 对比）之外的是发现期
+// 提供、从未抓取验证的链接（10-05 实证 major-out 的 anthropic.com/claude-sonnet-5-5 疑似发现
+// 模型猜测路径）——list 条目标 unfetched=true，render 据此补 〔未抓取〕，读者不把死链当已核来源。
+// fetchedUrls 缺省 → 全部视为已核（向后兼容旧调用/降级版 confirmed 源均为抓取期来源）。
+// 返回 { map: Map<href, n>, list: [{ n, url, title, unfetched }] }；list 即「### 参考来源」节的数据源，title 取 hostname。
+export const buildCitationMap = (sections, fetchedUrls) => {
   const map = new Map()
   const list = []
   const hostname = s => { try { return new URL(s).hostname } catch { return s } }
+  const fetchedSet = fetchedUrls == null ? null : new Set([...fetchedUrls].map(u => normURL(String(u))))
   for (const sec of sections || []) {
     for (const it of (sec.items || [])) {
       for (const s of (it.sources || [])) {
@@ -51,7 +57,7 @@ export const buildCitationMap = sections => {
         try { url = new URL(s).href } catch { continue }
         if (!map.has(url)) {
           map.set(url, list.length + 1)
-          list.push({ n: list.length + 1, url, title: hostname(url) })
+          list.push({ n: list.length + 1, url, title: hostname(url), unfetched: fetchedSet ? !fetchedSet.has(normURL(url)) : false })
         }
       }
     }
@@ -118,7 +124,7 @@ const frontmatterLines = (meta, date, window) => {
 // 输入即现行 mdWriter prompt 里 reportJson 的同构数据。
 // meta 为可选参数：{ date, window, stats:{confirmed,major_out,killed,urls_fetched,urls_discovered}, generated_by, degraded }；
 // 缺失时退化（无 frontmatter/横幅），向后兼容旧调用。
-export const renderMarkdown = ({ date, window, report, coverage, windowMisses, degraded, yesterdayTopics, meta }) => {
+export const renderMarkdown = ({ date, window, report, coverage, windowMisses, degraded, yesterdayTopics, meta, fetchedUrls }) => {
   const L = []
   for (const fl of frontmatterLines(meta, date, window)) L.push(fl)
   L.push('# 🤖 AI 日报 · ' + date)
@@ -167,7 +173,7 @@ export const renderMarkdown = ({ date, window, report, coverage, windowMisses, d
     }
     L.push('')
   }
-  const citeMap = buildCitationMap(report && report.sections)
+  const citeMap = buildCitationMap(report && report.sections, fetchedUrls)
   // 8/23 第二十一项：事件驱动分节——无内容的板块整体不出现（信息熵契约：不摆空骨架）。
   for (const sec of report.sections || []) {
     const items = (sec.items || []).filter(Boolean)
@@ -233,11 +239,12 @@ export const renderMarkdown = ({ date, window, report, coverage, windowMisses, d
     L.push('- **' + c.title + '**：' + c.claims + ' claims / ' + c.urls + ' sources' + (c.degraded ? ' `[degraded]`' : ''))
   }
   L.push('')
-  // 参考来源节（md 末尾，AI.md 风格 [n] → 编号参考列表，跨 section 全文唯一）
+  // 参考来源节（md 末尾，AI.md 风格 [n] → 编号参考列表，跨 section 全文唯一）。
+  // unfetched 条目（发现期提供、未抓取验证）补 〔未抓取〕 诚实标注——10-05 P3。
   if (citeMap.list.length) {
     L.push('### 参考来源')
     L.push('')
-    for (const c of citeMap.list) L.push('- [' + c.n + '] [' + c.title + '](<' + c.url + '>)')
+    for (const c of citeMap.list) L.push('- [' + c.n + '] [' + c.title + '](<' + c.url + '>)' + (c.unfetched ? '〔未抓取〕' : ''))
     L.push('')
   }
   return L.join('\n')

@@ -36,6 +36,13 @@ test('Windows runner：预抓 JSON 不得插进双引号 claude -p，json 只落
   assert.match(promptLine, /args\.reportedLedger/, 'prompt 指示注入 args.reportedLedger（跨天账本）')
 })
 
+test('Windows runner：AI_DAILY_RUN_START_EPOCH 导出（10-05 P1 墙钟 real_s 数据链路）', () => {
+  const sh = win()
+  assert.match(sh, /export AI_DAILY_RUN_START_EPOCH="\$WALL_START"/, '起始 epoch 经 env 传给 finalize（claude 子进程继承）')
+  assert.match(sh, /WALL_START="\$\(date '\+%s'\)"/, 'WALL_START 为宿主 epoch 秒')
+  assert.match(sh, /meta\.wallclock\.real_s/, 'WALLCLOCK 行指向 real_s 语义（内段 vs 全程）')
+})
+
 test('Windows runner：编排器韧性阶梯在场（探针/重拉/通知/快死）', () => {
   const sh = win()
   assert.match(sh, /probe_gateway\(\)/, '网关探针函数在场')

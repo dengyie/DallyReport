@@ -92,6 +92,18 @@ test('parseReportedLedger：数组 / JSON 字符串均可；空/坏形态 → nu
   assert.equal(parseReportedLedger({ day: 'x' }), null, '非数组对象不崩')
 })
 
+test('parseReportedLedger：账本入口 isJunkClaim 卫生过滤（10-05 P2，历史毒条目不得渗入昨日话题追踪）', () => {
+  // 10-04 生产账本真实毒条目原文（质量门上线前写入，10-05 经 buildYesterdayTopics 渲染进报告）
+  const poison = { day: '2026-10-04', url: 'https://linux.do/t/2979428', tokens: ['image', '7.97'], title: 'image 580×286 7.97 KB', major: false }
+  const good = { day: '2026-10-05', url: 'https://github.com/antirez/ds4', tokens: ['antirez', 'dwarfstar'], title: 'The antirez/ds4 README describes DwarfStar as a native inference engine', major: false }
+  const out = parseReportedLedger([poison, good])
+  assert.equal(out.length, 1, '毒条目在消费端入口被拦截')
+  assert.equal(out[0].url, 'https://github.com/antirez/ds4')
+  assert.equal(parseReportedLedger([poison]), null, '全被滤掉 → null（等价无账本，degraded 如实上报）')
+  assert.equal(parseReportedLedger([{ day: '2026-10-04', url: 'https://x.example/e', tokens: ['abc'], title: '' }]).length, 1, 'title 缺失不判（fail-open，与本模块其余守卫一致）')
+  assert.equal(parseReportedLedger([{ day: '2026-10-04', url: 'https://linux.do/t/2979429', tokens: ['image'], title: 'image 580x286 7.97 KB', major: false }]), null, 'ASCII x 变体同样拦截')
+})
+
 // ─── filterReportedTargets ───
 test('filterReportedTargets：已报道 URL 硬丢弃并给 matchedDay；未报道保留；不改输入数组', () => {
   const ledger = [makeLedgerEntry('2026-09-04', 'https://x.example/a', 'OpenAI 发布 Astra 智能体被曝多次联网引发治理争议', false)]

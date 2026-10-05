@@ -42,6 +42,10 @@ REPORT="${OB_DIR}/${TODAY}-ai日报.md"
 LEDGER="${LOGDIR}/published-ledger.json"
 # 8/31 P1-② 真实墙钟起点（epoch 秒）。realm 内累加器不可信，唯一可信墙钟在宿主侧。
 WALL_START="$(date '+%s')"
+# 10-05 P1 根因修复：起始 epoch 经 env 传给 finalize（宿主 CLI，claude 子进程继承 env）——
+# finalize 用宿主时钟实测回写 meta.wallclock.real_s。realm 看不到探针/模型换档段，手工跑无此
+# env 则 fail-open 不回填。
+export AI_DAILY_RUN_START_EPOCH="$WALL_START"
 WALL_SOFT_LIMIT_S=1800
 # 9/13 P0-1 / 编排器阶梯：每档探针几次；DeepSeek 连打几次再换级；快死阈值 600s。
 PROBE_RETRY=3
@@ -246,7 +250,7 @@ fi
   WALL_S=$(( WALL_END - WALL_START ))
   printf 'WALLCLOCK real=%dm%02ds soft_target=30m' "$(( WALL_S / 60 ))" "$(( WALL_S % 60 ))"
   if [ "$WALL_S" -gt "$WALL_SOFT_LIMIT_S" ]; then
-    printf ' → OVER by %dm（realm 累加器低估，见运维笔记 P1）\n' "$(( (WALL_S - WALL_SOFT_LIMIT_S) / 60 ))"
+    printf ' → OVER by %dm（meta.wallclock.real_s=宿主实测总墙钟；raw/calibrated 仅 workflow 内段）\n' "$(( (WALL_S - WALL_SOFT_LIMIT_S) / 60 ))"
   else
     printf ' → within\n'
   fi

@@ -25,6 +25,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { makeLedgerEntry, pruneLedger } from './ledger.mjs'
+import { isJunkClaim } from './claim-gate.mjs'
 import { normURL } from './date-utils.mjs'
 import { runPoster } from './generate-poster.mjs'
 import { isCliMain } from './cli-main.mjs'
@@ -93,6 +94,9 @@ export const isProdOutDir = (outDir, prefix) => {
 
 /**
  * 从 claims payload 提取账本条目（confirmed 全记；major = window==='major-out'）。
+ * 10-05 P2 记录端兜底：confirmed 已过 workflow 声明质量门，但账本是 60 天跨天状态——任何
+ * 绕过路径（历史回归/手工构造 result）写入的垃圾条目，次日都会经昨日话题追踪渗入报告。
+ * 与 ledger.mjs parseReportedLedger 的消费端过滤构成进出两端防线。
  * @param {string} claimsJson claims payload 字符串
  * @param {string} date YYYY-MM-DD（条目 day）
  * @returns {object[]} ledger entry 数组（makeLedgerEntry shape）
@@ -100,7 +104,9 @@ export const isProdOutDir = (outDir, prefix) => {
 export const ledgerEntriesFromClaims = (claimsJson, date) => {
   const parsed = JSON.parse(claimsJson)
   const confirmed = (parsed && Array.isArray(parsed.confirmed)) ? parsed.confirmed : []
-  return confirmed.map(c => makeLedgerEntry(date, c.source || '', c.claim || '', c.window === 'major-out'))
+  return confirmed
+    .filter(c => !isJunkClaim(c))
+    .map(c => makeLedgerEntry(date, c.source || '', c.claim || '', c.window === 'major-out'))
 }
 
 /**
@@ -135,6 +141,45 @@ export const recordLedger = (ledgerPath, entries, date) => {
   fs.writeFileSync(tmp, JSON.stringify(existing, null, 1))
   fs.renameSync(tmp, ledgerPath)
   return { ledgerPath, total: existing.length, added }
+}
+
+/**
+ * runner 起始 epoch（AI_DAILY_RUN_START_EPOCH，run-daily.sh/win.sh export）→ 至今秒数。
+ * env 缺失 / 非法 / 越界（≤0 或 >24h，手工跑或脏值）→ null（fail-open 不回填）。
+ * 10-05 P1 根因修复的宿主半边：workflow realm 无时钟（Date 静态拒绝），meta.wallclock 的
+ * raw/calibrated 只是 workflow 内段读数（10-05 实测 realm 2383s vs 真实 3661s，探针换档的
+ * 25 分钟完全不可见）；真实总墙钟只有 runner（起始）+ 宿主（此刻）能测。
+ */
+export const realWallSecondsFromEnv = envVal => {
+  const start = Number(envVal)
+  if (!Number.isFinite(start) || start <= 0) return null
+  const s = Math.round(Date.now() / 1000) - start
+  return (s > 0 && s <= 86400) ? s : null
+}
+
+/**
+ * 记账后对**已落盘**的 meta 文件做 tmp+rename 原子 read-modify-write：回写 ledger 记账状态、
+ * 本轮实际新增记账条数（ledger_recorded_count，10-05 P3——模板侧 ledger_injected 是注入候选数，
+ * 与新增记账数是两回事，不得混用一名）与真实总墙钟 wallclock.real_s（见 realWallSecondsFromEnv）。
+ * @returns {boolean} 是否写成功（失败只告警，不影响产物与账本）
+ */
+export const patchMetaAfterLedger = (metaPath, { ledgerStatus, ledgerPath, ledgerAdded, realS }) => {
+  try {
+    const metaObj = JSON.parse(fs.readFileSync(metaPath, 'utf8'))
+    metaObj.ledger_recorded = ledgerStatus
+    metaObj.ledger_path = ledgerPath || null
+    if (typeof ledgerAdded === 'number') metaObj.ledger_recorded_count = ledgerAdded
+    if (typeof realS === 'number' && realS > 0) {
+      metaObj.wallclock = Object.assign({}, metaObj.wallclock, { real_s: realS })
+    }
+    const tmp = metaPath + '.tmp'
+    fs.writeFileSync(tmp, JSON.stringify(metaObj, null, 1))
+    fs.renameSync(tmp, metaPath)
+    return true
+  } catch (e) {
+    console.error(`LEDGER-WARN meta 回写 ledger_recorded 失败（不影响产物与账本）: ${e && e.message}`)
+    return false
+  }
 }
 
 /**
@@ -214,6 +259,7 @@ async function cliMain() {
   for (const fp of written) console.log(`WROTE ${fp} (${fs.statSync(fp).size} bytes)`)
 
   let ledgerStatus = 'skipped'
+  let ledgerAdded = null
   if (!isProd && !ledgerOverride) {
     console.log(`LEDGER-SKIP non-production outDir（${resolvedOut}）不在 DallyReport 前缀下；烟测不记账，如需强制用 --ledger`)
   } else {
@@ -221,23 +267,23 @@ async function cliMain() {
       const entries = ledgerEntriesFromClaims(spec.payloads.claims, spec.date)
       const { total, added } = recordLedger(ledgerPath, entries, spec.date)
       ledgerStatus = 'recorded'
+      ledgerAdded = added
       console.log(`LEDGER-RECORDED ${ledgerPath} total=${total} added=${added}`)
     } catch (e) {
       ledgerStatus = 'failed'
       console.error(`LEDGER-WARN 记账失败（产物已落盘不受影响）: ${e && e.message}`)
     }
   }
-  try {
-    const metaPath = path.join(expand(spec.outDir), `${spec.date}.meta.json`)
-    const metaObj = JSON.parse(fs.readFileSync(metaPath, 'utf8'))
-    metaObj.ledger_recorded = ledgerStatus
-    metaObj.ledger_path = (!isProd && !ledgerOverride) ? null : ledgerPath
-    const tmp = metaPath + '.tmp'
-    fs.writeFileSync(tmp, JSON.stringify(metaObj, null, 1))
-    fs.renameSync(tmp, metaPath)
-  } catch (e) {
-    console.error(`LEDGER-WARN meta 回写 ledger_recorded 失败（不影响产物与账本）: ${e && e.message}`)
-  }
+  // 真实总墙钟回填（10-05 P1 根因修复）：runner 起始 epoch 经 env 注入（fail-open：手工跑无 env
+  // 就不回填），finalize 宿主时钟实测——realm 累加器看不到探针/换档段，见 patchMetaAfterLedger。
+  const realS = realWallSecondsFromEnv(process.env.AI_DAILY_RUN_START_EPOCH)
+  if (realS != null) console.log(`WALLCLOCK-REAL real=${realS}s（runner 起始 → finalize，宿主实测 → meta.wallclock.real_s）`)
+  patchMetaAfterLedger(path.join(expand(spec.outDir), `${spec.date}.meta.json`), {
+    ledgerStatus,
+    ledgerPath: (!isProd && !ledgerOverride) ? null : ledgerPath,
+    ledgerAdded,
+    realS,
+  })
 
   // P4: 统一产物交付与高清长图渲染闭环
   if (isProd || ledgerOverride) {

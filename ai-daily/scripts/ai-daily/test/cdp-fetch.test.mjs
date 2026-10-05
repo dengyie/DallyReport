@@ -157,7 +157,10 @@ function runCli(args, { mockCdp = false, bodyText = ARTICLE_TEXT } = {}) {
     const { CDP_DEFAULTS: CD } = await import('${HERE_URL}/../cdp-core.mjs')
     CD.pollIntervalMs = 1
     CD.requestTimeoutMs = 500
-    CD.pollMaxMs = 1000
+    // pollMaxMs=60：空正文会轮询到上限，意图是 1ms×60≈60ms。10-05 实证 Windows 定时器分辨率
+    // 15.6ms × 每迭代两个链式定时器（mock setTimeout(0) + poll setTimeout(1)）≈ 31ms/迭代——
+    // 旧值 1000 → 31s 撞 execFileSync 30s 杀（stderr 空丢失，测试假死）。60×31ms≈1.9s 仍稳。
+    CD.pollMaxMs = 60
     const BODY = ${JSON.stringify(bodyText)}
     globalThis.fetch = async (url) => {
       const u = String(url)

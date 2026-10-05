@@ -148,7 +148,7 @@ test('buildCitationMap：跨 section 按首次出现序编号、URL href 去重�
   assert.equal(cm.map.get('https://x.ai/news'), 1)
   assert.equal(cm.map.get('https://t.co/'), 2, 'href 归一化（t.co → 尾斜杠）' )
   assert.equal(cm.map.get('https://openai.com/index/a'), 3)
-  assert.deepEqual(cm.list[0], { n: 1, url: 'https://x.ai/news', title: 'x.ai' })
+  assert.deepEqual(cm.list[0], { n: 1, url: 'https://x.ai/news', title: 'x.ai', unfetched: false }, 'fetchedUrls 缺省 → 全部视为已核（10-05 P3 新增字段）')
   assert.equal(cm.list[2].title, 'openai.com')
   // 空输入 / 单 item 列表
   const empty = buildCitationMap([])
@@ -172,6 +172,20 @@ test('完整版：来源角标化 [n] + 末尾「### 参考来源」节 + 多角
   const noSrc = renderMarkdown({ date: 'd', window: 'w', report: { oneLiner: 'o', execSummary: 'e', sections: [{ board: 'x', title: 'T', items: [{ title: '无源', summary: '无源摘要。', sources: [] }] }] }, coverage: [], windowMisses: [], degraded: [] })
   assert.ok(noSrc.includes('无源摘要。\n'))
   assert.ok(!noSrc.includes('### 参考来源'), '无 URL 参考时不出现空参考节')
+})
+
+test('buildCitationMap/renderMarkdown：fetchedUrls 之外的引用标 〔未抓取〕（10-05 P3）', () => {
+  const sections = [{ board: 'labs', title: 'T', items: [{ title: 'a', summary: '摘要。', sources: ['https://github.com/antirez/ds4', 'https://www.anthropic.com/claude-sonnet-5-5'] }] }]
+  // 10-05 实证：major-out 的 anthropic.com/claude-sonnet-5-5 是发现期提供、从未抓取的链接
+  const fetched = new Set(['https://github.com/antirez/ds4'])
+  const cm = buildCitationMap(sections, fetched)
+  assert.deepEqual(cm.list.map(c => c.unfetched), [false, true], '已抓取/未抓取分账（normURL 归一后对比）')
+  const md = renderMarkdown({ date: '2026-10-05', window: 'w', report: { oneLiner: 'o', execSummary: 'e', sections }, coverage: [], windowMisses: [], degraded: [], fetchedUrls: fetched })
+  assert.ok(md.includes('[2] [www.anthropic.com](<https://www.anthropic.com/claude-sonnet-5-5>)〔未抓取〕'), '未抓取链接诚实标注')
+  const ghLine = md.split(String.fromCharCode(10)).find(l => l.includes('github.com/antirez/ds4'))
+  assert.ok(ghLine && !ghLine.includes('未抓取'), '已抓取链接不标注')
+  const mdNoParam = renderMarkdown({ date: 'd', window: 'w', report: { oneLiner: 'o', execSummary: 'e', sections }, coverage: [], windowMisses: [], degraded: [] })
+  assert.ok(!mdNoParam.includes('〔未抓取〕'), 'fetchedUrls 缺省 → 不标注（向后兼容/降级版）')
 })
 
 test('完整版：frontmatter + 素材窗口横幅（meta 可选参数）', () => {

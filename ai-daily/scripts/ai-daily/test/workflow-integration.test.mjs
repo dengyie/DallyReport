@@ -395,7 +395,11 @@ test('模板：账本硬过滤在 allocateFetchBudget 之前，fail-open 旗标�
   assert.match(TPL, /LEDGER-SKIP 无 args\.reportedLedger/, '无账本 fail-open 分支在场')
   assert.match(TPL, /ledger_unavailable/, '无账本 → degraded 旗标如实上报')
   assert.match(TPL, /reported_deduped: reportedDeduped/, 'meta 记账 reported_deduped')
-  assert.match(TPL, /ledger_entries: REPORTED_LEDGER \? REPORTED_LEDGER\.length : 0/, 'meta 记账 ledger_entries')
+  assert.match(TPL, /ledger_injected: REPORTED_LEDGER \? REPORTED_LEDGER\.length : 0/, 'meta 记账 ledger_injected（10-05 P3 改名：注入候选数≠新增记账数）')
+  assert.match(TPL, /fetchedUrls: _fetchedUrlSet/, 'renderMarkdown 传入抓取期 URL 全集（10-05 P3 参考来源〔未抓取〕标注数据面）')
+  assert.match(TPL, /fetch_agent_errors: fetchAgentErrors/, 'meta 记账 fetch_agent_errors（10-05 P3：抓取 null 不再静默蒸发）')
+  assert.match(TPL, /FETCH-AGENT-NULL /, '抓取代理无产出日志在场（journal 逐条可溯）')
+  assert.match(TPL, /for \(const c of \(s\.claims \|\| \[\]\)\) if \(c\.sourceUrl\) _fetchedUrlSet\.add\(normURL\(c\.sourceUrl\)\)/, 'claimUrl 也进 fetchedUrlSet（索引页提取的真实文章 URL）')
 })
 
 test('模板：major-out 注入带 MAJOR-DUP 指纹互斥 + 已报道种子退役', () => {

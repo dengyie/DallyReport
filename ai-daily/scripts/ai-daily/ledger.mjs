@@ -13,6 +13,7 @@
 
 import { normURL, normalizeDate, daysBetween } from './date-utils.mjs'
 import { clusterTokenize } from './cluster.mjs'
+import { isJunkClaim } from './claim-gate.mjs'
 
 // 硬匹配阈值（保守取向：宁可漏放——软网 report prompt 还有一道；不可误杀——同名家族条目如
 // 「Gemini 3.8 Flash」vs「Gemini 3.8 Flash Cyber」overlap 天然偏高，靠「共享 ≥5 token」压误杀）。
@@ -41,13 +42,19 @@ const _isDistinctiveAscii = t => {
 }
 
 // 消费端入口：宿主偶发把账本当 JSON 字符串注入；空/坏形态 → null（fail-open）。
+// 10-05 P2 根因修复（10-05 日报实证）：质量门上线**前**写入的账本条目（10-04「image 580×286
+// 7.97 KB」）经 buildYesterdayTopics 原样渲染进次日报告——声明质量门只拦今日 claim，拦不住
+// 已入库的历史毒条目。入口统一卫生过滤（isJunkClaim 判已报道条目的 title）：一处过滤保护
+// 全部消费者（fetch 硬过滤 / 种子退役 / report 软网 / 昨日话题追踪）。title 缺失不判（fail-open，
+// 与本模块其余守卫一致）；全被滤掉 → null（等价无账本，degraded 旗标如实上报）。
 export const parseReportedLedger = raw => {
   let v = raw
   if (typeof v === 'string') {
     try { v = JSON.parse(v) } catch { return null }
   }
   if (!Array.isArray(v) || !v.length) return null
-  const ok = v.filter(e => e && typeof e === 'object' && typeof e.day === 'string' && Array.isArray(e.tokens))
+  const ok = v.filter(e => e && typeof e === 'object' && typeof e.day === 'string' && Array.isArray(e.tokens)
+    && !(e.title && isJunkClaim({ claim: e.title })))
   return ok.length ? ok : null
 }
 

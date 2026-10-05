@@ -10,7 +10,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { extractPayloads, finalizePayloads, expand, recordLedger } from '../finalize.mjs'
+import { extractPayloads, finalizePayloads, expand, recordLedger, ledgerEntriesFromClaims, patchMetaAfterLedger, realWallSecondsFromEnv } from '../finalize.mjs'
 import { makeLedgerEntry } from '../ledger.mjs'
 
 const makeEntry = () => makeLedgerEntry('2026-09-19', 'https://example.com/a', '示例事件 A', false)
@@ -278,4 +278,46 @@ test('F3：--out 作为末参（无值）→ 回落 result 自带 outDir，不�
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
+})
+
+// ─── 10-05 P1/P2/P3：记录端兜底过滤 + meta 回写（ledger_recorded_count / wallclock.real_s）───
+test('ledgerEntriesFromClaims：记录端 isJunkClaim 兜底（10-05 P2）', () => {
+  const claimsJson = JSON.stringify({ confirmed: [
+    { claim: 'The antirez/ds4 README describes DwarfStar as a native inference engine optimized for DeepSeek V4 Flash', source: 'https://github.com/antirez/ds4' },
+    { claim: 'image 580×286 7.97 KB', source: 'https://linux.do/t/2979428' },
+  ] })
+  const entries = ledgerEntriesFromClaims(claimsJson, '2026-10-05')
+  assert.equal(entries.length, 1, '垃圾声明不进账本（进出两端防线的记录端半边）')
+  assert.match(entries[0].title, /DwarfStar/)
+})
+
+test('patchMetaAfterLedger：原子回写 ledger_recorded/ledger_recorded_count/wallclock.real_s；失败返回 false 不抛', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'finalize-patch-'))
+  const metaPath = path.join(dir, '2026-10-05.meta.json')
+  fs.writeFileSync(metaPath, JSON.stringify({ date: '2026-10-05', wallclock: { raw_s: 2383, calibrated_s: 2408 } }))
+  try {
+    assert.equal(patchMetaAfterLedger(metaPath, { ledgerStatus: 'recorded', ledgerPath: 'C:/x/ledger.json', ledgerAdded: 7, realS: 3661 }), true)
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'))
+    assert.equal(meta.ledger_recorded, 'recorded')
+    assert.equal(meta.ledger_recorded_count, 7, '本轮新增记账数（10-05 P3，ledger_injected 是注入候选数不得混用）')
+    assert.equal(meta.wallclock.real_s, 3661, '宿主实测总墙钟回填（10-05 P1）')
+    assert.equal(meta.wallclock.raw_s, 2383, 'realm 内段读数原样保留')
+    assert.equal(patchMetaAfterLedger(metaPath, { ledgerStatus: 'skipped', ledgerPath: null, ledgerAdded: null, realS: null }), true, 'skip 路径：计数/realS 缺省不写字段')
+    const meta2 = JSON.parse(fs.readFileSync(metaPath, 'utf8'))
+    assert.equal(meta2.ledger_recorded_count, 7, 'skip 重入不抹掉已回写字段')
+    assert.equal(meta2.wallclock.real_s, 3661)
+    assert.equal(patchMetaAfterLedger(path.join(dir, 'missing.meta.json'), { ledgerStatus: 'recorded' }), false, 'meta 缺失 → false 不抛')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('realWallSecondsFromEnv：合法 epoch → 秒数；缺失/非法/越界 → null（fail-open）', () => {
+  const nowS = Math.floor(Date.now() / 1000)
+  assert.ok(Math.abs(realWallSecondsFromEnv(String(nowS - 3661)) - 3661) <= 1, '秒级取整竞态容忍 ±1s')
+  assert.equal(realWallSecondsFromEnv(undefined), null, '手工跑无 env 不回填')
+  assert.equal(realWallSecondsFromEnv('garbage'), null)
+  assert.equal(realWallSecondsFromEnv('0'), null)
+  assert.equal(realWallSecondsFromEnv(String(nowS + 100)), null, '未来时刻（脏值）')
+  assert.equal(realWallSecondsFromEnv(String(nowS - 90000)), null, '>24h 越界')
 })
