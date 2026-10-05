@@ -284,10 +284,10 @@ test('isProdOutDir：只认生产前缀，不在真实生产目录落盘', () =>
 })
 
 test('isProdOutDir（10-03 P0）：Windows vault 生产路径命中（旧版 Mac iCloud 单前缀恒 false → 生产 LEDGER-SKIP）', () => {
-  assert.equal(isProdOutDir('E:/profile/note/note/AI/DallyReport/2026-10-03'), true, 'Windows 生产日期目录命中')
-  assert.equal(isProdOutDir('E:\\profile\\note\\note\\AI\\DallyReport\\2026-10-03'), true, '反斜杠形态同样命中（path.resolve 归一）')
-  assert.equal(isProdOutDir('E:/profile/note/note/AI/DallyReport'), true, '生产根目录命中')
-  assert.equal(isProdOutDir('E:/profile/note/note/AI/DallyReport-other/x'), false, '同前缀异目录不误命中')
+  assert.equal(isProdOutDir('E:/profile/note/note/Note/AI/DallyReport/2026-10-03'), true, 'Windows 生产日期目录命中（10-06 迁入 Note/）')
+  assert.equal(isProdOutDir('E:\\profile\\note\\note\\Note\\AI\\DallyReport\\2026-10-03'), true, '反斜杠形态同样命中（path.resolve 归一）')
+  assert.equal(isProdOutDir('E:/profile/note/note/Note/AI/DallyReport'), true, '生产根目录命中')
+  assert.equal(isProdOutDir('E:/profile/note/note/Note/AI/DallyReport-other/x'), false, '同前缀异目录不误命中')
   assert.equal(isProdOutDir(PROD_DALLYREPORT_PREFIXES[1]), true, 'Mac iCloud 兜底前缀仍命中（历史对账）')
 })
 
@@ -357,7 +357,7 @@ test('isProdOutDir（review S-⑤）：AI_DAILY_PROD_PREFIX 惰性读取——en
     import('node:url').then(({ pathToFileURL }) => import(pathToFileURL(${modPath}).href)).then(m => {
       console.log(JSON.stringify({
         hit: m.isProdOutDir(${JSON.stringify(dir + '/out')}),
-        listUntouched: m.PROD_DALLYREPORT_PREFIXES[0] === 'E:/profile/note/note/AI/DallyReport',
+        listUntouched: m.PROD_DALLYREPORT_PREFIXES[0] === 'E:/profile/note/note/Note/AI/DallyReport',
       }))
     })
   `, true))

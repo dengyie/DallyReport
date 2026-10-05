@@ -1,6 +1,6 @@
 ---
 name: ai-daily
-description: 生成 AI 每日日报（自动每天 08:40 由 Windows 任务计划程序触发，也可手动 /ai-daily [--date YYYY-MM-DD]）。确定性覆盖 10 大板块 × 必查厂商花名册，grok-search/X/RSS 发现，对抗式核查，产出 E:/profile/note/note/AI/DallyReport/<date>/YYYY-MM-DD-ai日报.md + 原始数据存档。
+description: 生成 AI 每日日报（自动每天 08:40 由 Windows 任务计划程序触发，也可手动 /ai-daily [--date YYYY-MM-DD]）。确定性覆盖 10 大板块 × 必查厂商花名册，grok-search/X/RSS 发现，对抗式核查，产出 E:/profile/note/note/Note/AI/DallyReport/<date>/YYYY-MM-DD-ai日报.md + 原始数据存档。
 ---
 
 # AI 每日日报（ai-daily）
@@ -17,7 +17,7 @@ description: 生成 AI 每日日报（自动每天 08:40 由 Windows 任务计�
 
 ### 1. 解析参数
 - 读取 `args` 或指令中的 `--date YYYY-MM-DD`；缺省 = 今天（`date +%F`）。
-- `--force`：允许覆盖当日已存在的产物（默认若 `E:/profile/note/note/AI/DallyReport/<date>/<date>-ai日报.md` 已存在则询问是否重跑）。
+- `--force`：允许覆盖当日已存在的产物（默认若 `E:/profile/note/note/Note/AI/DallyReport/<date>/<date>-ai日报.md` 已存在则询问是否重跑）。
 
 ### 2. 计算日期窗口
 - 报告日 T（即 `--date`）；新闻窗口 = **[T-2, T]**（覆盖前两天到当天）。
@@ -25,7 +25,7 @@ description: 生成 AI 每日日报（自动每天 08:40 由 Windows 任务计�
 - 工作目录固定为 Obsidian vault 根 `E:/profile/note/note`。
 
 ### 3. 准备输出目录
-- 生产路径：`E:/profile/note/note/AI/DallyReport/<date>/`（Obsidian vault 内）。
+- 生产路径：`E:/profile/note/note/Note/AI/DallyReport/<date>/`（Obsidian vault 内）。
 - `outDir` = 该路径（`date` 替换为报告日）。
 
 ### 3.4. run 前 build 产物检查（部署纪律）
@@ -44,7 +44,7 @@ description: 生成 AI 每日日报（自动每天 08:40 由 Windows 任务计�
 {
   "date": "YYYY-MM-DD",
   "window": { "from": "YYYY-MM-DD", "to": "YYYY-MM-DD" },
-  "outDir": "E:/profile/note/note/AI/DallyReport/YYYY-MM-DD",
+  "outDir": "E:/profile/note/note/Note/AI/DallyReport/YYYY-MM-DD",
   "maxFetch": 16,
   "maxVerify": 16,
   "agentTimeoutMs": 360000,
@@ -84,14 +84,14 @@ description: 生成 AI 每日日报（自动每天 08:40 由 Windows 任务计�
 
 ### 5. 收尾与汇报
 - 若 Workflow 返回 `artifacts` 且含 `payloads`：**4 个产物用 finalize 确定性落盘**——
-  `node E:/code/DallyReport/ai-daily/scripts/ai-daily/finalize.mjs <workflow-result路径> --out "E:/profile/note/note/AI/DallyReport/<date>"`。finalize 从 result 的
+  `node E:/code/DallyReport/ai-daily/scripts/ai-daily/finalize.mjs <workflow-result路径> --out "E:/profile/note/note/Note/AI/DallyReport/<date>"`。finalize 从 result 的
   `payloads.{claims,sources,meta,md}` 逐字节写入 `<date>.verified-claims.json`、
   `<date>.sources.json`、`<date>.meta.json`、`<date>-ai日报.md`，缺任一字段报错非 0 退出（可一键重放、可单测，
   不再依赖主会话手工 Write——8/21 直跑 Workflow 工具时曾因跳过手工落盘而缺失产物）。md 由 workflow 内确定性渲染
   （render-md 模块）产出，report 成功即完整版、失败即降级版，**必然成功**，不再有 mdWriter 代理。
   - **headless HOST-FINALIZE（09-21）**：编排器 422/Connection lost 死在 Write 前时，`run-daily-win.sh` 在 artifact-check **之前**跑 `node <REPO_AI>/scripts/ai-daily/host-finalize.mjs --date <T> --out <outDir> --since-epoch <WALL_START>`——从 workflow 会话目录 `wf_*.json` 找回本次 completed payloads 落盘。报告已在盘上则 `HOST-FINALIZE-SKIP report_exists`。烟测 /tmp json 对不上生产 outDir，不会误收。
   - 直跑 Workflow 工具（非 skill 入口）时，workflow result 落在 task 的 output 文件，用上述 finalize 命令即可落盘。
-- 确认 `E:/profile/note/note/AI/DallyReport/<date>/<date>-ai日报.md` 等文件存在，向用户给出：
+- 确认 `E:/profile/note/note/Note/AI/DallyReport/<date>/<date>-ai日报.md` 等文件存在，向用户给出：
   - 统计：`stats`（抓取 URL 数 / 提取 claim 数 / 核查数 / 确认数 / 否决数 / **重大超窗事实数 `major_out`**——`[窗口外·重大]` 行业里程碑，非窗口内、未经投票，但应出现在正文/头条并如实标注）
   - 头条一句话：`headline`
   - 执行摘要：`summary`
@@ -103,15 +103,15 @@ description: 生成 AI 每日日报（自动每天 08:40 由 Windows 任务计�
     `## 📊 数据概览`（漏斗表：社区预抓帖 → 发现链接 → 抓取正文 → 提取声明 → 核查确认/否决 → 纳入正文 → 话题组，来自 meta.stats 扩展字段 community_topics/claims_extracted/topic_groups/included）、
     `## 🧭 今日技术趋势`（report.trend 收尾综述段，有观点非流水账）。
     社区热度：mint 直铸 claim 带 `heat`（浏览/赞/回复），report 素材行「社区热度：浏览 N · 赞 N · 回复 N」——正文措辞写「社区」，**不点名论坛站名**（既有纪律）。
-- 若 Workflow 返回 `error` 或产物缺失：降级处理，产出一份"未核查日报"到 `E:/profile/note/note/AI/DallyReport/<date>/<date>-ai日报.md`（标注降级原因），并保留已归档 JSON；如实向用户说明失败点。
+- 若 Workflow 返回 `error` 或产物缺失：降级处理，产出一份"未核查日报"到 `E:/profile/note/note/Note/AI/DallyReport/<date>/<date>-ai日报.md`（标注降级原因），并保留已归档 JSON；如实向用户说明失败点。
 - 不要向用户重复贴全文大 JSON；贴 md 文件路径 + 摘要即可。
 - **生成完成后清理本会话开起的浏览器/进程**：若本次生成过程中，我（编排器）为开发/调试而调用过 Playwright MCP / 启动过浏览器或 node 进程，则收尾时**只关闭我自己开起的那几个**（精确按本会话子进程/本会话写入的标记关闭，或用 `pkill -f 'playwright-mcp.*<本会话唯一标识>'`）。**绝不**去关用户自己开的 Chrome/浏览器/其他 Claude Code 会话的工具进程——那些不属于日报系统。关闭前用 `ps -o pid,etime,lstart,command` 复核该进程确实是本会话拉起、且不是其它会话/用户正在用的，再终止。本条为流程纪律：生成完日报即清理自身资源，不遗留占用。
 
 ## 产出物命名
-- `E:/profile/note/note/AI/DallyReport/YYYY-MM-DD/YYYY-MM-DD-ai日报.md`
-- `E:/profile/note/note/AI/DallyReport/YYYY-MM-DD/YYYY-MM-DD.verified-claims.json`
-- `E:/profile/note/note/AI/DallyReport/YYYY-MM-DD/YYYY-MM-DD.sources.json`
-- `E:/profile/note/note/AI/DallyReport/YYYY-MM-DD/YYYY-MM-DD.meta.json`
+- `E:/profile/note/note/Note/AI/DallyReport/YYYY-MM-DD/YYYY-MM-DD-ai日报.md`
+- `E:/profile/note/note/Note/AI/DallyReport/YYYY-MM-DD/YYYY-MM-DD.verified-claims.json`
+- `E:/profile/note/note/Note/AI/DallyReport/YYYY-MM-DD/YYYY-MM-DD.sources.json`
+- `E:/profile/note/note/Note/AI/DallyReport/YYYY-MM-DD/YYYY-MM-DD.meta.json`
 
 ## 手动补跑示例
 ```

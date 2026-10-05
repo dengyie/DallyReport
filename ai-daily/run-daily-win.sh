@@ -5,7 +5,7 @@
 # 产物自检、墙钟审计、日志轮转。差异仅运行环境：
 #   - 项目 cwd = Obsidian vault 根 E:/profile/note/note（.claude/workflows + .claude/skills 已拷入）
 #   - 宿主 CLI（linuxdo-prefetch / artifact-check / 探针文件）用仓库绝对路径 E:/code/DallyReport/ai-daily
-#   - 产物目录 E:/profile/note/note/AI/DallyReport/<date>/，artifact-check 显式传 --dir（默认值已按平台解析：win32 生产根 / Darwin iCloud，AI_DAILY_REPORT_DIR 可覆盖）
+#   - 产物目录 E:/profile/note/note/Note/AI/DallyReport/<date>/（10-06 迁入 Note/ 与主系统同根，海报 ai-daily.png 防撞名），artifact-check 显式传 --dir（默认值已按平台解析：win32 生产根 / Darwin iCloud，AI_DAILY_REPORT_DIR 可覆盖）
 #   - 运行时文件 C:/Users/mango/.ai-daily（账本 / 预抓 JSON / 日志）——统一用盘符路径书写，
 #     因为这些路径会嵌进 claude -p 的 prompt 由 Read 工具解析，Git Bash 的 /c/ 形式在 Windows 端不可解析
 #   - notify() 由 macOS osascript 改为 PowerShell WinRT toast（10-03 §12-④，失败回落纯日志）
@@ -37,7 +37,7 @@ cd "$VAULT" || { echo "$STAMP FAIL cd-vault exit=$?" >> "$LOG"; exit 1; }
 TODAY="$(date '+%F')"
 # P0 防御：日期取不到（date 不可达/异常）宁可早退，也不用空 TODAY 构造坏产物路径。
 [ -n "$TODAY" ] || { echo "$STAMP FAIL date-unavailable → early exit（不空跑）" >> "$LOG"; exit 1; }
-OB_DIR="${VAULT}/AI/DallyReport/${TODAY}"
+OB_DIR="${VAULT}/Note/AI/DallyReport/${TODAY}"
 REPORT="${OB_DIR}/${TODAY}-ai日报.md"
 LEDGER="${LOGDIR}/published-ledger.json"
 # 8/31 P1-② 真实墙钟起点（epoch 秒）。realm 内累加器不可信，唯一可信墙钟在宿主侧。
@@ -222,7 +222,7 @@ fi
 
   # 8/31 P4：产物自检由宿主 Node 执行（shell 在无头上下文读 iCloud 会被拒的历史；Windows 上
   # 直接显式传 --dir，不依赖其 Mac 默认路径）。摘要含 md_bytes / confirmed / degraded / killed。
-  if node "$REPO_AI/scripts/ai-daily/artifact-check.mjs" --date "$TODAY" --dir "${VAULT}/AI/DallyReport"; then
+  if node "$REPO_AI/scripts/ai-daily/artifact-check.mjs" --date "$TODAY" --dir "${VAULT}/Note/AI/DallyReport"; then
     :
   else
     echo "（自检判定产物缺失 · claude rc=$RC）"

@@ -31,14 +31,16 @@ export const claudeProjectsDir = (cwd = process.cwd()) =>
 /** `~/.ai-daily`——运行时文件（run-daily.log / published-ledger.json / linuxdo-prefetch.json）。 */
 export const aiDailyHome = () => process.env.AI_DAILY_HOME || path.join(os.homedir(), '.ai-daily')
 
-// ─── 生产日报根（AI/DallyReport）单一真源（10-04 F-1 收口）───
+// ─── 生产日报根（Note/AI/DallyReport）单一真源（10-04 F-1 收口；10-06 迁移 Note/）───
 // artifact-check / generate-poster / finalize 三处宿主 CLI 曾各写一份「win32 生产根 + Darwin
 // iCloud 兜底」字面量（artifact-check DEFAULT_DIR、generate-poster defaultReportRoot、
 // finalize PROD_DALLYREPORT_PREFIXES）→ vault 迁移要改三处，漏一处即假 FAIL / 错根。
 // 收敛到本模块；env 覆盖口子沿用 AI_DAILY_REPORT_DIR（手动/CI 钉死生产根）。
-export const WIN_PROD_DALLYREPORT_ROOT = 'E:/profile/note/note/AI/DallyReport'
+// 10-06：生产根从 vault 根 AI/DallyReport 迁入 Note/AI/DallyReport（与 DallyReport 主系统同目录、
+// 海报改名 ai-daily.png 防撞名）——用户裁决「通过 obsidian 同步下日报」。
+export const WIN_PROD_DALLYREPORT_ROOT = 'E:/profile/note/note/Note/AI/DallyReport'
 export const macProdDallyReportRoot = () =>
-  path.join(os.homedir(), 'Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-note/AI/DallyReport')
+  path.join(os.homedir(), 'Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-note/Note/AI/DallyReport')
 
 /** 三级解析：AI_DAILY_REPORT_DIR env 覆盖 → win32 生产 vault 根 → Darwin iCloud 兜底（历史对账）。 */
 export const prodDallyReportRoot = () =>

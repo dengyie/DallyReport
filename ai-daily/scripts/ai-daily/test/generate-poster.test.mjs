@@ -13,7 +13,7 @@ test('generate-poster: skips cleanly when no headlines exist', async () => {
   fs.rmSync(tmp, { recursive: true, force: true })
 })
 
-test('generate-poster: 成功路径——海报 ok 后把 ![[AI.png]] 嵌入主标题下（deps 全注入，不烧生图 API）', async () => {
+test('generate-poster: 成功路径——海报 ok 后把 ![[ai-daily.png]] 嵌入主标题下（deps 全注入，不烧生图 API）', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'poster-ok-'))
   fs.writeFileSync(path.join(tmp, '2026-09-15.verified-claims.json'), JSON.stringify({
     confirmed: [{ claim: 'OpenAI 发布 o5，性能翻倍' }, { claim: '带 http 的条目应被跳过 https://x.com/a' }],
@@ -29,15 +29,16 @@ test('generate-poster: 成功路径——海报 ok 后把 ![[AI.png]] 嵌入主�
   assert.equal(res.ok, true)
   assert.equal(gotCfg.headlines.length, 1, '含 http 的 claim 不进海报标题')
   assert.equal(gotCfg.headlines[0].title, 'OpenAI 发布 o5，性能翻倍')
-  assert.equal(gotCfg.cfg.obsidianDir, tmp, 'outDir 基名≠date（tmp 测试）→ obsidianDir=outDir 本身，AI.png 与日报同目录')
+  assert.equal(gotCfg.cfg.obsidianDir, tmp, 'outDir 基名≠date（tmp 测试）→ obsidianDir=outDir 本身，海报与日报同目录')
+  assert.equal(gotCfg.cfg.posterFile, 'ai-daily.png', '10-06 共目录防撞名：posterFile 覆盖口必须传入（生成期即异名）')
   const after = fs.readFileSync(path.join(tmp, '2026-09-15-ai日报.md'), 'utf8')
-  assert.match(after, /# 🤖 AI 日报[^\n]*\n\n!\[\[AI\.png\]\]/, '嵌入紧跟主标题后')
+  assert.match(after, /# 🤖 AI 日报[^\n]*\n\n!\[\[ai-daily\.png\]\]/, '嵌入紧跟主标题后')
   fs.rmSync(tmp, { recursive: true, force: true })
 })
 
-test('generate-poster: 幂等——已有 ![[AI.png]] 的 md 不重复嵌入；生图失败不写 md', async () => {
+test('generate-poster: 幂等——已有 ![[ai-daily.png]] 的 md 不重复嵌入；生图失败不写 md', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'poster-idem-'))
-  const md = '# 🤖 AI 日报 · 2026-09-15\n\n![[AI.png]]\n\n正文\n'
+  const md = '# 🤖 AI 日报 · 2026-09-15\n\n![[ai-daily.png]]\n\n正文\n'
   fs.writeFileSync(path.join(tmp, '2026-09-15-ai日报.md'), md)
   fs.writeFileSync(path.join(tmp, '2026-09-15.verified-claims.json'), JSON.stringify({ confirmed: [{ claim: 'A 条新闻' }] }))
   const res = await runPoster(tmp, '2026-09-15', { generateAiPoster: async () => ({ ok: true, file: '/tmp/x/AI.png' }) })

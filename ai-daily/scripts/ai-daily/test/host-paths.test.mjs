@@ -86,7 +86,7 @@ test('prodDallyReportRoot：AI_DAILY_REPORT_DIR 覆盖优先；默认分支平�
     delete process.env.AI_DAILY_REPORT_DIR
     const root = prodDallyReportRoot()
     if (process.platform === 'win32') {
-      assert.equal(root, 'E:/profile/note/note/AI/DallyReport', 'win32 默认 = 生产 vault 根')
+      assert.equal(root, 'E:/profile/note/note/Note/AI/DallyReport', 'win32 默认 = 生产 vault 根（10-06 迁入 Note/）')
     } else {
       assert.ok(root.startsWith(os.homedir()), 'Darwin 兜底在 home（iCloud 路径）下')
     }

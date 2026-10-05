@@ -5,7 +5,7 @@
 # 8/17 根因：claude -p 的 print 模式对后台任务有 600s 上限（Background tasks still running after 600s; terminating），
 # 而健康全量跑 21-31min 远超此限 → 后台 workflow 被中途绞杀、rc 仍报 0 假成功 → 8/16 产物缺失根因。
 # 8/18 修复：export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 关闭该上限，等 workflow 真正完成；完成时按产物摘要落 log 供事后检查。
-# 8/25 修复：产物路径从 docs/daily/ 迁移到 iCloud AI/DallyReport/<date>/（2026-08-24 起）。旧产物判断恒 false，
+# 8/25 修复：产物路径从 docs/daily/ 迁移到 iCloud AI/DallyReport/<date>/（2026-08-24 起；10-06 迁入 Note/AI/DallyReport/）。旧产物判断恒 false，
 #   导致「当日已产出自动跳过」保护失效（可能重复触发无头跑）+ ARTIFACT-OK/FAIL 误报 report_missing。
 # 8/26 增强：显式启用 linuxdoCdpHost=127.0.0.1:9222 → linux.do 板每日复用用户常开的 9222 登录态 Chrome 抓取，
 #   而非默认 LINUXDO-SKIP 空板。纪律：只复用登录态、只关日报自己开的临时标签，绝不关闭 9222 浏览器本身（用户一直开着）。
@@ -44,7 +44,7 @@ export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0
 cd "/Users/mango/project/claude-project/obsidian" || { echo "$STAMP FAIL cd-obsidian exit=$?" >> "$LOG"; exit 1; }
 
 TODAY="$(date '+%F')"
-OB_DIR="${HOME}/Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-note/AI/DallyReport/${TODAY}"
+OB_DIR="${HOME}/Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-note/Note/AI/DallyReport/${TODAY}"
 REPORT="${OB_DIR}/${TODAY}-ai日报.md"
 LEDGER="${LOGDIR}/published-ledger.json"
 # 8/31 P1-② 真实墙钟起点（epoch 秒）。realm 内累加器不可信，唯一可信墙钟在宿主侧。

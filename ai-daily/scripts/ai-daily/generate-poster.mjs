@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ai-daily poster generator — creates AI.png for today's ai-daily report
+// ai-daily poster generator — creates ai-daily.png (10-06 前 AI.png) for today's ai-daily report
 // Reads <outDir>/<date>.verified-claims.json (or <date>.sources.json) and invokes DallyReport's image-gen.
 //
 // 跨仓依赖解析：本文件在两仓各有一份镜像（obsidian/scripts/ai-daily 与 DallyReport/ai-daily/scripts/ai-daily），
@@ -65,10 +65,16 @@ async function loadDeps(root, fsImpl) {
 }
 
 /**
- * 生成当日海报并把 `![[AI.png]]` 嵌入日报 md。失败一律返回 {ok:false}（不 throw 给 finalize）。
+ * 生成当日海报并把 `![[ai-daily.png]]` 嵌入日报 md。失败一律返回 {ok:false}（不 throw 给 finalize）。
  * deps 可注入（generateAiPoster / loadConfig / loadEnv / fs）——成功路径测试不烧生图 API。
  * @returns {Promise<{ok:true,file:string}|{ok:false,reason?:string,error?:object,summary?:string}>}
  */
+// 10-06 产物迁入 Note/AI/DallyReport/（与 DallyReport 主系统同目录）：主系统海报恒名 AI.png，
+// ai-daily 海报必须异名防互覆——经主仓 aiPosterFileName 的 config.posterFile 覆盖口生效（生成期即
+// 异名，非事后改名：事后改名会先覆盖主系统当天已有海报再搬走）。md 内嵌同步用本常量。
+export const POSTER_FILE = 'ai-daily.png'
+export const POSTER_EMBED = `![[${POSTER_FILE}]]`
+
 export async function runPoster(outDir, date, deps = {}) {
   const fsImpl = deps.fs || fs
   const root = deps.dallyReportRoot !== undefined ? deps.dallyReportRoot : resolveDallyReportRoot(fsImpl)
@@ -119,33 +125,34 @@ export async function runPoster(outDir, date, deps = {}) {
   }
 
   const cfg = loaded.loadConfig({ date })
-  // 生产布局 outDir = <obsidianDir>/<date>（image-gen 写 path.join(obsidianDir, date)/AI.png）。
+  // 生产布局 outDir = <obsidianDir>/<date>（image-gen 写 path.join(obsidianDir, date)/<cfg.posterFile=ai-daily.png>）。
   // outDir 基名即 date 时 obsidianDir = 其父目录；否则（tmp 测试/任意命名 outDir）直接用 outDir 本身，
-  // 让 AI.png 与日报落在同一目录——拼回 path.join(obsidianDir, date) 恒等于或包含 outDir 的语义保住。
+  // 让 ai-daily.png 与日报落在同一目录——拼回 path.join(obsidianDir, date) 恒等于或包含 outDir 的语义保住。
   const resolvedOut = path.resolve(outDir)
   cfg.obsidianDir = path.basename(resolvedOut) === date ? path.dirname(resolvedOut) : resolvedOut
+  cfg.posterFile = POSTER_FILE
 
   console.log(`POSTER-GEN starting AI poster with ${headlines.length} headlines for ${date}...`)
   try {
     const res = await loaded.generateAiPoster(cfg, headlines)
     console.log(`POSTER-RESULT ok=${res.ok} summary=${res.summary}`)
     if (res.ok && res.file) {
-      // Embed ![[AI.png]] into markdown if not already embedded
+      // Embed ![[ai-daily.png]] into markdown if not already embedded
       if (fsImpl.existsSync(mdPath)) {
         let md = fsImpl.readFileSync(mdPath, 'utf8')
-        if (!md.includes('![[AI.png]]')) {
+        if (!md.includes('![[ai-daily.png]]')) {
           // Place embed right after main header（文件首行或后续行都命中）
-          const replaced = md.replace(/(^|\n)(# 🤖 AI 日报[^\n]*\n)/, '$1$2\n![[AI.png]]\n')
+          const replaced = md.replace(/(^|\n)(# 🤖 AI 日报[^\n]*\n)/, '$1$2\n![[ai-daily.png]]\n')
           if (replaced !== md) {
             md = replaced
           } else {
-            md = `![[AI.png]]\n\n${md}`
+            md = `![[ai-daily.png]]\n\n${md}`
           }
           // 9/19：与 finalize 产物同规格——tmp+rename 原子改写（二次改写不再暴露半截 md 窗口）。
           const tmp = mdPath + '.tmp'
           fsImpl.writeFileSync(tmp, md, 'utf8')
           fsImpl.renameSync(tmp, mdPath)
-          console.log(`POSTER-EMBED updated ${mdPath} with ![[AI.png]]`)
+          console.log(`POSTER-EMBED updated ${mdPath} with ![[ai-daily.png]]`)
         }
       }
     }

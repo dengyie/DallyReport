@@ -114,6 +114,9 @@ export function normalizeGithubPeriod(period, { date } = {}) {
 // Both artifacts land in the same dated folder. A rerun or a manual backfill
 // must not have one silently overwrite the other.
 export function aiPosterFileName(config) {
+  // 10-06 ai-daily 共目录覆盖口：ai-daily 与本系统日报同落 Note/AI/DallyReport/<date>/，
+  // 海报必须异名（ai-daily.png）防互覆——主系统不传 posterFile 时行为逐字节不变。
+  if (config?.posterFile) return config.posterFile;
   return config?.reportMode === "weekly" ? "AI-周报.png" : "AI.png";
 }
 

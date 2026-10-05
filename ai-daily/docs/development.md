@@ -6,7 +6,7 @@
 
 ## 速读（当前有效 · 维护于 2026-10-03）
 
-- 生产 Windows 唯一：任务计划程序 `ai-daily`（每日 08:40）→ `run-daily-task.cmd` → `run-daily-win.sh` → `claude -p`（skill 编排）→ Workflow 产物 → `finalize.mjs` 落盘 vault `AI/DallyReport/<date>/`。Mac launchd 与 `~/.ai-daily` 已于 10-03 清流。
+- 生产 Windows 唯一：任务计划程序 `ai-daily`（每日 08:40）→ `run-daily-task.cmd` → `run-daily-win.sh` → `claude -p`（skill 编排）→ Workflow 产物 → `finalize.mjs` 落盘 vault `Note/AI/DallyReport/<date>/`（10-06 迁入 Note/，与 DallyReport 主系统同根）。Mac launchd 与 `~/.ai-daily` 已于 10-03 清流。
 - 逻辑真源 = `scripts/ai-daily/*.mjs`（14 个 inline 逻辑模块 + 12 个宿主 CLI）+ `ai-daily.template.js`（编排骨架）；`build.mjs` inline 生成 3212 行自包含产物 `.claude/workflows/ai-daily.js`（repo 内），`--sync-vault` 一步同步产物 + SKILL.md 到 vault `.claude/`。
 - 全链路预算：MAX_FETCH/MAX_VERIFY 16，五阶段墙钟切片 540/480/480/300s（总 1800s），report 单次 600s；对抗核查 2+1 票；跨天账本硬去重 + 昨日话题追踪 + 社区热度（10-03 五要素已上线）。
 - 测试：`cd scripts/ai-daily && node --test test/*.test.mjs`（**必须 cd 进目录**，repo 根跑 glob 不中）；当前 453 项 444 pass / 0 fail / 9 有意 skip。
@@ -172,7 +172,7 @@ meta.json 另有 `ledger_recorded`（recorded/skipped/failed，finalize 回写�
 
 ## 8. 产物契约
 
-`AI/DallyReport/<date>/` 下 4+1 个文件，全部 tmp+rename 原子写：
+`Note/AI/DallyReport/<date>/` 下 4+1 个文件，全部 tmp+rename 原子写：
 `<date>-ai日报.md`、`<date>.verified-claims.json`（confirmed/refuted/unverified/outOfWindow）、`<date>.sources.json`、`<date>.meta.json`、`AI.png`（海报，isProd 才生成）。md 由编排器从 payloads.md 落盘。缺任一 payload 字段 finalize 报错非 0 退出。
 
 ## 9. 落盘与自检链（宿主 CLI）
@@ -231,6 +231,12 @@ meta.json 另有 `ledger_recorded`（recorded/skipped/failed，finalize 回写�
   - **[P3-⑥ 海报默认路径]** `generate-poster` CLI 默认 outDir 硬编码 Mac iCloud → `AI_DAILY_REPORT_DIR` 覆盖 → win32 vault 生产根 → 其余 Mac 兜底。
   - **[P3-⑦ 空 STAMP]** runner 早退日志 STAMP 空 → `${STAMP:-unknown-time}` 兜底。
   - 全量 **452 项 443 pass / 0 fail / 9 有意 skip**；产物 3212 行 `--sync-vault` 已同步。
+- **2026-10-06（产物迁入 Note/AI/DallyReport + 海报改名 · 用户裁决「通过 obsidian 同步下日报」）**：ai-daily 产出目录从 vault 根 `AI/DallyReport/` 迁入 `Note/AI/DallyReport/`（与 DallyReport 主系统同根——主系统日报本就入库 vault git，Obsidian 同步即覆盖 ai-daily 日报）。四处合同 + 主仓一处覆盖口：
+  - **[host-paths 单一真源]** `WIN_PROD_DALLYREPORT_ROOT` → `E:/profile/note/note/Note/AI/DallyReport`、`macProdDallyReportRoot` → `…/obsidian-note/Note/AI/DallyReport`——artifact-check / generate-poster / finalize（PROD_DALLYREPORT_PREFIXES）三处消费方自动跟随；双 runner `OB_DIR` 与 artifact-check `--dir` 显式传参同步改。
+  - **[海报防撞名]** 共目录后主系统海报恒名 `AI.png`（周五为 `AI-周报.png`），ai-daily 海报必须异名。主仓 `src/poster/period.mjs aiPosterFileName` 增 `config.posterFile` 覆盖口（**不传则行为逐字节不变**，主系统零感知）；ai-daily `generate-poster.mjs` 传 `cfg.posterFile='ai-daily.png'` 且 md 内嵌改 `![[ai-daily.png]]`。**生成期即异名**而非事后改名——事后改名会先覆盖主系统当天已有海报再搬走。副带修复：旧版借 `loadConfig` 时周五自动进周报模式产出过 `AI-周报.png`（10-02 实证），覆盖口同时消灭该漂移。
+  - **[历史产物搬移]** 33 个日期目录全部迁入 Note/AI/DallyReport（与主系统重叠的 9 个日期目录逐文件合并，共享目录里主系统的 `AI.png`/`AI-周报.png` 原样保留）；ai-daily 海报统一改名 `ai-daily.png`、全部 `<date>-ai日报.md` 内嵌重写 `![[ai-daily.png]]`（含 10-02 历史错嵌 `![[AI-周报.png]]` 归一）；vault 根空壳 `AI/` 移除。全树审计：ai-daily md 内嵌无一例外指向 `ai-daily.png` 且文件在场。
+  - **[同步语义]** 主系统日报本就 tracked 于 vault git（1081 文件实证）→ 迁移后 ai-daily 产物同样 `git add` 入库，随 vault git 同步到其它端（此前 AI/DallyReport 大部 untracked 不同步）。
+  - 测试锚点同步：host-paths/ledger（含反斜杠形态）/host-finalize/generate-poster（补 `posterFile` 传入断言）。主仓 `image-gen-weekly.test.mjs` 5/5（覆盖口向后兼容实证）。SKILL.md 11 处路径 + 产物说明同步。
 - **2026-10-05（10-05 生产 run 验收分析 · 五问题根因修复 · 全量 483 测 474 pass / 0 fail / 9 有意 skip）**：对 10-05 首个新链路生产 run（`done rc=0`、61m、无 502/524、质量门首战 `dropped=2`、账本 +7）做验收分析，5 问题全部根因修复：
   - **[P2 账本毒条目渗透（新发现）]** 质量门上线**前**入库的 10-04「image 580×286 7.97 KB」经 `buildYesterdayTopics` 原样渲染进 10-05 报告「昨日话题追踪」——门只拦今日 claim，拦不住历史毒条目。三层修复：① 消费端入口 `parseReportedLedger` 统一 `isJunkClaim` 卫生过滤（title 判定、title 缺失 fail-open、全滤光 → null 等价无账本如实降级），一处过滤保护全部账本消费者（fetch 硬过滤/种子退役/report 软网/昨日话题追踪）；② 记录端 `ledgerEntriesFromClaims` 过 `isJunkClaim` 兜底（进出两端防线）；③ 存量清理：生产账本 8→7 条（毒条目移除，备份 `published-ledger.json.bak-20261005`）。
   - **[P3 参考来源「未抓取」标注]** major-out 引用的是发现期提供、从未抓取验证的 URL（10-05 实证 `[2] anthropic.com/claude-sonnet-5-5` 疑似发现模型猜测路径），参考来源里与已抓取链接同等呈现。`buildCitationMap` 增 `fetchedUrls` 参数（normURL 归一对比，Set/数组通吃），集合外编号补 `〔未抓取〕`；模板传抓取期真实 URL 全集（来源页 + 索引页真实文章 claimUrl）；缺省不标注（向后兼容/降级版）。

@@ -14,7 +14,7 @@ import { findLatestCompletedWorkflow } from '../host-finalize.mjs'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const UUID = 'b159cd32-4b8e-4594-848f-1253c079ba69'
 const DATE = '2026-09-20'
-const PROD_OUT = '/Users/mango/Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-note/AI/DallyReport/2026-09-20'
+const PROD_OUT = '/Users/mango/Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-note/Note/AI/DallyReport/2026-09-20'
 const TMP_OUT = '/tmp/ai-daily-smoke-20260920.0gnh/out'
 
 const samplePayloads = () => ({

@@ -70,7 +70,7 @@ const ensure = {
 export const DEFAULT_LEDGER = path.join(os.homedir(), '.ai-daily', 'published-ledger.json')
 // 生产 outDir 前缀：只有写进任一前缀下的 run 才自动记账（烟测 /tmp 隔离）。
 // P0（10-03 review 实证）：旧版只有 Mac iCloud 单前缀——Windows 迁移后生产 outDir 是
-// E:/profile/note/note/AI/DallyReport，isProdOutDir 恒 false → 生产 LEDGER-SKIP + poster 永不跑。
+// E:/profile/note/note/Note/AI/DallyReport（10-06 迁入 Note/），isProdOutDir 恒 false → 生产 LEDGER-SKIP + poster 永不跑。
 // F-1（10-04 review）：生产根字面量收敛到 host-paths 单一真源——Windows 生产根置首 + Mac iCloud
 // 兜底（历史对账），与 artifact-check / generate-poster 同源。
 // review S-⑤：AI_DAILY_PROD_PREFIX 惰性读取（isProdOutDir 每次调用组装）——不再在模块加载期
