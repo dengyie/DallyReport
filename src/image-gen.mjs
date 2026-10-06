@@ -323,7 +323,7 @@ function collectAiHeadlines(sources, maxHeadlines = AI_IMAGE_MAX_HEADLINES) {
     headlines.push({
       title,
       provider: source?.provider,
-      summary: sanitizeSnippet(stripMarkdown(source?.snippet), { maxChars: 160 }),
+      summary: sanitizeSnippet(stripMarkdown(source?.summary || source?.snippet), { maxChars: 160 }),
     });
     if (headlines.length >= maxHeadlines) break;
   }

@@ -75,6 +75,128 @@ async function loadDeps(root, fsImpl) {
 export const POSTER_FILE = 'ai-daily.png'
 export const POSTER_EMBED = `![[${POSTER_FILE}]]`
 
+/**
+ * 从当天已经生成的 Markdown 日报中提取高质量中文精炼标题与对应摘要。
+ * 优先级高于原始 claims / sources：
+ *   1. 优先提取 ## 🔥 今日亮点（2~4 条，天然带有精炼短标题与高信息量摘要）
+ *   2. 补充提取正文各 ### 板块下的条目（**标题** + 首句/精简摘要），避开待核实/未验证小节
+ *   3. 自动去重、去状态标签、去英文从句展开、去 markdown 格式残余，限制标题在 28 字以内
+ */
+export function isSimilarHeadline(a, b) {
+  const normA = String(a || '').toLowerCase().replace(/[^\w\u4e00-\u9fff]/g, '')
+  const normB = String(b || '').toLowerCase().replace(/[^\w\u4e00-\u9fff]/g, '')
+  if (!normA || !normB) return false
+  if (normA.includes(normB) || normB.includes(normA)) return true
+
+  const wordsA = a.toLowerCase().match(/[a-z0-9]{3,}/g) || []
+  const wordsB = new Set(b.toLowerCase().match(/[a-z0-9]{3,}/g) || [])
+  for (const w of wordsA) {
+    if (['the', 'and', 'for', 'with', 'app', 'pro', 'api', 'model', '2026'].includes(w)) continue
+    if (w.length >= 4 && wordsB.has(w) && !['news', 'post', 'tech'].includes(w)) return true
+  }
+
+  const cjkA = normA.replace(/[a-z0-9]/g, '')
+  const cjkB = normB.replace(/[a-z0-9]/g, '')
+  if (cjkA.length >= 4 && cjkB.length >= 4) {
+    let bigramHits = 0
+    for (let i = 0; i < cjkA.length - 1; i++) {
+      const bi = cjkA.slice(i, i + 2)
+      if (['据报', '官方', '发布', '推出', '首次', '表示', '称较', '显示'].includes(bi)) continue
+      if (cjkB.includes(bi)) bigramHits++
+    }
+    if (bigramHits >= 2) return true
+  }
+  return false
+}
+
+export function extractHeadlinesFromMarkdown(md, maxHeadlines = 8) {
+  if (!md || typeof md !== 'string') return []
+  const headlines = []
+
+  function cleanSummary(raw) {
+    if (!raw) return ''
+    let s = String(raw).trim()
+    s = s.replace(/\[\d+\]/g, '')
+         .replace(/\*可信度[^*]+\*/g, '')
+         .replace(/\*\[[^\]]+\]\*/g, '')
+         .replace(/\[行业公认[^\]]*\]/g, '')
+         .replace(/\[未核查[^\]]*\]/g, '')
+         .replace(/\*\*([^*]+)\*\*/g, '$1')
+         .replace(/\*([^*]+)\*/g, '$1')
+         .trim()
+    if (s.length > 85) {
+      const m = s.match(/^[^.!?。！？]*[.!?。！？]/)
+      if (m && m[0].length >= 15 && m[0].length <= 85) {
+        s = m[0].trim()
+      } else {
+        s = s.slice(0, 80) + '…'
+      }
+    }
+    return s
+  }
+
+  function cleanTitle(raw) {
+    let t = String(raw || '').trim()
+    t = t.replace(/`[^`]+`/g, '')
+         .replace(/\[(?:窗口外·重大|未核查|已核查)[^\]]*\]/g, '')
+         .replace(/\*\*([^*]+)\*\*/g, '$1')
+         .trim()
+    if (t.length > 28) {
+      const parts = t.split(/[-—–:：]/)
+      if (parts[0].trim().length >= 6 && parts[0].trim().length <= 28) {
+        t = parts[0].trim()
+      } else {
+        t = t.slice(0, 27) + '…'
+      }
+    }
+    return t
+  }
+
+  function addHeadline(rawTitle, rawSummary) {
+    const title = cleanTitle(rawTitle)
+    if (!title) return
+    for (const existing of headlines) {
+      if (isSimilarHeadline(title, existing.title)) return
+    }
+    const summary = cleanSummary(rawSummary)
+    headlines.push({ title, summary, provider: 'ai-daily' })
+  }
+
+  // 1. 优先提取 ## 🔥 今日亮点
+  const hlMatch = md.match(/##\s*[🔥]*\s*今日亮点\s*\n([\s\S]*?)(?=\n##|\n###|$)/)
+  if (hlMatch) {
+    const lines = hlMatch[1].split('\n')
+    for (const line of lines) {
+      const m = line.match(/^[-*]\s+\*\*([^*]+)\*\*(?:\s*[-—–:：]\s*(.*))?$/)
+      if (m) {
+        addHeadline(m[1], m[2] || '')
+      }
+    }
+  }
+
+  // 2. 补充提取正文各板块条目：### 板块名 下的 **标题**
+  const sectionsMatch = md.match(/(###\s+[^\n]+[\s\S]*?)(?=\n##\s+(?:⚠️|📊|📎|参考来源|$)|$)/)
+  if (sectionsMatch) {
+    const secText = sectionsMatch[1]
+    const secBlocks = secText.split(/(?=###\s+)/)
+    for (const block of secBlocks) {
+      if (/###\s*(?:待核实|未验证)/.test(block)) continue
+      const itemRegex = /(?:^|\n)\*\*([^*]+)\*\*(?:\s*`([^`]+)`)?[^\n]*\n\n([^\n]+)/g
+      let match
+      while ((match = itemRegex.exec(block)) !== null) {
+        if (headlines.length >= maxHeadlines) break
+        const t = match[1]
+        const status = match[2] || ''
+        if (status.includes('未核查') && headlines.length >= 4) continue
+        const s = match[3]
+        addHeadline(t, s)
+      }
+    }
+  }
+
+  return headlines.slice(0, maxHeadlines)
+}
+
 export async function runPoster(outDir, date, deps = {}) {
   const fsImpl = deps.fs || fs
   const root = deps.dallyReportRoot !== undefined ? deps.dallyReportRoot : resolveDallyReportRoot(fsImpl)
@@ -93,7 +215,19 @@ export async function runPoster(outDir, date, deps = {}) {
   const mdPath = path.join(outDir, `${date}-ai日报.md`)
 
   let headlines = []
-  if (fsImpl.existsSync(claimsPath)) {
+
+  // 1. 优先从同目录已生成的 Markdown 日报提取打磨好的中文短标题与精炼摘要
+  if (fsImpl.existsSync(mdPath)) {
+    try {
+      const mdContent = fsImpl.readFileSync(mdPath, 'utf8')
+      headlines = extractHeadlinesFromMarkdown(mdContent, 8)
+    } catch (e) {
+      console.error(`POSTER-WARN read markdown headlines: ${e.message}`)
+    }
+  }
+
+  // 2. 回落 1：若 md 不存在或无标题，读取 claims 做保底提取
+  if (!headlines.length && fsImpl.existsSync(claimsPath)) {
     try {
       const claimsObj = JSON.parse(fsImpl.readFileSync(claimsPath, 'utf8'))
       const confirmed = claimsObj.confirmed || []
@@ -107,6 +241,7 @@ export async function runPoster(outDir, date, deps = {}) {
     }
   }
 
+  // 3. 回落 2：若 claims 亦为空，读取 sources
   if (!headlines.length && fsImpl.existsSync(sourcesPath)) {
     try {
       const srcObj = JSON.parse(fsImpl.readFileSync(sourcesPath, 'utf8'))

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { runPoster, loadEnvFile, resolveDallyReportRoot } from '../generate-poster.mjs'
+import { runPoster, loadEnvFile, resolveDallyReportRoot, extractHeadlinesFromMarkdown, isSimilarHeadline } from '../generate-poster.mjs'
 
 test('generate-poster: skips cleanly when no headlines exist', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'poster-test-'))
@@ -102,3 +102,74 @@ test('runPoster: 依赖不可用（dallyReportRoot=null 且未注入 deps）→ 
   assert.equal(res.reason, 'deps_unavailable')
   fs.rmSync(tmp, { recursive: true, force: true })
 })
+
+test('extractHeadlinesFromMarkdown: 优先提取今日亮点，正文条目补全，清洗状态标签与摘要', () => {
+  const sampleMd = `# 🤖 AI 日报 · 2026-10-06
+
+## 📌 今日一句话
+一句话概要
+
+## 🔥 今日亮点
+
+- **ChatGPT 周活突破 12 亿** — OpenAI 把 ChatGPT 重新定位为「人与智能体协作的共享平台」，12 亿周活意味着原生分发规模再上台阶。
+- **Reflection AI 首发开源模型 Beam** — Nvidia 系新秀以 501B 总参数、23B 激活的开源权重模型，正面切入开源模型市场。
+
+## 📄 执行摘要
+执行摘要正文
+
+### 前沿模型与产品
+
+**DeepSeek 沙盒基建：日 300 万沙盒** \`已核查 2-0\`
+
+160 台服务器、3 万 CPU 核、250TB 内存支撑单分片日均 300 万沙盒，揭示真实基建尺度。 [1]
+
+*可信度：高*
+
+**ChatGPT 周活达 12 亿并开放为协作平台** \`已核查 2-0\`
+
+OpenAI 官方宣布周活达 12 亿。 [2]
+
+### 待核实
+
+**某条未核查传闻** \`未核查\`
+
+未经核查的信息。
+`
+
+  const extracted = extractHeadlinesFromMarkdown(sampleMd, 5)
+  assert.equal(extracted.length, 3, '提取出亮点 2 条 + 正文 1 条（周活去重，待核实被跳过）')
+  assert.equal(extracted[0].title, 'ChatGPT 周活突破 12 亿')
+  assert.match(extracted[0].summary, /12 亿周活意味着原生分发规模再上台阶/)
+  assert.equal(extracted[1].title, 'Reflection AI 首发开源模型 Beam')
+  assert.equal(extracted[2].title, 'DeepSeek 沙盒基建：日 300 万沙盒')
+  assert.doesNotMatch(extracted[2].summary, /\[1\]/, '角标已被剥除')
+})
+
+test('runPoster: 优先提取 Markdown 日报中的打磨标题与摘要，不直接用 claims 长句', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'poster-md-priority-'))
+  const md = `# 🤖 AI 日报 · 2026-10-06
+
+## 🔥 今日亮点
+
+- **ChatGPT 周活突破 12 亿** — OpenAI 发布周活 12 亿。
+`
+  fs.writeFileSync(path.join(tmp, '2026-10-06-ai日报.md'), md)
+  // claims 中存有冗长英文断言
+  fs.writeFileSync(path.join(tmp, '2026-10-06.verified-claims.json'), JSON.stringify({
+    confirmed: [{ claim: 'The antirez/ds4 README describes DwarfStar as a native inference engine optimized first for DeepSeek V4 Flash' }],
+  }))
+
+  let passedHeadlines = null
+  const fakeGen = async (cfg, headlines) => {
+    passedHeadlines = headlines
+    return { ok: true, file: path.join(tmp, 'ai-daily.png'), summary: 'ok' }
+  }
+
+  const res = await runPoster(tmp, '2026-10-06', { generateAiPoster: fakeGen })
+  assert.equal(res.ok, true)
+  assert.equal(passedHeadlines.length, 1)
+  assert.equal(passedHeadlines[0].title, 'ChatGPT 周活突破 12 亿', '优先使用 markdown 提炼好的标题')
+  assert.equal(passedHeadlines[0].summary, 'OpenAI 发布周活 12 亿。')
+  fs.rmSync(tmp, { recursive: true, force: true })
+})
+

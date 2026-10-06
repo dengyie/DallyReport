@@ -338,18 +338,17 @@ async function run() {
     // case where there are no bullets to render.
     const posterSources = av?.posterSources?.length ? av.posterSources : av?.sources;
     const posterPeriod = aiPosterPeriod(config);
-    const bodyStories =
-      config.posterRenderer === "layout" ? buildStoriesFromBody(av?.markdown, { period: posterPeriod }) : [];
+    const bodyStories = av?.markdown ? buildStoriesFromBody(av.markdown, { period: posterPeriod }) : [];
     // 3 is not a tuned number: two bullets make a two-item poster that looks
     // broken next to a full note, so below that the cited cards are the better
     // artefact even though their prose is worse.
     const useBody = bodyStories.length >= 3;
     const posterStories = useBody ? bodyStories : buildStories(posterSources, { period: posterPeriod });
-    if (av && av.ok && (useBody || hasAiPosterHeadlines(posterSources))) {
+    if (av && av.ok && (useBody || hasAiPosterHeadlines(posterStories))) {
       try {
         const poster =
           config.posterRenderer === "image"
-            ? await generateAiPoster(config, posterSources, {})
+            ? await generateAiPoster(config, posterStories, {})
             : await renderAiPoster({
                 config,
                 stories: posterStories,
