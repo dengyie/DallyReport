@@ -135,18 +135,31 @@ export function extractHeadlinesFromMarkdown(md, maxHeadlines = 8) {
     return s
   }
 
+  function visualWidth(str) {
+    let w = 0
+    for (const ch of str) {
+      w += ch.charCodeAt(0) > 255 ? 2 : 1
+    }
+    return w
+  }
+
   function cleanTitle(raw) {
     let t = String(raw || '').trim()
     t = t.replace(/`[^`]+`/g, '')
          .replace(/\[(?:窗口外·重大|未核查|已核查)[^\]]*\]/g, '')
          .replace(/\*\*([^*]+)\*\*/g, '$1')
          .trim()
-    if (t.length > 28) {
+    if (visualWidth(t) > 56) {
       const parts = t.split(/[-—–:：]/)
-      if (parts[0].trim().length >= 6 && parts[0].trim().length <= 28) {
+      if (parts[0] && visualWidth(parts[0].trim()) >= 12 && visualWidth(parts[0].trim()) <= 56) {
         t = parts[0].trim()
       } else {
-        t = t.slice(0, 27) + '…'
+        let cur = ''
+        for (const ch of t) {
+          if (visualWidth(cur + ch) > 54) break
+          cur += ch
+        }
+        t = cur + '…'
       }
     }
     return t
