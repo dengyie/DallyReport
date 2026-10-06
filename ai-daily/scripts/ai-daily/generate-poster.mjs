@@ -53,11 +53,20 @@ export function loadEnvFile(envPath, env = process.env, readImpl = fs) {
 async function loadDeps(root, fsImpl) {
   if (!root) return null
   try {
-    const [imageGen, configMod] = await Promise.all([
+    const [posterMod, periodMod, imageGenMod, configMod] = await Promise.all([
+      import(`file://${path.join(root, 'src', 'poster', 'index.mjs')}`),
+      import(`file://${path.join(root, 'src', 'poster', 'period.mjs')}`),
       import(`file://${path.join(root, 'src', 'image-gen.mjs')}`),
       import(`file://${path.join(root, 'src', 'config.mjs')}`),
     ])
-    return { generateAiPoster: imageGen.generateAiPoster, loadConfig: configMod.loadConfig, loadEnv: loadEnvFile, fs: fsImpl }
+    return {
+      renderAiPoster: posterMod.renderAiPoster,
+      aiPosterPeriod: periodMod.aiPosterPeriod,
+      generateAiPoster: imageGenMod.generateAiPoster,
+      loadConfig: configMod.loadConfig,
+      loadEnv: loadEnvFile,
+      fs: fsImpl,
+    }
   } catch (e) {
     console.error(`POSTER-WARN 加载 DallyReport 生图依赖失败: ${e && e.message}`)
     return null
@@ -213,10 +222,15 @@ export function extractHeadlinesFromMarkdown(md, maxHeadlines = 8) {
 export async function runPoster(outDir, date, deps = {}) {
   const fsImpl = deps.fs || fs
   const root = deps.dallyReportRoot !== undefined ? deps.dallyReportRoot : resolveDallyReportRoot(fsImpl)
-  const loaded = deps.generateAiPoster
-    ? { generateAiPoster: deps.generateAiPoster, loadConfig: deps.loadConfig || loadEnvOnlyConfig, loadEnv: deps.loadEnv || loadEnvFile, fs: fsImpl }
-    : await loadDeps(root, fsImpl)
-  if (!loaded) return { ok: false, reason: 'deps_unavailable' }
+  const defaultDeps = await loadDeps(root, fsImpl)
+  const loaded = {
+    ...defaultDeps,
+    ...deps,
+    loadConfig: deps.loadConfig || defaultDeps?.loadConfig || loadEnvOnlyConfig,
+    loadEnv: deps.loadEnv || defaultDeps?.loadEnv || loadEnvFile,
+    fs: fsImpl,
+  }
+  if (!loaded.generateAiPoster && !loaded.renderAiPoster) return { ok: false, reason: 'deps_unavailable' }
 
   // 9/19 修复：旧代码引用未定义标识符 DALLYREPORT_FALLBACK_ROOT——deps.generateAiPoster 注入 +
   // root falsy 路径直接 ReferenceError（被 finalize try/catch 吞成海报静默失败）。root 为空时跳过
@@ -280,9 +294,29 @@ export async function runPoster(outDir, date, deps = {}) {
   cfg.obsidianDir = path.basename(resolvedOut) === date ? path.dirname(resolvedOut) : resolvedOut
   cfg.posterFile = POSTER_FILE
 
-  console.log(`POSTER-GEN starting AI poster with ${headlines.length} headlines for ${date}...`)
+  console.log(`POSTER-GEN starting AI poster (${cfg.posterRenderer || 'layout'}) with ${headlines.length} headlines for ${date}...`)
   try {
-    const res = await loaded.generateAiPoster(cfg, headlines)
+    let res
+    if (deps.generateAiPoster && !deps.renderAiPoster) {
+      // 保持向后兼容：测试显式注入 generateAiPoster 桩函数时调用该桩
+      res = await loaded.generateAiPoster(cfg, headlines)
+    } else if (cfg.posterRenderer === 'image' && loaded.generateAiPoster) {
+      res = await loaded.generateAiPoster(cfg, headlines)
+    } else if (loaded.renderAiPoster) {
+      const period = loaded.aiPosterPeriod ? loaded.aiPosterPeriod(cfg) : { label: date, weekly: false }
+      res = await loaded.renderAiPoster({
+        config: cfg,
+        stories: headlines,
+        deps: {
+          period,
+          outputFile: POSTER_FILE,
+        },
+      })
+    } else if (loaded.generateAiPoster) {
+      res = await loaded.generateAiPoster(cfg, headlines)
+    } else {
+      return { ok: false, reason: 'deps_unavailable' }
+    }
     console.log(`POSTER-RESULT ok=${res.ok} summary=${res.summary}`)
     if (res.ok && res.file) {
       // Embed ![[ai-daily.png]] into markdown if not already embedded

@@ -260,16 +260,14 @@ export function loadConfig({ date = null, mode = null } = {}) {
     // has to hallucinate from memory on quiet days. Each has an independent
     // enable/disable switch and a per-source limit.
     // aggregateDailySources: total limit for combined daily sources (capped).
-    aggregateDailySourceLimit: int("AGGREGATE_DAILY_SOURCE_LIMIT", weekly ? 60 : 15),
+    // In daily mode, material window spans trailing 3 days, so default cap is raised to 35.
+    aggregateDailySourceLimit: int("AGGREGATE_DAILY_SOURCE_LIMIT", weekly ? 60 : 35),
     hnDailyEnabled: (() => {
       const raw = val("HN_DAILY_ENABLED");
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    // Default 5, not 12: the declared 12 never reached the fetcher, so 5 is what
-    // production has actually been producing. Wiring the knob must not silently
-    // change the report — an operator who wants 12 sets HN_DAILY_LIMIT=12.
-    hnDailyLimit: int("HN_DAILY_LIMIT", weekly ? 12 : 5),
+    hnDailyLimit: int("HN_DAILY_LIMIT", weekly ? 12 : 10),
     // 2026-08-11 硬关：36kr 经 Firecrawl 的 URL 被重写为 feed 首页，所有条目 URL
     // 相同导致去重合并。待稳定 provider 或 raw RSS 绕过 WAF 后再恢复。
     // （原 KR36_DAILY_ENABLED 环境变量分支位于 `if (true)` 之后，永不可达——
@@ -281,20 +279,20 @@ export function loadConfig({ date = null, mode = null } = {}) {
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    arxivDailyLimit: int("ARXIV_DAILY_LIMIT", weekly ? 12 : 5),
+    arxivDailyLimit: int("ARXIV_DAILY_LIMIT", weekly ? 12 : 10),
     // --- official vendor blog RSS sources (OpenAI / HF) ---
     openaiDailyEnabled: (() => {
       const raw = val("OPENAI_DAILY_ENABLED");
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    openaiDailyLimit: int("OPENAI_DAILY_LIMIT", weekly ? 12 : 4),
+    openaiDailyLimit: int("OPENAI_DAILY_LIMIT", weekly ? 12 : 8),
     hfDailyEnabled: (() => {
       const raw = val("HF_DAILY_ENABLED");
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    hfDailyLimit: int("HF_DAILY_LIMIT", weekly ? 12 : 4),
+    hfDailyLimit: int("HF_DAILY_LIMIT", weekly ? 12 : 8),
     // 2026-09-26 review: the two Google feeds were gated on
     // `config.googleAiDailyEnabled !== false` against keys that did not exist in
     // this object, so they were permanently on with no kill switch (undefined !==
@@ -305,13 +303,13 @@ export function loadConfig({ date = null, mode = null } = {}) {
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    googleAiDailyLimit: int("GOOGLE_AI_DAILY_LIMIT", weekly ? 12 : 4),
+    googleAiDailyLimit: int("GOOGLE_AI_DAILY_LIMIT", weekly ? 12 : 6),
     googleResearchDailyEnabled: (() => {
       const raw = val("GOOGLE_RESEARCH_DAILY_ENABLED");
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    googleResearchDailyLimit: int("GOOGLE_RESEARCH_DAILY_LIMIT", weekly ? 12 : 4),
+    googleResearchDailyLimit: int("GOOGLE_RESEARCH_DAILY_LIMIT", weekly ? 12 : 6),
     // 2026-09-28 review H2: the daily-publishing half of the hard-source
     // baseline. The five vendor blogs above are high-signal but publish
     // weekly-ish; measured 2026-09-28 all five returned 0 items inside the
@@ -323,25 +321,25 @@ export function loadConfig({ date = null, mode = null } = {}) {
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    techcrunchAiLimit: int("TECHCRUNCH_AI_DAILY_LIMIT", weekly ? 12 : 5),
+    techcrunchAiLimit: int("TECHCRUNCH_AI_DAILY_LIMIT", weekly ? 12 : 8),
     vergeAiEnabled: (() => {
       const raw = val("VERGE_AI_DAILY_ENABLED");
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    vergeAiLimit: int("VERGE_AI_DAILY_LIMIT", weekly ? 12 : 5),
+    vergeAiLimit: int("VERGE_AI_DAILY_LIMIT", weekly ? 12 : 8),
     qbitaiEnabled: (() => {
       const raw = val("QBITAI_DAILY_ENABLED");
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    qbitaiLimit: int("QBITAI_DAILY_LIMIT", weekly ? 12 : 5),
+    qbitaiLimit: int("QBITAI_DAILY_LIMIT", weekly ? 12 : 8),
     infoqCnEnabled: (() => {
       const raw = val("INFOQ_CN_DAILY_ENABLED");
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    infoqCnLimit: int("INFOQ_CN_DAILY_LIMIT", weekly ? 12 : 5),
+    infoqCnLimit: int("INFOQ_CN_DAILY_LIMIT", weekly ? 12 : 8),
     // -- search model override (default: use GROK_MODEL = synthModel) ---
     // When set, grok-cli.mjs passes this model to grok-search search.js instead
     // of GROK_MODEL, allowing the search step to use a cheaper/faster model while
@@ -433,7 +431,8 @@ export function loadConfig({ date = null, mode = null } = {}) {
     // 0 = no ceiling (the crawl still runs, it just may extend the run).
     linuxdoEnrichBudgetMs: int("LINUXDO_ENRICH_BUDGET_MS", 120000),
     // Cap on total sources fed to synthesis after merge (community first).
-    sourceMaxTotal: int("AI_SOURCE_MAX_TOTAL", weekly ? 40 : 18),
+    // In daily mode, default raised to 35 for 3-day material window.
+    sourceMaxTotal: int("AI_SOURCE_MAX_TOTAL", weekly ? 40 : 35),
     // --- nodeseek.com community AI sources (nodeseek.mjs) ---
     nodeseekEnabled: (() => {
       const raw = val("NODESEEK_ENABLED");

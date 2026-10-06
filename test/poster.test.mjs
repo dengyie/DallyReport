@@ -18,7 +18,7 @@ import { pathToFileURL } from "node:url";
 
 import { escapeHtml, posterShell, POSTER_WIDTH, POSTER_HEIGHT } from "../src/poster/html.mjs";
 import { githubPosterHtml, GITHUB_POSTER_MAX_ROWS, formatCount } from "../src/poster/github.mjs";
-import { aiPosterHtml, buildStories, buildStoriesFromBody, BODY_TITLE_MAX, AI_POSTER_MAX_STORIES, AI_WEEKLY_POSTER_MAX_STORIES } from "../src/poster/ai.mjs";
+import { aiPosterHtml, buildStories, buildStoriesFromBody, cleanSummaryProse, BODY_TITLE_MAX, AI_POSTER_MAX_STORIES, AI_WEEKLY_POSTER_MAX_STORIES } from "../src/poster/ai.mjs";
 import { buildChromeArgs, renderHtmlToPng, PosterRenderError } from "../src/poster/shot.mjs";
 import { parseTranslationLines, translateToChinese } from "../src/poster/translate.mjs";
 
@@ -563,4 +563,25 @@ test("buildStoriesFromBody: no body yields no stories rather than invented ones"
   assert.deepEqual(buildStoriesFromBody("", {}), []);
   assert.deepEqual(buildStoriesFromBody(null, {}), []);
   assert.deepEqual(buildStoriesFromBody("（模型未返回正文内容）", {}), []);
+});
+
+test("cleanSummaryProse: trims open brackets, connectives, and trailing commas", () => {
+  assert.equal(cleanSummaryProse("该公司研发了新模型（"), "该公司研发了新模型");
+  assert.equal(cleanSummaryProse("表现优异，"), "表现优异");
+  assert.equal(cleanSummaryProse("下周上线，此外"), "下周上线");
+  assert.equal(cleanSummaryProse("附带完整论文（arxiv）"), "附带完整论文（arxiv）");
+  assert.equal(cleanSummaryProse("性能提升显著，其，"), "性能提升显著");
+});
+
+test("aiPosterHtml: card UI renders category tags and modern layout", () => {
+  const html = aiPosterHtml({
+    stories: [
+      { title: "DeepSeek V3 权重开源", summary: "开源参数与多头注意力架构。" },
+      { title: "英伟达推出新芯片", summary: "算力吞吐大幅提升。" },
+    ],
+    period: WEEKLY,
+  });
+  assert.match(html, /class="story-tag"/);
+  assert.match(html, /模型开源/);
+  assert.match(html, /算力硬件/);
 });

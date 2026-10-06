@@ -32,6 +32,41 @@ import { resolveStoryCap } from "./period.mjs";
 export { AI_POSTER_MAX_STORIES, AI_WEEKLY_POSTER_MAX_STORIES } from "./period.mjs";
 
 const CSS = `
+  body {
+    background: linear-gradient(180deg, #f8fafc 0%, #edf2f7 100%) !important;
+    padding: 44px 60px !important;
+  }
+  header {
+    display: flex;
+    flex-direction: column;
+  }
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 10px;
+    background: #e0e7ff;
+    color: #3730a3 !important;
+    border-radius: 9999px;
+    font-size: 13px !important;
+    font-weight: 700;
+    letter-spacing: .08em;
+    align-self: flex-start;
+  }
+  .title {
+    font-size: 40px !important;
+    font-weight: 800;
+    color: #0f172a;
+    letter-spacing: -.02em;
+    line-height: 1.1;
+    margin-top: 6px;
+  }
+  .lede {
+    font-size: 17px !important;
+    color: #64748b;
+    margin-top: 4px !important;
+    font-weight: 500;
+  }
+  .rule { display: none !important; }
   .grid {
     flex: 1;
     display: grid;
@@ -44,29 +79,90 @@ const CSS = `
        measured quantity to the right of a flexible track, this becomes
        minmax(0, 1fr) and so does every track after it. */
     grid-template-columns: 1fr 1fr;
-    column-gap: 56px;
+    column-gap: 24px;
     align-content: start;
-    margin-top: 4px;
+    margin-top: 14px;
     /* The canvas is a fixed frame, not a scroll region. Anything that would
        overflow is clipped by the browser, silently, which is how a footer
        disappears without a trace. Clipping here is at least visible in the
        markup, and the story cap above is sized so it never triggers. */
     overflow: hidden;
   }
-  .story { padding: 15px 0 14px; border-bottom: 1px solid #f2f5f8; }
-  .story-title { font-size: 22px; font-weight: 600; line-height: 1.3; letter-spacing: -.003em; }
+  .col {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .story {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 10px 16px 11px;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.03), 0 1px 2px rgba(15, 23, 42, 0.02);
+    display: flex;
+    flex-direction: column;
+  }
+  .story-tag {
+    display: inline-flex;
+    align-items: center;
+    font-size: 11.5px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-bottom: 4px;
+    align-self: flex-start;
+  }
+  .story-title {
+    font-size: 17.5px;
+    font-weight: 700;
+    color: #0f172a;
+    line-height: 1.32;
+    letter-spacing: -.01em;
+  }
   .story-sum {
-    font-size: 16.5px; color: #5b6572; line-height: 1.42; margin-top: 5px;
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    font-size: 13.5px;
+    color: #475569;
+    line-height: 1.42;
+    margin-top: 4px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .footer {
+    font-size: 13.5px !important;
+    color: #94a3b8 !important;
+    border-top: 1px solid #e2e8f0;
+    padding-top: 10px;
   }
   .empty { font-size: 20px; color: #9aa4b0; padding: 40px 0; }
 `;
+
+/** Categorise story to provide visual topic badge */
+function detectCategory(title, summary) {
+  const text = `${title} ${summary}`.toLowerCase();
+  if (/(?:芯片|算力|gpu|cuda|硬件|数据中心|集群|英伟达|nvidia|blackwell|tpu|npu)/i.test(text)) {
+    return { name: "算力硬件", color: "#059669", bg: "#ecfdf5", border: "#a7f3d0" };
+  }
+  if (/(?:融资|投资|收购|估值|财报|市值|营收|ipo|funding|acquisition)/i.test(text)) {
+    return { name: "商业动态", color: "#d97706", bg: "#fffbeb", border: "#fde68a" };
+  }
+  if (/(?:模型|发布|开源|权重|weights|releases?|launch|preview|v\d|gpt|claude|deepseek|gemini|llama|qwen|mistral|voice)/i.test(text)) {
+    return { name: "模型开源", color: "#2563eb", bg: "#eff6ff", border: "#bfdbfe" };
+  }
+  if (/(?:论文|研究|arxiv|benchmark|基准|评估|算法|架构|transformer|reasoning)/i.test(text)) {
+    return { name: "前沿研究", color: "#7c3aed", bg: "#f5f3ff", border: "#ddd6fe" };
+  }
+  return { name: "行业要闻", color: "#475569", bg: "#f1f5f9", border: "#e2e8f0" };
+}
 
 // No per-story source line. Ten rows each captioned "Hacker News" is the same
 // repeated-label defect this change removes from the GitHub poster's ten
 // "今日 Star" cards, and the note's reference list already carries attribution.
 function storyBlock(story) {
+  const cat = detectCategory(story.title, story.summary);
   return `      <div class="story">
+        <div class="story-tag" style="background:${cat.bg}; color:${cat.color}; border:1px solid ${cat.border};">${cat.name}</div>
         <div class="story-title">${escapeHtml(story.title)}</div>
         ${story.summary ? `<div class="story-sum">${escapeHtml(story.summary)}</div>` : ""}
       </div>`;
@@ -120,12 +216,26 @@ export const AI_POSTER_SIZE = { width: POSTER_WIDTH, height: POSTER_HEIGHT };
 
 // --- source cards -> poster stories ---------------------------------------
 
+/** Clean punctuation residue and trailing open brackets/connectives from summary */
+export function cleanSummaryProse(text) {
+  if (!text) return "";
+  let s = String(text).trim();
+  for (let i = 0; i < 3; i++) {
+    const prev = s;
+    s = s.replace(/[\s（(\[【《\-_:：]+$/, "");
+    s = s.replace(/(?:同时|此外|另外|并且|以及|而且|其|但|而|与)[\s，,、]*$/, "");
+    s = s.replace(/[，,、；;：:\s]+$/, "");
+    if (s === prev) break;
+  }
+  return s.trim();
+}
+
 /** Up to and including the first terminator; no terminator means keep it all. */
 export function firstSentence(s) {
   const t = String(s ?? "").trim();
   if (!t) return "";
   const m = t.match(/^[^.!?。！？]*[.!?。！？]/);
-  return m ? m[0].trim() : t;
+  return cleanSummaryProse(m ? m[0].trim() : t);
 }
 
 /**
@@ -256,7 +366,8 @@ export function buildStoriesFromBody(markdown, { period, maxStories } = {}) {
     });
     // Same rule as buildStories: a summary that merely repeats the title is
     // the duplication defect, not extra information.
-    const summary = rawSummary && !sameProse(rawSummary, title) ? rawSummary : "";
+    const cleanSummary = cleanSummaryProse(rawSummary);
+    const summary = cleanSummary && !sameProse(cleanSummary, title) ? cleanSummary : "";
     stories.push({ title, summary });
     if (stories.length >= cap) break;
   }
