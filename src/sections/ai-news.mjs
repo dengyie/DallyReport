@@ -428,10 +428,10 @@ export async function aiNewsSection(
   // The raw linux.do cards (linuxdoRaw) are untouched — the auxiliary file stays
   // a verbatim archive.
   const deduped = dedupeAndNormalizeSources(merged);
-  // Recency gate: sources carrying a publishedAt (HN/36kr/arXiv) older than today
-  // (Beijing) are dropped; timestamp-less sources (tavily/firecrawl) pass through.
+  // Recency gate: sources carrying a publishedAt (HN/36kr/arXiv) older than the
+  // material window are dropped; timestamp-less sources (tavily/firecrawl) pass through.
   // The dropped count is surfaced in the report header as a material-window note.
-  const { sources, dropped: recencyDropped } = filterByRecency(deduped, config.date);
+  const { sources, dropped: recencyDropped } = filterByRecency(deduped, config.date, materialWindow(config));
   const investigation = await investigateIfEnabled(sources, config);
   const linuxdoCount = (linuxdoSources || []).length;
   const nodeseekCount = (nodeseekSources || []).length;

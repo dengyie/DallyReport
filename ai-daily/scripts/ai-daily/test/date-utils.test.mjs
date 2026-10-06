@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeDate, makeClaimWindow, normURL, hostOf, chunkArr, pad2, daysBetween, filterSeedsByAge } from '../date-utils.mjs'
+import { normalizeDate, makeClaimWindow, normURL, hostOf, chunkArr, pad2, daysBetween, filterSeedsByAge, calendarDayMinus, defaultWindowFrom } from '../date-utils.mjs'
 
 test('normalizeDate ISO 与变体', () => {
   assert.equal(normalizeDate('2026-08-17'), 20260817)
@@ -110,3 +110,23 @@ test('filterSeedsByAge：≤阈保留/超阈滤除/无日期滤除/fail-open 全
   assert.deepEqual(fo.retired, [])
   assert.equal(seeds.length, 4)  // 不改原数组
 })
+
+test('calendarDayMinus 纯算术减天数（跨月/跨年/闰年）', () => {
+  assert.equal(calendarDayMinus(20261006, 0), 20261006)
+  assert.equal(calendarDayMinus(20261006, 2), 20261004)
+  assert.equal(calendarDayMinus(20261001, 1), 20260930)
+  assert.equal(calendarDayMinus(20260101, 1), 20251231)
+  assert.equal(calendarDayMinus(20240301, 1), 20240229) // 闰年
+  assert.equal(calendarDayMinus(20230301, 1), 20230228) // 平年
+})
+
+test('defaultWindowFrom 默认前推天数与边界处理', () => {
+  assert.equal(defaultWindowFrom('2026-10-06', 3), '2026-10-04')
+  assert.equal(defaultWindowFrom('2026-10-06'), '2026-10-04')
+  assert.equal(defaultWindowFrom('2026-10-01', 3), '2026-09-29')
+  assert.equal(defaultWindowFrom('2026-01-02', 3), '2025-12-31')
+  assert.equal(defaultWindowFrom(null), null)
+  assert.equal(defaultWindowFrom(''), null)
+  assert.equal(defaultWindowFrom('invalid'), null)
+})
+

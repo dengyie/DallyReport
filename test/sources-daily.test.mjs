@@ -72,12 +72,12 @@ test("HN: returns same-day AI-relevant stories with publishedAt", async () => {
     { title: "GPT-5.6 arrives", url: "https://openai.com", type: "story", time: todaySec, score: 42 },
     { title: "Random fishing blog", url: "https://example.com", type: "story", time: todaySec },
     { title: "New LLM beats benchmarks", url: "https://news.example", type: "story", time: todaySec },
-    { title: "Old AI story", url: "https://x.com/old", type: "story", time: Math.floor(Date.UTC(2026, 7, 8) / 1000) },
+    { title: "Old AI story", url: "https://x.com/old", type: "story", time: Math.floor(Date.UTC(2026, 7, 6) / 1000) },
     { title: "Comment without url", url: "", type: "comment", time: todaySec },
   ];
   const sources = await hnHarness(items);
   assert.ok(Array.isArray(sources));
-  // Item 1 (GPT-5.6) + item 3 (LLM) should pass; item 2 no AI match; item 4 stale;
+  // Item 1 (GPT-5.6) + item 3 (LLM) should pass; item 2 no AI match; item 4 stale (>3 days);
   // item 5 not a story.
   assert.equal(sources.length, 2);
   assert.equal(sources[0].provider, "hackernews");
@@ -128,7 +128,7 @@ const KR36_SAMPLE = `<?xml version="1.0" encoding="UTF-8"?>
 <title><![CDATA[大模型落地制造业案例]]></title>
 <link>https://36kr.com/p/789</link>
 <description><![CDATA[AI 相关。]]></description>
-<pubDate>Sun, 09 Aug 2026 10:00:00 +0800</pubDate>
+<pubDate>Thu, 06 Aug 2026 10:00:00 +0800</pubDate>
 </item>
 </channel></rss>`;
 
@@ -143,8 +143,8 @@ test("36kr: parses same-day AI items, strips CDATA/HTML, drops stale", async () 
   assert.ok(openai, "OpenAI item should pass AI filter");
   assert.equal(openai.provider, "36kr");
   assert.equal(openai.snippet.includes("<p>"), false, "HTML stripped");
-  // The 大模型 item (08-09 10:00 +0800 = 08-09) is before 08-10 midnight → should
-  // be excluded by the fetcher's same-day gate.
+  // The 大模型 item (08-06 10:00 +0800 = 08-06) is before 08-08 midnight (outside 3-day window) → should
+  // be excluded by the fetcher's window gate.
   assert.ok(!sources.some((s) => s.title.includes("大模型")), "stale item dropped");
 });
 

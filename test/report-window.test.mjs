@@ -70,17 +70,18 @@ test("resolveMode: an empty override means 'not set', not an error", () => {
   assert.equal(resolveMode(FRIDAY, undefined), "weekly");
 });
 
-test("materialWindowDays: weekly spans 7 days, daily spans 1", () => {
+test("materialWindowDays: weekly spans 7 days, daily spans 3", () => {
   assert.equal(materialWindowDays("weekly"), 7);
-  assert.equal(materialWindowDays("daily"), 1);
+  assert.equal(materialWindowDays("daily"), 3);
 });
 
-test("windowRange: the daily window is exactly the old one-day computation", () => {
+test("windowRange: the daily window spans trailing 3 days (T-2 ~ T)", () => {
   const w = windowRange(MONDAY, "daily");
-  assert.equal(w.startMs, BJ(MONDAY), "start is Beijing midnight of the report date");
+  assert.equal(w.startMs, BJ("2026-09-26"), "start is Beijing midnight of T-2 days");
   assert.equal(w.endMs, BJ(MONDAY) + DAY, "end is the next Beijing midnight");
-  assert.equal(w.startDate, MONDAY);
+  assert.equal(w.startDate, "2026-09-26");
   assert.equal(w.endDate, MONDAY);
+  assert.equal(w.days, 3);
 });
 
 test("windowRange: the weekly window covers the previous 6 days plus the report day", () => {

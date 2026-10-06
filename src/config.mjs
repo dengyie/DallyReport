@@ -241,9 +241,8 @@ export function loadConfig({ date = null, mode = null } = {}) {
     windowStartDate: window.startDate,
     windowEndDate: window.endDate,
     windowLabel: window.label,
-    // grok-search's own result window, in days. The daily default of 1 would
-    // make a weekly report's web-search step contradict the collected material.
-    days: int("GROK_DAYS", weekly ? window.days : 1),
+    // grok-search's own result window, in days. Defaults to material window days (3 for daily, 7 for weekly).
+    days: int("GROK_DAYS", window.days),
     // Report in strict-daily mode: when true, tavily/firecrawl sources without
     // timestamps are still included, but the report header annotates the material
     // window (today-only vs broader). Also enables the "来源不足" anti-hallucination

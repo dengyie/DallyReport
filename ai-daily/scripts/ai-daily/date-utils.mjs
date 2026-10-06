@@ -29,6 +29,27 @@ export const makeClaimWindow = (WIN_FROM, WIN_TO) => c => {
   return cands.every(x => x >= WIN_FROM && x <= WIN_TO) ? 'in' : 'out'
 }
 
+// 纯日历减法：YYYYMMDD 数值按日历减 back 天，返回 YYYYMMDD 数值。
+// 纯算术、无 Date.now()/new Date()——Workflow realm 安全（realm 禁 Date）。
+export const calendarDayMinus = (dayNum, back) => {
+  const isLeap = y => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0
+  const dom = (y, m) => [31, isLeap(y) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1]
+  let y = Math.floor(dayNum / 10000), m = Math.floor(dayNum / 100) % 100, d = dayNum % 100
+  d -= back
+  while (d < 1) { m -= 1; if (m < 1) { m = 12; y -= 1 }; d += dom(y, m) }
+  return +(y + pad2(m) + pad2(d))
+}
+
+// 默认素材窗口起始日期（YYYY-MM-DD）：输入 dateStr 与天数（默认 3 天），返回 YYYY-MM-DD。
+export const defaultWindowFrom = (dateStr, days = 3) => {
+  if (!dateStr || typeof dateStr !== 'string') return null
+  const num = normalizeDate(dateStr)
+  if (!num) return null
+  const fromNum = calendarDayMinus(num, Math.max(0, days - 1))
+  const s = String(fromNum)
+  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`
+}
+
 // 日历天数差（reportDay − seedDay；正=seed 早于 report）。YYYYMMDD 数值→天数。
 // 纯算术、无 Date.now()/new Date()——Workflow realm 安全（realm 禁 Date）。
 export const daysBetween = (seedDayNum, reportDayNum) => {

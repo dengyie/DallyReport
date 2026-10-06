@@ -29,9 +29,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 export const REPORT_MODES = Object.freeze(["auto", "daily", "weekly"]);
 
-/** Days of material a mode spans. Weekly is a trailing 7 calendar days. */
+/** Days of material a mode spans. Weekly is a trailing 7 calendar days, daily is 3 calendar days. */
 export function materialWindowDays(mode) {
-  return mode === "weekly" ? 7 : 1;
+  return mode === "weekly" ? 7 : 3;
 }
 
 /**
@@ -154,7 +154,7 @@ export function materialWindow(config) {
   if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
     return {
       mode: config.reportMode === "weekly" ? "weekly" : "daily",
-      days: Number(config.materialWindowDays) > 0 ? Number(config.materialWindowDays) : 1,
+      days: Number(config.materialWindowDays) > 0 ? Number(config.materialWindowDays) : 3,
       startMs,
       endMs,
       startDate: config.windowStartDate,

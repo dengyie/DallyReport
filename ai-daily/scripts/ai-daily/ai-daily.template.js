@@ -72,7 +72,10 @@ const VERIFY_BUDGET_MS  = typeof args.verifyBudgetMs  === 'number' && args.verif
 const VERIFY_INFLIGHT_BUFFER_MS = typeof args.verifyInflightBufferMs === 'number' && args.verifyInflightBufferMs > 0 ? args.verifyInflightBufferMs : 60000
 
 const DATE = typeof args.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(args.date) ? args.date : null
-const WFROM = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.from)) ? String(args.window.from) : null
+// 日报默认抓取 3 天内素材（T-2 ~ T），如 args.window 明确指定则遵从实参
+const WFROM = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.from))
+  ? String(args.window.from)
+  : defaultWindowFrom(DATE, 3)
 const WTO = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.to)) ? String(args.window.to) : DATE
 const OUT = typeof args.outDir === 'string' && args.outDir ? args.outDir : null
 const BOARDS_SELECTED = Array.isArray(args.boards) ? new Set(args.boards) : null
