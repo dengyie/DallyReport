@@ -13,6 +13,8 @@ import {
   splitOverMergedBullets,
   countOverMergedBullets,
   posterBullets,
+  repairGluedHeadings,
+  dedupeBullets,
 } from "../src/prose-tighten.mjs";
 
 // --- the shipped shapes, verbatim in structure ---------------------------
@@ -173,4 +175,86 @@ test("posterBullets: the reference list is not mistaken for content", () => {
   const out = posterBullets(doc);
   assert.equal(out.length, 1, "only the real bullet counts");
   assert.equal(out[0].title, "正文要点");
+});
+
+// --- 2026-10-07 P2: glued heading repair + duplicate bullet dedup -------------
+// The shipped AI-DeepSeek.md (2026-10-07) carried a heading marker welded onto
+// a sentence ("...AI 算力服务## 今日焦点") and two verbatim-duplicated bullets
+// under a restarted section. Both are the mechanical signature of a
+// reasoning-model truncation; both must be repaired before the note ships.
+
+test("repairGluedHeadings: a heading marker glued onto prose becomes its own line", () => {
+  const input = "* **算力基础设施初创公司 Lambda**：AI 算力服务## 今日焦点";
+  const out = repairGluedHeadings(input);
+  assert.match(out, /AI 算力服务\n\n## 今日焦点/, "the heading is separated from the prose onto its own block");
+  // The original malformation is gone: "服务" should not be immediately
+  // followed by "##" on the same line.
+  assert.doesNotMatch(
+    out.split("\n")[0],
+    /服务## 今日/,
+    "the heading no longer shares a line with the prose",
+  );
+});
+
+test("repairGluedHeadings: a heading already at line start is untouched", () => {
+  const input = "## 今日焦点\n\n* **要点**：正文。";
+  assert.equal(repairGluedHeadings(input), input);
+});
+
+test("repairGluedHeadings: a mid-word '##' without a space is not a heading", () => {
+  // "C##" and "issue##" are identifiers, not heading markers — a `#` inside a
+  // URL fragment or identifier must not be split into a heading.
+  assert.equal(repairGluedHeadings("C## is a preprocessor"), "C## is a preprocessor");
+  assert.equal(repairGluedHeadings("见 issue##123"), "见 issue##123");
+});
+
+test("repairGluedHeadings: empty/undefined pass through", () => {
+  assert.equal(repairGluedHeadings(""), "");
+  assert.equal(repairGluedHeadings(undefined), "");
+});
+
+test("dedupeBullets: verbatim duplicate bullets keep only the first", () => {
+  const input = [
+    "* **Sharing AI Progress in Mathematics** [8]",
+    "* **OpenAI drops another batch** [12]",
+    "* **Sharing AI Progress in Mathematics** [8]",
+    "* **OpenAI drops another batch** [12]",
+  ].join("\n");
+  const out = dedupeBullets(input);
+  const lines = out.split("\n").filter(Boolean);
+  assert.equal(lines.length, 2, `expected 2 bullets, got ${lines.length}`);
+  assert.equal(lines[0], "* **Sharing AI Progress in Mathematics** [8]");
+  assert.equal(lines[1], "* **OpenAI drops another batch** [12]");
+});
+
+test("dedupeBullets: whitespace differences do not hide a duplicate", () => {
+  // Two bullets differing only in internal whitespace collapse to the same key.
+  const input = "* **标题**：甲  [1]。\n* **标题**：甲 [1]。";
+  const out = dedupeBullets(input);
+  assert.equal(out.split("\n").filter((l) => l.trim()).length, 1, "double-space vs single-space is the same bullet");
+});
+
+test("dedupeBullets: two bullets sharing a title but different bodies are kept", () => {
+  const input = "* **标题**：甲 [1]。\n* **标题**：乙 [2]。";
+  const out = dedupeBullets(input);
+  assert.equal(out.split("\n").filter((l) => l.trim()).length, 2, "same title + different body is NOT a duplicate");
+});
+
+test("dedupeBullets: headings and blank lines are never dropped", () => {
+  const input = ["## 今日焦点", "", "* **A**：甲 [1]。", "", "## 产品与模型更新", "", "* **A**：甲 [1]。"].join("\n");
+  const out = dedupeBullets(input);
+  assert.match(out, /## 今日焦点/, "heading survives");
+  assert.match(out, /## 产品与模型更新/, "heading survives");
+  const bullets = out.split("\n").filter((l) => /^\* /.test(l));
+  assert.equal(bullets.length, 1, "the duplicate bullet is dropped");
+});
+
+test("dedupeBullets: the reference-list shape is not treated as a duplicate bullet", () => {
+  const input = "- [3] [美国AI初创公司](<https://linux.do/t/topic/2987952>)\n- [4] [高通](<https://linux.do/t/topic/2987858>)";
+  assert.equal(dedupeBullets(input), input);
+});
+
+test("dedupeBullets: non-bullet lines pass through", () => {
+  const input = "普通段落。\n\n* **仅有一条**：甲 [1]。\n\n```\ncode\n```";
+  assert.equal(dedupeBullets(input), input);
 });

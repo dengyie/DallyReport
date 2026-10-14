@@ -1,3 +1,5 @@
+import { stripMarkdown } from "./markdown.mjs";
+
 // One bullet, one topic.
 //
 // The 2026-09-29 Gemini note put Qwen4, an image-fix, a Plus payment and a
@@ -59,11 +61,60 @@ function bulletBlocks(markdown) {
 const AMOUNT = /\$?\s*(\d+(?:\.\d+)?)\s*(亿|万|million|billion|[mb](?![a-z]))/gi;
 const NAMED = /\b[A-Z][A-Za-z0-9.+-]{2,}\b/g;
 
+// Generic tech terms and abbreviations that appear naturally in AI tech news summaries
+// and should never be counted as drifted "proper names".
+const GENERIC_TECH_WORDS = new Set([
+  "api", "sdk", "gpu", "cpu", "tpu", "npu", "llm", "agi", "app", "web",
+  "tui", "gui", "cli", "saas", "bot", "pc", "mac", "ide", "json", "http",
+  "https", "url", "html", "css", "rss", "cdp", "tts", "asr", "rag", "rlhf",
+  "dpo", "sft", "cot", "vlm", "nlp", "ml", "dl", "ar", "vr", "xr", "mr",
+  "ceo", "cto", "coo", "cfo", "ipo", "oss", "repo", "star", "stars", "arxiv",
+  "github", "huggingface", "show", "tech", "code"
+]);
+
+// Known entity alias groups: if a source title mentions any name in the group,
+// mentioning another alias from the same group in the summary is valid context/attribution.
+const ALIAS_GROUPS = [
+  new Set(["google", "gemini", "deepmind", "waymo", "android", "alphabet"]),
+  new Set(["meta", "facebook", "instagram", "whatsapp", "llama"]),
+  new Set(["microsoft", "xbox", "azure", "copilot", "windows"]),
+  new Set(["openai", "chatgpt", "codex", "sora", "dall-e", "gpt"]),
+  new Set(["anthropic", "claude"]),
+  new Set(["liquid", "liquidai", "lfm", "lfm2", "lfm2.5"]),
+  new Set(["alibaba", "qwen", "tongyi", "aliyun"]),
+  new Set(["bytedance", "doubao", "tiktok"]),
+  new Set(["zhipu", "glm", "chatglm"]),
+  new Set(["moonshot", "kimi"]),
+  new Set(["stepfun", "step"]),
+  new Set(["deepseek"]),
+  new Set(["xai", "grok", "twitter"]),
+  new Set(["amazon", "aws", "bedrock", "titan", "alexa"]),
+  new Set(["apple", "ios", "macos", "siri"])
+];
+
+function nameMatchesTitle(name, titleNames) {
+  if (GENERIC_TECH_WORDS.has(name)) return true;
+  if (titleNames.has(name)) return true;
+  for (const group of ALIAS_GROUPS) {
+    if (group.has(name)) {
+      for (const tn of titleNames) {
+        if (group.has(tn)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function cleanTitle(s) {
+  if (!s) return "";
+  return stripMarkdown(s).replace(/[\r\n]+/g, " ").replace(/\s{2,}/g, " ").trim();
+}
+
 function faithfulSingle(text, sources) {
   const cites = citedNumbers(text);
   if (cites.length !== 1) return text;
   const source = (sources || [])[cites[0] - 1];
-  const title = String(source?.title || "").trim();
+  const title = cleanTitle(source?.title);
   if (!title) return text;
   const titled = text.match(/^(\s*)(?:[*+-]|\d+\.)\s+\*\*([\s\S]*?)\*\*(?:[：:]\s*)?([\s\S]*)$/);
   if (!titled) return text;
@@ -73,7 +124,7 @@ function faithfulSingle(text, sources) {
   return `${indent}* **${title}** [${cites[0]}]`;
 }
 
-function driftsFromTitle(claim, title) {
+export function driftsFromTitle(claim, title) {
   const prose = String(claim).replace(CITE_GROUP, " ");
   const titleAmounts = new Set(amountValues(title));
   for (const value of amountValues(prose)) {
@@ -81,7 +132,7 @@ function driftsFromTitle(claim, title) {
   }
   const titleNames = new Set(properNames(title));
   for (const name of properNames(prose)) {
-    if (!titleNames.has(name)) return true;
+    if (!nameMatchesTitle(name, titleNames)) return true;
   }
   if (/[\u4e00-\u9fff]/.test(title) && chineseRunsDiffer(prose, title)) return true;
   return false;
@@ -133,7 +184,7 @@ function splitBySource(text, sources) {
       const n = Number.parseInt(part.trim(), 10);
       if (!Number.isInteger(n) || n < 1 || seen.has(n)) continue;
       const source = list[n - 1];
-      const title = String(source?.title || "").trim();
+      const title = cleanTitle(source?.title);
       if (!title) continue;
       seen.add(n);
       lines.push(`${indent}* **${title}** [${n}]`);
@@ -160,4 +211,69 @@ function topicIdsIn(text, topics, sources) {
     }
   }
   return ids;
+}
+
+const BULLET_PATTERN = /^(\s*)(?:[*+-]|\d+\.)\s+\*\*([\s\S]*?)\*\*(?:([：:])\s*)?([\s\S]*)$/;
+
+/**
+ * Detect bullets that lack Chinese text (e.g. raw English titles from fallback
+ * or models) and translate them into Simplified Chinese via the provided translate function.
+ * Preserves citations [N], list markers, indentation and existing Chinese bullets.
+ */
+export async function localizeEnglishBullets(markdown, { translate } = {}) {
+  if (typeof translate !== "function") return markdown;
+  const lines = String(markdown || "").split("\n");
+  const candidates = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/[\u4e00-\u9fff]/.test(line)) continue;
+    const m = line.match(BULLET_PATTERN);
+    if (!m) continue;
+    const [, indent, headline, colon, rest = ""] = m;
+    const cites = [...rest.matchAll(CITE_GROUP)].map((cm) => cm[0]).join(" ");
+    const restText = rest.replace(CITE_GROUP, " ").replace(/\s{2,}/g, " ").trim();
+    candidates.push({
+      index: i,
+      indent,
+      headline: headline.trim(),
+      restText,
+      cites,
+    });
+  }
+
+  if (candidates.length === 0) return markdown;
+
+  const workItems = [];
+  for (const c of candidates) {
+    if (!c.restText) {
+      workItems.push({ type: "headline", text: c.headline, cand: c });
+    } else {
+      const words = c.headline.split(/\s+/).filter(Boolean);
+      if (words.length > 2) {
+        workItems.push({ type: "headline", text: c.headline, cand: c });
+      }
+      workItems.push({ type: "desc", text: c.restText, cand: c });
+    }
+  }
+
+  const rawTexts = workItems.map((w) => w.text);
+  const translated = await translate(rawTexts);
+  workItems.forEach((w, i) => {
+    w.translated = (translated && translated[i]) || w.text;
+  });
+
+  for (const c of candidates) {
+    const hItem = workItems.find((w) => w.cand === c && w.type === "headline");
+    const dItem = workItems.find((w) => w.cand === c && w.type === "desc");
+    const finalHeadline = hItem ? hItem.translated : c.headline;
+    const citePart = c.cites ? ` ${c.cites}` : "";
+    if (dItem) {
+      lines[c.index] = `${c.indent}* **${finalHeadline}**：${dItem.translated}${citePart}`;
+    } else {
+      lines[c.index] = `${c.indent}* **${finalHeadline}**${citePart}`;
+    }
+  }
+
+  return lines.join("\n");
 }

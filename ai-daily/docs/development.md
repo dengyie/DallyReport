@@ -7,9 +7,9 @@
 ## 速读（当前有效 · 维护于 2026-10-03）
 
 - 生产 Windows 唯一：任务计划程序 `ai-daily`（每日 08:40）→ `run-daily-task.cmd` → `run-daily-win.sh` → `claude -p`（skill 编排）→ Workflow 产物 → `finalize.mjs` 落盘 vault `Note/AI/DallyReport/<date>/`（10-06 迁入 Note/，与 DallyReport 主系统同根）。Mac launchd 与 `~/.ai-daily` 已于 10-03 清流。
-- 逻辑真源 = `scripts/ai-daily/*.mjs`（14 个 inline 逻辑模块 + 12 个宿主 CLI）+ `ai-daily.template.js`（编排骨架）；`build.mjs` inline 生成 3212 行自包含产物 `.claude/workflows/ai-daily.js`（repo 内），`--sync-vault` 一步同步产物 + SKILL.md 到 vault `.claude/`。
+- 逻辑真源 = `scripts/ai-daily/*.mjs`（15 个 inline 逻辑模块 + 11 个宿主 CLI）+ `ai-daily.template.js`（编排骨架）；`build.mjs` inline 生成 3366 行自包含产物 `.claude/workflows/ai-daily.js`（repo 内），`--sync-vault` 一步同步产物 + SKILL.md 到 vault `.claude/`。
 - 全链路预算：MAX_FETCH/MAX_VERIFY 16，五阶段墙钟切片 540/480/480/300s（总 1800s），report 单次 600s；对抗核查 2+1 票；跨天账本硬去重 + 昨日话题追踪 + 社区热度（10-03 五要素已上线）。
-- 测试：`cd scripts/ai-daily && node --test test/*.test.mjs`（**必须 cd 进目录**，repo 根跑 glob 不中）；当前 453 项 444 pass / 0 fail / 9 有意 skip。
+- 测试：`cd scripts/ai-daily && node --test test/*.test.mjs`（**必须 cd 进目录**，repo 根跑 glob 不中）；当前 492 项 483 pass / 0 fail / 9 有意 skip。
 - 纪律红线：CDP 只复用 9222 已运行登录态 Chrome；日报正文写「社区」不点名站名；secrets 不入库不进 prompt；`--date` 全量重跑禁止（Iron Rule，单节修复 only）。
 
 ## 1. 系统总览
@@ -37,13 +37,13 @@
 
 ```
 ai-daily/
-├── ai-daily.template.js @ scripts/ai-daily/     # 编排骨架（1312 行）：realm 适配 + 五阶段编排
+├── ai-daily.template.js @ scripts/ai-daily/     # 编排骨架（1378 行）：realm 适配 + 五阶段编排
 ├── scripts/ai-daily/*.mjs                       # 逻辑模块真源 + 宿主 CLI
 │   ├── 纯逻辑模块（build inline 进产物）：url-polyfill date-utils schemas boards dedup budget
-│   │   wallclock ladder fallback prompts render-md cluster ledger linuxdo
+│   │   wallclock ladder fallback prompts render-md cluster ledger claim-gate linuxdo
 │   ├── 宿主 CLI/模块（绝不 inline）：linuxdo-prefetch linuxdo-fetch cdp-fetch cdp-core
 │   │   artifact-check host-finalize host-paths progress generate-poster finalize cli-main
-│   └── test/*.test.mjs                          # 34 个测试文件，node --test 直调模块真源
+│   └── test/*.test.mjs                          # 35 个测试文件，node --test 直调模块真源
 ├── .claude/workflows/ai-daily.js                # build 产物（repo 内，勿手改）
 ├── .claude/skills/ai-daily/SKILL.md             # skill 编排器（vault 侧另有同步副本）
 ├── run-daily-win.sh / run-daily.sh              # Windows 生产 / Mac（已清流，保留语义参考）

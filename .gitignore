@@ -10,7 +10,7 @@ reports-cache/*
 !reports-cache/.gitkeep
 
 # launchd / daily-run logs
-logs/*.log
+logs/
 
 # the daily report itself lives in the external Obsidian vault, never here
 archive/

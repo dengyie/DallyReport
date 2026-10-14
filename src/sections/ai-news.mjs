@@ -6,13 +6,14 @@ import { fetchLinuxDoAiSources, mergeSourcesPreferLinuxDo } from "../linuxdo.mjs
 import { fetchNodeSeekAiSources } from "../nodeseek.mjs";
 import { fetchV2exAiSources } from "../v2ex.mjs";
 import { dedupeAndNormalizeSources } from "../news-dedup.mjs";
-import { splitOverMergedBullets } from "../prose-tighten.mjs";
+import { splitOverMergedBullets, repairGluedHeadings, dedupeBullets } from "../prose-tighten.mjs";
 import { fetchAllDailySources } from "../sources-daily.mjs";
 import { filterByRecency, isInWindowSource } from "../snippet-hygiene.mjs";
 import { materialWindow } from "../report-window.mjs";
 import { topicize, gradeTopics, applyGradeCap } from "../topics.mjs";
 import { investigateTopics, renderInvestigationInput } from "../investigate.mjs";
-import { enforceOneTopicPerBullet } from "../topic-bullets.mjs";
+import { enforceOneTopicPerBullet, localizeEnglishBullets } from "../topic-bullets.mjs";
+import { translateToChinese } from "../poster/translate.mjs";
 
 export function computeAiNewsStatus({
   searchOk,
@@ -294,6 +295,7 @@ export async function aiNewsSection(
     queryTemplate = config.aiQueryTemplate,
     title,
     synthTimeoutMs = config.synthTimeoutMs,
+    synthMaxTokens = config.synthMaxTokens,
   } = {},
 ) {
   // 2026-09-28 weekly: the weekly query template carries {start} ~ {end} instead
@@ -474,6 +476,7 @@ export async function aiNewsSection(
     communityCount,
     hasUsableDegradedDump,
   });
+  let runOneShot = null;
   if (shouldSynth) {
     // gemini alt writer: when web_search is enabled, run the bounded tool loop
     // (gemini emits web_search queries -> we execute them via grok-search -> feed
@@ -482,13 +485,13 @@ export async function aiNewsSection(
       model === "gemini-3.6-flash" && config.aiAltGeminiWebSearch !== false;
     const synthSources = investigation.sources;
     const synthQuery = investigation.preamble ? `${ai}\n\n${investigation.preamble}` : ai;
-    const runOneShot = (m, instruction) =>
+    runOneShot = (m, instruction) =>
       synthesizeFromSources({
         query: synthQuery,
         date: config.date,
         sources: synthSources,
         model: m,
-        maxTokens: config.synthMaxTokens,
+        maxTokens: synthMaxTokens,
         timeoutMs: synthTimeoutMs,
         reportMode: config.reportMode,
         instruction,
@@ -500,7 +503,7 @@ export async function aiNewsSection(
             date: config.date,
             sources: synthSources,
             model,
-            maxTokens: config.synthMaxTokens,
+            maxTokens: synthMaxTokens,
             timeoutMs: synthTimeoutMs,
             maxSearchRounds: config.aiAltGeminiMaxRounds,
             reportMode: config.reportMode,
@@ -597,14 +600,29 @@ export async function aiNewsSection(
   // splitting a bullet afterwards would move text out from under a [N] the
   // scan had already resolved. Doing it here means the markers and the prose
   // stay in the same state.
+  const effectiveModel = synthFellBack && config.synthFallbackModel ? config.synthFallbackModel : model;
   const bodyTextChecked = await enforceOneTopicPerBullet(bodyText || "", {
     topics: investigation.topics,
     sources: shownSources,
-    retry: investigation.topics?.length
-      ? (bullet) => retryBullet(bullet, (instruction) => runOneShot(model, instruction))
+    retry: (investigation.topics?.length && typeof runOneShot === "function")
+      ? (bullet) => retryBullet(bullet, (instruction) => runOneShot(effectiveModel, instruction))
       : undefined,
   });
-  const bodyTextTightened = splitOverMergedBullets(bodyTextChecked);
+  const bodyTextLocalized = await localizeEnglishBullets(bodyTextChecked, {
+    translate: (lines) => translateToChinese(lines, { model: effectiveModel }),
+  });
+  // 2026-10-07 P2 sanitizers (safety net for reasoning-model truncation):
+  // - repairGluedHeadings: the 2026-10-07 AI-DeepSeek body carried
+  //   "...AI 算力服务## 今日焦点" — a heading marker whose newline was lost, so it
+  //   rendered as literal text and the section it should open never began.
+  // - dedupeBullets: the same truncation restarted the synthesis block, shipping
+  //   two identical bullets under two identical headings.
+  // Both run before the citation scan, so a dropped duplicate's marker cannot
+  // linger in the reference list. Order: split first (it parses bullet lines),
+  // then repair glued headings, then drop duplicates.
+  const bodyTextTightened = dedupeBullets(
+    repairGluedHeadings(splitOverMergedBullets(bodyTextLocalized)),
+  );
   // 2026-09-28 weekly: the cap of 30 is a reading-budget sized for a day's
   // worth of citations. A week's body cites proportionally more, and truncating
   // the tail would drop the very sources a later [N] points at — the reference

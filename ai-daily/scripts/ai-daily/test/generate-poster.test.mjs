@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { runPoster, loadEnvFile, resolveDallyReportRoot, extractHeadlinesFromMarkdown, isSimilarHeadline } from '../generate-poster.mjs'
+import { runPoster, loadEnvFile, resolveDallyReportRoot, extractHeadlinesFromMarkdown, isSimilarHeadline, dedupePosterEmbed, POSTER_FILE } from '../generate-poster.mjs'
 
 test('generate-poster: skips cleanly when no headlines exist', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'poster-test-'))
@@ -52,6 +52,48 @@ test('generate-poster: 幂等——已有 ![[ai-daily.png]] 的 md 不重复嵌�
   assert.equal(fs.readFileSync(path.join(tmp2, '2026-09-15-ai日报.md'), 'utf8'), md, '生图失败不动 md')
   fs.rmSync(tmp, { recursive: true, force: true })
   fs.rmSync(tmp2, { recursive: true, force: true })
+})
+
+test('generate-poster: 自愈——旧全路径 embed 被收敛为单一短名（10-06 双内嵌根因）', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'poster-heal-'))
+  // 10-06 实证：迁移把嵌入改成短名，却留下了此前的完整路径嵌入 → 同一篇两个海报。
+  const md = '# 🤖 AI 日报 · 2026-09-15\n\n![[Note/AI/DallyReport/2026-09-15/ai-daily.png]]\n\n![[ai-daily.png]]\n\n正文\n'
+  fs.writeFileSync(path.join(tmp, '2026-09-15-ai日报.md'), md)
+  fs.writeFileSync(path.join(tmp, '2026-09-15.verified-claims.json'), JSON.stringify({ confirmed: [{ claim: 'A 条新闻' }] }))
+  const res = await runPoster(tmp, '2026-09-15', { generateAiPoster: async () => ({ ok: true, file: '/tmp/x/ai-daily.png' }) })
+  assert.equal(res.ok, true)
+  const after = fs.readFileSync(path.join(tmp, '2026-09-15-ai日报.md'), 'utf8')
+  const embeds = after.match(/!\[\[[^\]]*ai-daily\.png\]\]/g) || []
+  assert.equal(embeds.length, 1, `必须只剩一个海报嵌入，实得 ${embeds.length}`)
+  assert.equal(embeds[0], '![[ai-daily.png]]', '收敛为短名形态')
+  assert.doesNotMatch(after, /Note\/AI\/DallyReport/, '旧完整路径嵌入被删除')
+  fs.rmSync(tmp, { recursive: true, force: true })
+})
+
+test('dedupePosterEmbed: ensure=false 时无嵌入的 md 原样保留（海报失败不留悬空嵌入）', () => {
+  const md = '# 🤖 AI 日报 · 2026-09-15\n\n正文\n'
+  assert.equal(dedupePosterEmbed(md, POSTER_FILE, { ensure: false }), md)
+})
+
+test('dedupePosterEmbed: ensure=false 仍收敛重复（finalize 落盘去重）', () => {
+  const md = '# 🤖 AI 日报 · 2026-09-15\n\n![[Note/AI/DallyReport/2026-09-15/ai-daily.png]]\n\n![[ai-daily.png]]\n\n正文\n'
+  const out = dedupePosterEmbed(md, POSTER_FILE, { ensure: false })
+  const embeds = out.match(/!\[\[[^\]]*ai-daily\.png\]\]/g) || []
+  assert.equal(embeds.length, 1)
+  assert.equal(embeds[0], '![[ai-daily.png]]')
+})
+
+test('dedupePosterEmbed: ensure=true 时无嵌入则补一条短名嵌入到 H1 下', () => {
+  const out = dedupePosterEmbed('# 🤖 AI 日报 · 2026-09-15\n\n正文\n', POSTER_FILE)
+  assert.match(out, /# 🤖 AI 日报[^\n]*\n\n!\[\[ai-daily\.png\]\]/)
+})
+
+test('dedupePosterEmbed: 相似但不相关的嵌入（别的图）不受影响', () => {
+  const md = '# 🤖 AI 日报 · 2026-09-15\n\n![[ai-daily.png]]\n\n![[other-chart.png]]\n\n正文\n'
+  const out = dedupePosterEmbed(md, POSTER_FILE)
+  assert.match(out, /!\[\[other-chart\.png\]\]/, '无关嵌入保留')
+  const embeds = out.match(/!\[\[ai-daily\.png\]\]/g) || []
+  assert.equal(embeds.length, 1)
 })
 
 test('generate-poster: claims 损坏回落 sources.json；两者都无 headlines → no_headlines', async () => {

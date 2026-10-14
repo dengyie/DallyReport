@@ -4,7 +4,7 @@
 
 ## 运行方式
 
-- **每日自动（生产，Windows 唯一）**：任务计划程序 `ai-daily`（每日 08:40）→ `run-daily-task.cmd` → `run-daily-win.sh`（幂等 / linuxdo 预抓 / 编排器阶梯 / 产物自检 / 墙钟审计），产出到 Obsidian vault `AI/DallyReport/<date>/`。
+- **每日自动（生产，Windows 唯一）**：任务计划程序 `ai-daily`（每日 08:40）→ `run-daily-task.cmd` → `run-daily-win.sh`（幂等 / linuxdo 预抓 / 编排器阶梯 / 产物自检 / 墙钟审计），产出到 Obsidian vault `Note/AI/DallyReport/<date>/`。
 - **手动**：`/ai-daily`（skill），支持 `--date YYYY-MM-DD` 补历史（⚠️ Iron Rule：已有产物的日期禁止 `--date` 全量重跑修复，单节修复 only）/ `--force` 重跑当日。
 
 运行时文件加载自 vault `.claude/`：`.claude/workflows/ai-daily.js` + `.claude/skills/ai-daily/SKILL.md`。**本目录是版本管理真源**——改 `.mjs` 模块 / `ai-daily.template.js` → `node scripts/ai-daily/build.mjs` → cp 产物与 SKILL.md 同步到 vault。
@@ -13,9 +13,9 @@
 
 ```
 ai-daily/
-├── scripts/ai-daily/*.mjs          # 15 个逻辑模块真源 + 6 个宿主 CLI + test/（32 个测试文件）
+├── scripts/ai-daily/*.mjs          # 15 个逻辑模块真源 + 11 个宿主 CLI + test/（35 个测试文件）
 ├── scripts/ai-daily/ai-daily.template.js  # 编排骨架（realm 适配 + 五阶段编排）
-├── .claude/workflows/ai-daily.js   # build 产物（3354 行自包含，勿手改）
+├── .claude/workflows/ai-daily.js   # build 产物（3366 行自包含，勿手改）
 ├── .claude/skills/ai-daily/SKILL.md
 ├── run-daily-win.sh                # Windows 生产运行器
 ├── run-daily-task.cmd / register-task.ps1

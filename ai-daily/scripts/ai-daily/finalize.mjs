@@ -27,7 +27,7 @@ import os from 'node:os'
 import { makeLedgerEntry, pruneLedger } from './ledger.mjs'
 import { isJunkClaim } from './claim-gate.mjs'
 import { normURL } from './date-utils.mjs'
-import { runPoster } from './generate-poster.mjs'
+import { runPoster, dedupePosterEmbed, POSTER_FILE } from './generate-poster.mjs'
 import { isCliMain } from './cli-main.mjs'
 import { WIN_PROD_DALLYREPORT_ROOT, macProdDallyReportRoot } from './host-paths.mjs'
 
@@ -85,10 +85,13 @@ const _prodPrefixes = () => (
 /** 生产 outDir 判定（prefix 可注入：字符串或前缀数组；缺省 = 环境变量覆盖 + 内置列表；测试不得在真实生产目录 mkdtemp）。 */
 export const isProdOutDir = (outDir, prefix) => {
   const prefixes = prefix ? (Array.isArray(prefix) ? prefix : [prefix]) : _prodPrefixes()
+  const isWin = process.platform === 'win32'
   const resolvedOut = path.resolve(expand(outDir))
+  const normOut = isWin ? resolvedOut.toLowerCase() : resolvedOut
   return prefixes.some(p => {
     const resolvedPrefix = path.resolve(expand(p))
-    return resolvedOut === resolvedPrefix || resolvedOut.startsWith(resolvedPrefix + path.sep)
+    const normPrefix = isWin ? resolvedPrefix.toLowerCase() : resolvedPrefix
+    return normOut === normPrefix || normOut.startsWith(normPrefix + path.sep)
   })
 }
 
@@ -204,7 +207,11 @@ export const finalizePayloads = ({ payloads, outDir, date }) => {
   write(`${date}.verified-claims.json`, payloads.claims)
   write(`${date}.sources.json`, payloads.sources)
   write(`${date}.meta.json`, payloads.meta)
-  write(`${date}-ai日报.md`, payloads.md)
+  // Finalize-time poster dedupe (P3#1): collapse a legacy full-path embed and a
+  // short-name embed down to one short-name embed. `ensure:false` so a note that
+  // carried no embed stays that way — runPoster below re-adds one only when the
+  // poster actually generated, so a failed poster never leaves a dangling embed.
+  write(`${date}-ai日报.md`, dedupePosterEmbed(payloads.md, POSTER_FILE, { ensure: false }))
   return written
 }
 

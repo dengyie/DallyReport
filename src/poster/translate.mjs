@@ -88,7 +88,7 @@ export async function translateToChinese(lines, { model, timeoutMs = DEFAULT_TIM
   const apiKey = envOr("GROK_API_KEY", null);
   if (!apiUrl || !apiKey) return result;
 
-  const doFetch = fetchImpl || deps.defaultFetch;
+  const doFetch = fetchImpl || deps.defaultFetch || globalThis.fetch;
   if (!doFetch) return result;
 
   const numbered = targets.map((i) => `${i + 1}. ${input[i].slice(0, MAX_INPUT_CHARS)}`).join("\n");

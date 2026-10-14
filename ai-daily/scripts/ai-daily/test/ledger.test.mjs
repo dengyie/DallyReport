@@ -289,6 +289,10 @@ test('isProdOutDir（10-03 P0）：Windows vault 生产路径命中（旧版 Mac
   assert.equal(isProdOutDir('E:/profile/note/note/Note/AI/DallyReport'), true, '生产根目录命中')
   assert.equal(isProdOutDir('E:/profile/note/note/Note/AI/DallyReport-other/x'), false, '同前缀异目录不误命中')
   assert.equal(isProdOutDir(PROD_DALLYREPORT_PREFIXES[1]), true, 'Mac iCloud 兜底前缀仍命中（历史对账）')
+  if (process.platform === 'win32') {
+    assert.equal(isProdOutDir('e:/profile/note/note/Note/AI/DallyReport/2026-10-03'), true, '小写 e: 盘符命中生产前缀（大小写不敏感）')
+    assert.equal(isProdOutDir('e:\\profile\\note\\note\\Note\\AI\\DallyReport\\2026-10-03'), true, '小写 e: 反斜杠形态命中生产前缀')
+  }
 })
 
 // ─── 10/03 对齐参考日报：昨日话题追踪（连续剧）───

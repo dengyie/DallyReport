@@ -17,6 +17,7 @@ import {
   fetchVergeAiDaily,
   fetchQbitaiDaily,
   fetchInfoqCnDaily,
+  normalizeFeedUrl,
 } from "../src/sources-daily.mjs";
 
 const TODAY = "2026-08-10";
@@ -1041,4 +1042,53 @@ test("H2: a text post uses HN's own body as the summary", async () => {
   } finally {
     globalThis.fetch = original;
   }
+});
+
+// ── normalizeFeedUrl (P3#2: RSS/feed URL double-slash hygiene) ──────────────
+
+test("normalizeFeedUrl: collapses double slashes in the path", () => {
+  assert.equal(
+    normalizeFeedUrl("https://example.com//p/123"),
+    "https://example.com/p/123",
+  );
+  assert.equal(
+    normalizeFeedUrl("https://example.com/a//b//c"),
+    "https://example.com/a/b/c",
+  );
+});
+
+test("normalizeFeedUrl: trims a trailing slash but keeps the root path", () => {
+  assert.equal(normalizeFeedUrl("https://example.com/p/123//"), "https://example.com/p/123");
+  assert.equal(normalizeFeedUrl("https://example.com/"), "https://example.com/");
+});
+
+test("normalizeFeedUrl: preserves query and hash", () => {
+  assert.equal(
+    normalizeFeedUrl("https://example.com//feed?id=42"),
+    "https://example.com/feed?id=42",
+  );
+  assert.equal(
+    normalizeFeedUrl("https://example.com//post#section"),
+    "https://example.com/post#section",
+  );
+  // A `//` INSIDE the query is data (often a token), not a path defect — it must
+  // survive normalization untouched.
+  assert.equal(
+    normalizeFeedUrl("https://example.com/feed?t=a//b"),
+    "https://example.com/feed?t=a//b",
+  );
+});
+
+test("normalizeFeedUrl: a bare value (mailto / relative / garbage) is left intact", () => {
+  assert.equal(normalizeFeedUrl("mailto:mango@example.com"), "mailto:mango@example.com");
+  assert.equal(normalizeFeedUrl(""), "");
+  assert.equal(normalizeFeedUrl("  "), "");
+  // Not a parseable URL → raw string, never a throw.
+  assert.equal(normalizeFeedUrl("not a url at all"), "not a url at all");
+});
+
+test("normalizeFeedUrl: unifies forms the deduper previously split", () => {
+  const a = normalizeFeedUrl("https://x.com/story//");
+  const b = normalizeFeedUrl("https://x.com/story");
+  assert.equal(a, b, "the same permalink must dedupe to one key");
 });

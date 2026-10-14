@@ -138,6 +138,71 @@ export function countOverMergedBullets(markdown) {
 }
 
 /**
+ * Repair a heading marker glued into the middle of a line (2026-10-07 P2).
+ *
+ * Observed in the shipped 2026-10-07 AI-DeepSeek.md: the synthesis body carried
+ *   ...**算力基础设施初创公司 Lambda 计划在 IPO 前融资 40 亿美元**：AI 算力服务## 今日焦点
+ * The model emitted a blank line + `## 今日焦点` but the newline was lost, so a
+ * heading landed mid-sentence. Markdown only recognises a heading at line start,
+ * so the marker rendered as literal `##` text welded to the prose AND the section
+ * it was meant to open never began.
+ *
+ * The repair restores the line break the model intended: a `## `/`### ` marker
+ * preceded by non-whitespace text becomes its own block. A heading already at
+ * line start (the legitimate `## 今日焦点` shape) is passed through untouched —
+ * this function does NOT touch the document outline, only glued markers.
+ *
+ * Deliberately narrow: requires `#{2,3}` followed by a space, preceded by a
+ * non-word, non-whitespace, non-`#` character. That excludes Latin identifiers
+ * ("C## ") while catching CJK-prose boundaries (e.g. "务## "), which is the
+ * shape of the shipped defect.
+ */
+const GLUED_HEADING_RE = /([^\s\w#])(#{2,3}\s+\S)/g;
+export function repairGluedHeadings(markdown) {
+  return String(markdown || "")
+    .split("\n")
+    .map((line) => line.replace(GLUED_HEADING_RE, "$1\n\n$2"))
+    .join("\n");
+}
+
+/**
+ * Drop exact-duplicate titled bullets (2026-10-07 P2).
+ *
+ * The same reasoning-model truncation that glued a heading onto a sentence also
+ * produced a whole restarted block: the shipped 2026-10-07 AI-DeepSeek.md lists
+ * `**Sharing AI Progress in Mathematics** [8]` and `**OpenAI drops another batch
+ * of mathematical breakthroughs** [12]` twice, verbatim. A reader taking the
+ * second list as new items re-reads the same news under a fresh heading.
+ *
+ * Only the first occurrence survives. The key is the bullet's full text with
+ * whitespace collapsed, so two bullets that differ only in line-breaking are
+ * caught while two genuinely different stories sharing a title are not (their
+ * bodies differ). Lines that are not bullets — including headings and the
+ * reference list — are never dropped; the reference list is appended after this
+ * runs, so a duplicate citation cannot be removed from under a live `[N]`.
+ */
+export function dedupeBullets(markdown) {
+  const seen = new Set();
+  const out = [];
+  for (const line of String(markdown || "").split("\n")) {
+    const bullet = line.match(/^\s*(?:[*+-]|\d+\.)\s+(.*)$/);
+    if (!bullet) {
+      out.push(line);
+      continue;
+    }
+    const key = bullet[1].replace(/\s+/g, " ").trim();
+    if (!key) {
+      out.push(line);
+      continue;
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+/**
  * Bullets the poster can use, in either shape.
  *
  * A split bullet has no `**title**：`, so the poster's extractor must not skip

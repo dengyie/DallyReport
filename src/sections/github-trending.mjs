@@ -26,6 +26,42 @@ export function starDeltaLabel(mode) {
   return mode === "weekly" ? "本周新增" : "今日新增";
 }
 
+// The cache file for the *previous* date, same period mode (2026-10-07 P1).
+// Exported pure so the date arithmetic — including the Beijing calendar wrap and
+// the weekly/daily mode key — is unit-testable without a network fetch.
+export function prevDayTrendingCacheFile(config) {
+  const [y, m, d] = config.date.split("-").map(Number);
+  const prevDate = new Date(Date.UTC(y, m - 1, d - 1)).toISOString().slice(0, 10);
+  const prevKey = `${prevDate}-${config.reportMode === "weekly" ? "weekly" : "daily"}`;
+  return path.join(config.cacheDir, `${prevKey}-github-trending.txt`);
+}
+
+// 2026-10-07 live-test: the GitHub fetch failed today's runs with
+// "Connect Timeout Error (attempted address: github.com:443, timeout: 10000ms)"
+// from the grok-search fetch.js child. That is a TRANSIENT network-level failure
+// — a host behind GFW drops the SYN to github.com:443 intermittently (2 of 3
+// probes succeeded within a minute). A retry a moment later often lands. The
+// child surfaces it as exit code 1 with a "fetch failed:" / "Connect Timeout" /
+// "timed out" message. Anything else (a real parse/shape error, a 200+HTML
+// challenge that fails the cachePredicate — that one does NOT throw) is not a
+// transport problem and retrying it would only burn seconds before the cache
+// fallback. Retrying only the transport class keeps the cost bounded.
+export function isTransientFetchError(err) {
+  if (!err) return false;
+  if (err.timedOut === true) return true; // our own GROK_CHILD_TIMEOUT_MS watchdog
+  const msg = String(err?.message || "");
+  return (
+    /connect timeout/i.test(msg) ||
+    /fetch failed/i.test(msg) ||
+    /timed out/i.test(msg) ||
+    /ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENETUNREACH|EAI_AGAIN/i.test(msg)
+  );
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const TOP_N = 15;
 
 // One concise line for the 简介 column: cut at the first *real* sentence
@@ -247,27 +283,63 @@ export async function githubTrendingSection(config) {
     // into trending rows. This stops a transient HTML error page (CF interstitial,
     // gateway 200+HTML) from being written as the day's cache and then silently
     // replayed as "successful" on every rerun that day.
-    const r = await runFetch(trendingUrlFor(config.reportMode), config, {
-      provider: "direct",
-      maxChars: config.fetchMaxChars,
-      cacheFile,
-      cachePredicate: (t) => parseTrending(t).length > 0,
-    });
-    text = r.text;
-    provider = r.provider;
-    fromCache = r.fromCache === true;
-    cacheWriteError = r.cacheWriteError || null;
-    cacheSkipped = r.cacheSkipped === true;
-  } catch (e) {
-    // last-resort: reuse a prior cache even if live fetch dies
+    //
+    // 2026-10-07 live-test: a single attempt made the whole section depend on one
+    // network instant. github.com:443 connect timeouts are intermittent on hosts
+    // behind GFW — retry ONCE only on a transient transport error (connect
+    // timeout / ETIMEDOUT / fetch failed), with a short backoff, before giving up
+    // to the cache chain. A deterministic/shape error is not retried (it would
+    // only burn a few extra seconds before the cache fallback that catches it).
+    const url = trendingUrlFor(config.reportMode);
+    let lastErr;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const r = await runFetch(url, config, {
+          provider: "direct",
+          maxChars: config.fetchMaxChars,
+          cacheFile,
+          cachePredicate: (t) => parseTrending(t).length > 0,
+        });
+        text = r.text;
+        provider = r.provider;
+        fromCache = r.fromCache === true;
+        cacheWriteError = r.cacheWriteError || null;
+        cacheSkipped = r.cacheSkipped === true;
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        if (attempt < 2 && isTransientFetchError(e)) {
+          await sleepMs(3000);
+          continue;
+        }
+        throw e;
+      }
+    }
+    void lastErr;
+  } catch (fetchErr) {
+    // Record the live fetch error so if cache succeeds, the delivered note
+    // honestly warns the reader that live fetch failed and cached data was used.
+    fetchError = fetchErr;
+    const fs = await import("node:fs/promises");
     try {
-      const fs = await import("node:fs/promises");
+      // 1. Same-day cache (a previous run today succeeded).
       text = await fs.readFile(cacheFile, "utf8");
       fromCache = true;
       provider = "cache(stale)";
     } catch {
-      fetchError = e;
-      text = "";
+      // 2. Cross-day fallback (P1 2026-10-07): on the first run of a day the
+      //    same-date cache does not exist, so the whole section went blank.
+      //    Fall back to yesterday's cache — data is one day stale but the
+      //    section is populated instead of empty.
+      try {
+        text = await fs.readFile(prevDayTrendingCacheFile(config), "utf8");
+        fromCache = true;
+        provider = "cache(stale,prev-day)";
+      } catch {
+        // 3. All exhausted — ship the original fetch error.
+        text = "";
+      }
     }
   }
 
@@ -303,7 +375,11 @@ export async function githubTrendingSection(config) {
       ]),
     );
     if (fetchError) {
-      note = `> ⚠️ 实时抓取失败，使用缓存数据：${fetchError.message}\n`;
+      // provider distinguishes same-day cache ("cache(stale)") from the
+      // cross-day fallback ("cache(stale,prev-day)") — name the truth in the
+      // delivered note, a prev-day section must not read as today's data.
+      const prevDay = provider === "cache(stale,prev-day)";
+      note = `> ⚠️ 实时抓取失败，使用${prevDay ? "前一日" : ""}缓存数据：${fetchError.message}\n`;
     } else if (cacheSkipped) {
       note = "> ⚠️ 实时抓取响应格式异常（疑似错误页），未写入缓存，本次以实时结果渲染。\n";
     }

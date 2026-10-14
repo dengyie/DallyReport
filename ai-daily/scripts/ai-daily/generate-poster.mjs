@@ -85,6 +85,49 @@ export const POSTER_FILE = 'ai-daily.png'
 export const POSTER_EMBED = `![[${POSTER_FILE}]]`
 
 /**
+ * Normalise the poster embed in a report md to AT MOST ONE short-name embed.
+ *
+ * The previous guard was `if (!md.includes('![[ai-daily.png]]'))`. That string
+ * does not occur inside the legacy FULL-PATH form
+ * `![[Note/AI/DallyReport/<date>/ai-daily.png]]` (the prefix sits after `![[`),
+ * so a note that already carried a full-path embed got the short embed appended
+ * BESIDE it — two poster embeds in one note, measured in the shipped 2026-10-06
+ * note. This strips every variant (short or path-prefixed) and re-inserts one
+ * canonical short embed under the H1, so it also self-heals old notes on rerun.
+ *
+ * @param {string} md
+ * @param {string} posterFile
+ * @param {{ensure?:boolean}} [opts]
+ *   ensure=true  (poster generation just succeeded): always leave exactly one
+ *                embed, inserting the short form if the note had none.
+ *   ensure=false (finalize-time dedupe): if the note had NO embed, leave it
+ *                untouched — a failed poster must not leave the note pointing at
+ *                an image that was never written. Only collapses duplicates.
+ * @returns {string}
+ */
+export function dedupePosterEmbed(md, posterFile = POSTER_FILE, { ensure = true } = {}) {
+  const escaped = posterFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const shortEmbed = `![[${posterFile}]]`
+  const allEmbeds = md.match(new RegExp(`!\\[\\[[^\\]]*${escaped}\\]\\]`, 'g')) || []
+
+  // Fast path: already canonical (exactly one embed, short form) → byte-identical
+  // return, so a rerun never churns the file or the Obsidian sync diff.
+  if (allEmbeds.length === 1 && allEmbeds[0] === shortEmbed) return md
+
+  // No embed: only the poster-success path (ensure) may add one.
+  if (allEmbeds.length === 0) {
+    if (!ensure) return md
+    const replaced = md.replace(/(^|\n)(# 🤖 AI 日报[^\n]*\n)/, `$1$2\n${shortEmbed}\n`)
+    return replaced !== md ? replaced : `${shortEmbed}\n\n${md}`
+  }
+
+  // One or more (duplicate / legacy full-path) embeds → collapse to one short embed.
+  const cleaned = md.replace(new RegExp(`!\\[\\[[^\\]]*${escaped}\\]\\]\\n?`, 'g'), '')
+  const replaced = cleaned.replace(/(^|\n)(# 🤖 AI 日报[^\n]*\n)/, `$1$2\n${shortEmbed}\n`)
+  return replaced !== cleaned ? replaced : `${shortEmbed}\n\n${cleaned}`
+}
+
+/**
  * 从当天已经生成的 Markdown 日报中提取高质量中文精炼标题与对应摘要。
  * 优先级高于原始 claims / sources：
  *   1. 优先提取 ## 🔥 今日亮点（2~4 条，天然带有精炼短标题与高信息量摘要）
@@ -319,23 +362,17 @@ export async function runPoster(outDir, date, deps = {}) {
     }
     console.log(`POSTER-RESULT ok=${res.ok} summary=${res.summary}`)
     if (res.ok && res.file) {
-      // Embed ![[ai-daily.png]] into markdown if not already embedded
+      // Embed exactly one short-name poster embed, stripping any legacy full-path
+      // variant that may already be in the note (the pre-10-06 migration form, e.g.
+      // `![[Note/AI/DallyReport/<date>/ai-daily.png]]`, or a manual insertion).
       if (fsImpl.existsSync(mdPath)) {
-        let md = fsImpl.readFileSync(mdPath, 'utf8')
-        if (!md.includes('![[ai-daily.png]]')) {
-          // Place embed right after main header（文件首行或后续行都命中）
-          const replaced = md.replace(/(^|\n)(# 🤖 AI 日报[^\n]*\n)/, '$1$2\n![[ai-daily.png]]\n')
-          if (replaced !== md) {
-            md = replaced
-          } else {
-            md = `![[ai-daily.png]]\n\n${md}`
-          }
-          // 9/19：与 finalize 产物同规格——tmp+rename 原子改写（二次改写不再暴露半截 md 窗口）。
-          const tmp = mdPath + '.tmp'
-          fsImpl.writeFileSync(tmp, md, 'utf8')
-          fsImpl.renameSync(tmp, mdPath)
-          console.log(`POSTER-EMBED updated ${mdPath} with ![[ai-daily.png]]`)
-        }
+        const raw = fsImpl.readFileSync(mdPath, 'utf8')
+        const deduped = dedupePosterEmbed(raw, POSTER_FILE)
+        // 9/19：与 finalize 产物同规格——tmp+rename 原子改写（半截 md 窗口不可见）。
+        const tmp = mdPath + '.tmp'
+        fsImpl.writeFileSync(tmp, deduped, 'utf8')
+        fsImpl.renameSync(tmp, mdPath)
+        console.log(`POSTER-EMBED deduped ${mdPath} with ![[${POSTER_FILE}]]`)
       }
     }
     return res

@@ -1,9 +1,9 @@
 import dotenv from "dotenv";
 import path from "node:path";
-import os from "node:os";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolveMode, windowRange } from "./report-window.mjs";
+import { HOST_DEFAULTS } from "./host-paths.mjs";
 
 // project dir regardless of cwd (running from elsewhere wouldn't re-hit the net or
 // split caches across directories).
@@ -15,65 +15,36 @@ const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 // MISSING_GROK_CREDS），全程无提示——2026-09-25 review 根因修复。
 dotenv.config({ path: path.join(PROJECT_ROOT, ".env") });
 
-const HOME = os.homedir();
-const DEFAULT_GROK_SEARCH_DIR = path.join(HOME, ".claude", "skills", "grok-search");
-const DEFAULT_OBSIDIAN_DIR = path.join(
-  HOME,
-  "Library",
-  "Mobile Documents",
-  "iCloud~md~obsidian",
-  "Documents",
-  "obsidian-note",
-  "Note",
-  "AI",
-  "DallyReport",
-);
+// Host-derived defaults (see host-paths.mjs). Previously these were hardcoded
+// macOS iCloud absolute paths, which on Windows resolved to a nonexistent
+// `C:\Users\<u>\Library\...` tree — every default below is now the host's own
+// convention, and .env still overrides each one individually.
+const DEFAULT_GROK_SEARCH_DIR = HOST_DEFAULTS.grokSearchDir;
+const DEFAULT_OBSIDIAN_DIR = HOST_DEFAULTS.obsidianDir;
 
 // Single source of truth for the synthesis model + tuning. Read here, not re-read
 // ad hoc from process.env in section modules, so the default lives in one place.
-const DEFAULT_SYNTH_MODEL = "gpt-5.6-luna";
+// Default is gemini-3.6-flash, the writer verified live on the gateway. gpt-5.6-luna
+// is NOT a usable default: it returns fake-empty SSE streams (chatcmpl-freeblock000)
+// and 500s on /responses, so it is listed in KNOWN_BAD_MODELS below and must be
+// probed out rather than shipped as the default.
+const DEFAULT_SYNTH_MODEL = "gemini-3.6-flash";
 const DEFAULT_SYNTH_MAX_TOKENS = 4000;
 const DEFAULT_SYNTH_TIMEOUT_MS = 90000;
 
+// Models the gateway advertises but that cannot write. Export so the resilience
+// shell (resilient-run.mjs) and any future consumer share ONE list instead of
+// each hardcoding its own copy.
+export const KNOWN_BAD_MODELS = Object.freeze([
+  // Returns fake-empty SSE streams (chatcmpl-freeblock000) and 500s on /responses.
+  "gpt-5.6-luna",
+]);
+
 // --- GitHub poster image generation (image-gen.mjs) ---
 // The poster prompt + reference image live in the Obsidian vault (user-authored).
-const DEFAULT_IMAGE_PROMPT_FILE = path.join(
-  HOME,
-  "Library",
-  "Mobile Documents",
-  "iCloud~md~obsidian",
-  "Documents",
-  "obsidian-note",
-  "Note",
-  "AI",
-  "AI 提示词",
-  "图片生成提示词",
-  "GitHub 日报海报提示词.md",
-);
-const DEFAULT_AI_IMAGE_PROMPT_FILE = path.join(
-  HOME,
-  "Library",
-  "Mobile Documents",
-  "iCloud~md~obsidian",
-  "Documents",
-  "obsidian-note",
-  "Note",
-  "AI",
-  "AI 提示词",
-  "图片生成提示词",
-  "AI 日报海报提示词.md",
-);
-const DEFAULT_IMAGE_REF_IMAGE = path.join(
-  HOME,
-  "Library",
-  "Mobile Documents",
-  "iCloud~md~obsidian",
-  "Documents",
-  "obsidian-note",
-  "OneNode",
-  "assersts",
-  "Pasted image 20260804185819.png",
-);
+const DEFAULT_IMAGE_PROMPT_FILE = HOST_DEFAULTS.imagePromptFile;
+const DEFAULT_AI_IMAGE_PROMPT_FILE = HOST_DEFAULTS.aiImagePromptFile;
+const DEFAULT_IMAGE_REF_IMAGE = HOST_DEFAULTS.imageRefImage;
 // gpt-image-2 is the user-mandated model. CPA rejects gpt-image-1 on /images/*.
 // Probed 2026-07-31: /images/generations is reliable; /images/edits (ref upload)
 // works but the gateway/CF 524s ~126s, so retries + a generations fallback are
@@ -142,6 +113,22 @@ export function beijingDateFor(epochMs) {
   const m = String(shifted.getUTCMonth() + 1).padStart(2, "0");
   const day = String(shifted.getUTCDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
+}
+
+// Beijing timestamp for human-readable log lines (2026-10-07 P3).
+// "HH:MM:SS" portion mirrors what a wall clock in Asia/Shanghai shows at
+// the instant, so log lines carry the same date AND time as the report.
+// Deterministic; takes epochMs, returns "YYYY-MM-DD HH:MM:SS".
+export function beijingTimestampFor(epochMs) {
+  const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
+  const shifted = new Date(epochMs + BEIJING_OFFSET_MS);
+  const d = shifted.getUTCFullYear() + "-" +
+    String(shifted.getUTCMonth() + 1).padStart(2, "0") + "-" +
+    String(shifted.getUTCDate()).padStart(2, "0");
+  const t = String(shifted.getUTCHours()).padStart(2, "0") + ":" +
+    String(shifted.getUTCMinutes()).padStart(2, "0") + ":" +
+    String(shifted.getUTCSeconds()).padStart(2, "0");
+  return `${d} ${t}`;
 }
 
 // Image-gen creds: prefer dedicated IMAGE_* vars; fall back to the grok-search
@@ -495,6 +482,12 @@ export function loadConfig({ date = null, mode = null } = {}) {
     // the shared 90s budget used to time out and degrade the note to the raw
     // answer (measured 2026-08-06). Default 5min keeps the margin.
     aiAltSynthTimeoutMs: positiveInt("AI_ALT_SYNTH_TIMEOUT_MS", 300000),
+    // The alt writer needs its own completion budget too: deepseek-v4-flash
+    // was upgraded to v4.1-flash by the gateway and now generates reasoning_content
+    // (thinking tokens) before visible completion. Raising to 8192 prevents
+    // SYNTH_TRUNCATED_EMPTY caused by reasoning tokens exhausting a 4000 cap,
+    // while executing within ~10-15s (well below the ~120s gateway cap).
+    aiAltSynthMaxTokens: positiveInt("AI_ALT_SYNTH_MAX_TOKENS", 8192),
     // --- gemini-3.6-flash alt writer: client-side web_search tool loop ---
     // gemini is the only writer model on the gateway that voluntarily emits
     // web_search tool_calls (verified 2026-08-07; DeepSeek emits 0, Luna 502s).
@@ -546,6 +539,7 @@ export function loadConfig({ date = null, mode = null } = {}) {
 // anything else falls back to a sanitized kebab of the raw model id.
 const ALT_MODEL_SLUGS = {
   "deepseek-v4-pro": "DeepSeek",
+  "deepseek-v4-flash": "DeepSeek",
   "grok-4.5": "Grok",
   "gpt-5.6-luna": "Luna",
   "gemini-3.6-flash": "Gemini",
@@ -592,6 +586,10 @@ export function resolveAltChannel(config) {
     // Alt writers are slower than grok-4.5 on /chat/completions, so they get a
     // dedicated, larger synthesis budget (default 5min) instead of the shared one.
     synthTimeoutMs: config.aiAltSynthTimeoutMs,
+    // ...and a dedicated completion budget: a reasoning alt writer spends the
+    // shared 4000-token budget on hidden reasoning and returns an empty body
+    // (see aiAltSynthMaxTokens above).
+    synthMaxTokens: config.aiAltSynthMaxTokens,
     // A weekly alt note is a different artefact covering a different span, so
     // it gets the same period suffix as the main channel.
     title: config.reportMode === "weekly"
@@ -618,6 +616,19 @@ export function validateRuntimePaths(config) {
       if (!existsSync(target)) warnings.push(`${name} 不存在：${target}`);
     } catch (error) {
       warnings.push(`${name} 无法检查：${target}（${error.message}）`);
+    }
+  }
+  // Known-bad writer (spec §4.2): a configured model the gateway advertises but
+  // that cannot write is a silent-degrade trap. The resilient shell probes it out,
+  // but a direct `node src/run.mjs` has no probe — it would burn a whole run on a
+  // fake-empty model. Warn loudly at validation time instead of degrading silently.
+  for (const [name, model] of [
+    ["GROK_MODEL", config?.synthModel],
+    ["AI_ALT_MODEL", config?.aiAltModel],
+    ["GROK_SEARCH_MODEL", config?.searchModel],
+  ]) {
+    if (model && KNOWN_BAD_MODELS.includes(model)) {
+      warnings.push(`${name}=${model} 是已知坏模型（假空流/500），建议换用 gemini-3.6-flash 等可用写手`);
     }
   }
   return warnings;

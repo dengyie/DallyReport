@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+
 // ---- in-flight child registry ----
 // Child processes spawned by the report (grok-search scripts, sips) are normally
 // awaited and reaped by their caller. But if the *main* process is killed while a
@@ -49,9 +51,20 @@ export function trackChild(child, { detached = false } = {}) {
 // process.on('exit') and from SIGINT/SIGTERM handlers.
 function killOne(child) {
   try {
-    // No signal string on win32: child.kill("SIGKILL") is not a portable kill.
-    if (process.platform === "win32") child.kill();
-    else child.kill("SIGKILL");
+    // Windows: taskkill /T /F ensures any grandchild processes spawned by
+    // the tracked child are reaped before or alongside the child itself.
+    if (process.platform === "win32") {
+      if (typeof child.pid === "number" && child.pid > 0) {
+        try {
+          spawnSync("taskkill", ["/T", "/F", "/PID", String(child.pid)], { stdio: "ignore" });
+        } catch {
+          /* best-effort tree kill */
+        }
+      }
+      child.kill();
+    } else {
+      child.kill("SIGKILL");
+    }
   } catch {
     /* already gone */
   }

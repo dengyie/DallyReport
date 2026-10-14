@@ -6,7 +6,7 @@ import { loadConfig, modelSlug, resolveAltChannel } from "../src/config.mjs";
 // wiped (and restored) per-test just like the other env-backed keys. The model is
 // only used via resolveAltChannel (returns the object), never from process.env
 // directly in the consumer, so a clean baseline keeps the defaults deterministic.
-const ALT_KEYS = ["AI_ALT_CHANNEL", "AI_ALT_MODEL", "AI_ALT_QUERY", "AI_ALT_FILE", "AI_ALT_SYNTH_TIMEOUT_MS", "AI_QUERY"];
+const ALT_KEYS = ["AI_ALT_CHANNEL", "AI_ALT_MODEL", "AI_ALT_QUERY", "AI_ALT_FILE", "AI_ALT_SYNTH_TIMEOUT_MS", "AI_ALT_SYNTH_MAX_TOKENS", "AI_QUERY"];
 
 async function withEnv(values, fn) {
   const previous = new Map(ALT_KEYS.map((key) => [key, process.env[key]]));
@@ -33,6 +33,7 @@ async function withEnv(values, fn) {
 
 test("modelSlug: known alt models map to short labels", () => {
   assert.equal(modelSlug("deepseek-v4-pro"), "DeepSeek");
+  assert.equal(modelSlug("deepseek-v4-flash"), "DeepSeek");
   assert.equal(modelSlug("grok-4.5"), "Grok");
   assert.equal(modelSlug("gpt-5.6-luna"), "Luna");
   assert.equal(modelSlug("gemini-3.6-flash"), "Gemini");
@@ -83,6 +84,24 @@ test("resolveAltChannel: carries the alt synthesis timeout budget", () => {
   assert.equal(ch.synthTimeoutMs, 300000);
 });
 
+// 2026-10-07 P2 / revised 2026-10-07 live-test: the alt channel carries its
+// own completion budget via resolveAltChannel, threaded to the synthesis call
+// (ai-news.mjs reads `synthMaxTokens`). The original separate knob (default
+// 8000) was designed for a REASONING alt writer that spends tokens on hidden
+// reason tokens before producing visible text. Live tests showed 8000 pushed
+// the reasoning writer past the gateway's ~120s Cloudflare cap (always 524).
+// The fix: switch to a FAST non-reasoning writer (deepseek-v4-flash, ~8s
+// synthesis probe, 0 reasoning_tokens) and revert the default to 4000 (the
+// shared daily budget). The knob remains for advanced tuning.
+test("resolveAltChannel: carries the alt synthesis maxTokens budget", () => {
+  const ch = resolveAltChannel({
+    aiAltChannel: true,
+    date: "2026-10-07",
+    aiAltSynthMaxTokens: 8000,
+  });
+  assert.equal(ch.synthMaxTokens, 8000);
+});
+
 test("resolveAltChannel: queryTemplate falls back to aiQueryTemplate", () => {
   const ch = resolveAltChannel({
     aiAltChannel: true,
@@ -116,6 +135,14 @@ test("loadConfig: aiAltModel defaults to gemini-3.6-flash and channel to on", as
     assert.equal(config.aiAltQueryTemplate, null);
     assert.equal(config.aiAltFile, null);
     assert.equal(config.aiAltSynthTimeoutMs, 300000);
+    assert.equal(config.aiAltSynthMaxTokens, 8192);
+  });
+});
+
+test("loadConfig: AI_ALT_SYNTH_MAX_TOKENS overrides the default", async () => {
+  await withEnv({ AI_ALT_SYNTH_MAX_TOKENS: "12000" }, async () => {
+    const config = loadConfig({ date: "2026-10-07" });
+    assert.equal(config.aiAltSynthMaxTokens, 12000);
   });
 });
 

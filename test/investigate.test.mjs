@@ -11,7 +11,7 @@ import {
   saveTopicCache,
 } from "../src/investigate.mjs";
 import { investigateIfEnabled, assembleInvestigatedBody } from "../src/sections/ai-news.mjs";
-import { enforceOneTopicPerBullet } from "../src/topic-bullets.mjs";
+import { enforceOneTopicPerBullet, localizeEnglishBullets, driftsFromTitle } from "../src/topic-bullets.mjs";
 import { tmpDirSync } from "./helpers/tmp.mjs";
 
 const topic = {
@@ -508,4 +508,85 @@ test("enforceOneTopicPerBullet: citations that all belong to one topic stay", as
   const out = await enforceOneTopicPerBullet(body, { topics, sources, retry: async () => { attempts += 1; return body; } });
   assert.equal(attempts, 0);
   assert.equal(out, body);
+});
+
+test("enforceOneTopicPerBullet: strips markdown markup and control characters from source titles", async () => {
+  const sources = [
+    { url: "https://v2ex.com/t/1", title: "**加粗标题** 与 [链接](https://foo.bar)\n新行" },
+  ];
+  const topics = [{ id: "t0", cards: [sources[0]] }];
+  const out = await enforceOneTopicPerBullet(
+    "* **偏离事实的假想标题**：内容 [1]",
+    { topics, sources },
+  );
+  assert.equal(out.includes("**加粗标题**"), false);
+  assert.equal(out.includes("[链接]"), false);
+  assert.equal(out.includes("\n新行"), false);
+  assert.match(out, /\* \*\*加粗标题 与 链接 新行\*\* \[1\]/);
+});
+
+test("driftsFromTitle: allows entity aliases and common tech vocabulary without false positive drift", () => {
+  // Brand / alias matching
+  const tFb = "Facebook will let you customize your feed algorithm using AI";
+  const cFb = "Facebook 允许通过 AI 自定义信息流推荐算法：Meta 旗下 Facebook 宣布开启测试";
+  assert.equal(driftsFromTitle(cFb, tFb), false);
+
+  const tGem = "Gemini 4 Argon: Built to solve your hardest problems";
+  const cGem = "谷歌发布 Gemini 4 Argon 前沿模型：Google 正式推出专为复杂推理打造的模型";
+  assert.equal(driftsFromTitle(cGem, tGem), false);
+
+  const tXbox = "Xbox is officially embracing the chaos of AI-powered game ports";
+  const cXbox = "Xbox 官方探索基于 AI 的游戏逆向与移植：微软 Xbox 团队公布最新进展";
+  assert.equal(driftsFromTitle(cXbox, tXbox), false);
+
+  // Common technical abbreviations (GPU, LLM, API, CEO, etc.)
+  const tCerebras = "Cerebras CEO says we’re nearing a future where everyone has a personal AI assistant at home";
+  const cCerebras = "Cerebras CEO 称个人 AI 助手即将普及：芯片公司高管表示未来每个家庭都将拥有专属智能体，降低推理 GPU 成本";
+  assert.equal(driftsFromTitle(cCerebras, tCerebras), false);
+
+  // Genuine cross-entity hallucination must still be caught
+  const tOpenAi = "The Lenfest Institute grows landmark program with expanded OpenAI support";
+  const cAnthropic = "Anthropic、OpenAI 及其他相关动态：伦费斯特研究所扩大了项目";
+  assert.equal(driftsFromTitle(cAnthropic, tOpenAi), true);
+});
+
+test("enforceOneTopicPerBullet: preserves natural Chinese translation for English source without bare title degradation", async () => {
+  const sources = [
+    { url: "https://theverge.com/fb", title: "Facebook will let you customize your feed algorithm using AI" },
+  ];
+  const topics = [{ id: "t0", cards: [sources[0]] }];
+  const naturalBullet = "* **Facebook 允许使用 AI 自定义推荐算法**：Meta 旗下 Facebook 宣布允许用户通过 AI 自定义信息流 [1]";
+  const out = await enforceOneTopicPerBullet(naturalBullet, { topics, sources });
+  assert.equal(out, naturalBullet);
+  assert.doesNotMatch(out, /will let you customize/);
+});
+
+test("localizeEnglishBullets: translates bare English bullets and preserves existing Chinese bullets and citations", async () => {
+  const markdown = [
+    "## 今日焦点",
+    "* **Gemini 4 Argon: Built to solve your hardest problems** [12]",
+    "* **Character.ai 申请破产保护**：互动 AI 平台正式启动重组程序 [35]",
+    "* **Spotatui**：A Spotify TUI/GUI without web API rate limits [23]",
+  ].join("\n");
+
+  const mockTranslate = async (texts) => {
+    return texts.map((t) => {
+      if (t.includes("Gemini 4 Argon")) return "Gemini 4 Argon 发布：专为解决最棘手问题打造";
+      if (t.includes("Spotify")) return "一款无 API 速率限制的 Spotify 终端界面客户端";
+      return `【译】${t}`;
+    });
+  };
+
+  const out = await localizeEnglishBullets(markdown, { translate: mockTranslate });
+
+  // Untouched Chinese bullet
+  assert.match(out, /\* \*\*Character\.ai 申请破产保护\*\*：互动 AI 平台正式启动重组程序 \[35\]/);
+
+  // Translated bare English title
+  assert.match(out, /\* \*\*Gemini 4 Argon 发布：专为解决最棘手问题打造\*\* \[12\]/);
+  assert.doesNotMatch(out, /Built to solve your hardest problems/);
+
+  // Translated brand title with English description
+  assert.match(out, /\* \*\*Spotatui\*\*：一款无 API 速率限制的 Spotify 终端界面客户端 \[23\]/);
+  assert.doesNotMatch(out, /without web API rate limits/);
 });

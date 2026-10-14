@@ -12,6 +12,32 @@ import { AI_TITLE_RE } from "./community.mjs";
 import { materialWindow, cacheKeyFor } from "./report-window.mjs";
 import { sanitizeSnippet } from "./snippet-hygiene.mjs";
 
+// Feed URLs are normalized before they become source cards. The 2026-10-07 P3#2
+// defect: RSS `<link>`/`<guid>` (and Firecrawl-rendered markdown links) sometimes
+// carry a trailing `//`, and the old code shipped `https://x.com//p/123` straight
+// into the note and the poster — dedupe then treats `…/123` and `…/123//` as two
+// different sources. One normalizer, applied everywhere a fetch builds a URL.
+// Must never throw: a hostile feed URL degrades to the raw string, not a crash.
+export function normalizeFeedUrl(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return raw;
+  try {
+    const u = new URL(raw);
+    if (!/^https?:$/.test(u.protocol)) return raw; // keep non-http (e.g. mailto) untouched
+    // Collapse duplicate slashes in the path, preserving the scheme's `//` and the
+    // root `/`. `https://x.com//a//b` → `https://x.com/a/b`.
+    const pathname = u.pathname.replace(/\/{2,}/g, "/");
+    // Trim ONE trailing slash so `https://x.com/` and `https://x.com` unify (the
+    // root path `/` stays, since `a/` → `a` is the dedupe-friendly form).
+    const normalized = `${u.origin}${pathname === "/" ? "/" : pathname.replace(/\/$/, "")}`;
+    // Keep query + hash (36kr article URLs carry a `/feed` marker in the path,
+    // and some feeds put the article id in the query).
+    return `${normalized}${u.search}${u.hash}`;
+  } catch {
+    return raw;
+  }
+}
+
 // Attach per-source failure diagnostics to a source array WITHOUT making them
 // enumerable, so the array still behaves like a plain list everywhere it is
 // spread/concatenated (spread and JSON.stringify skip non-enumerable props).
@@ -201,7 +227,7 @@ export async function fetchHackerNewsDaily(config, { limit = 5, fetchImpl = fetc
       if (!isAiRelevant(item.title, item.url)) continue;
 
       sources.push({
-        url: item.url,
+        url: normalizeFeedUrl(item.url),
         title: String(item.title).slice(0, 300),
         // The summary is whatever HN actually says about the story, and nothing
         // else. It used to be `title + " (score: N)"`, which put forum chrome
@@ -337,7 +363,7 @@ export async function fetch36krDaily(config, { limit = 5, runFetch: doFetch } = 
     const sources = [];
     for (const item of items) {
       const title = (item.title || "").trim();
-      const url = (item.url || "").trim();
+      const url = normalizeFeedUrl((item.url || "").trim());
       if (!title || !url) continue;
       if (!isAiRelevant(title, url)) continue;
 
@@ -389,7 +415,7 @@ export function parseRssItems(xml, { maxChars = 20000 } = {}) {
   while ((m = itemRe.exec(cap)) !== null) {
     const block = m[1];
     const title = decodeEntities(extractTag(block, "title"));
-    const link = decodeEntities(extractTag(block, "link"));
+    const link = normalizeFeedUrl(decodeEntities(extractTag(block, "link")));
     const pubRaw = extractTag(block, "pubDate") || extractTag(block, "date");
     if (!title || !link) continue;
     const pubDateMs = pubRaw ? Date.parse(pubRaw) : NaN;
@@ -418,10 +444,11 @@ export function parseRssItems(xml, { maxChars = 20000 } = {}) {
       rel: (a.match(/rel="([^"]+)"/i) || [])[1] || "",
     });
     const parsedLinks = links.map(attrsOf).filter((l) => l.href);
-    const link =
+    const link = normalizeFeedUrl(
       decodeEntities(
         (parsedLinks.find((l) => /alternate/i.test(l.rel))?.href || parsedLinks[0]?.href || "").trim(),
-      ) || decodeEntities(extractTag(block, "id")).trim();
+      ) || decodeEntities(extractTag(block, "id")).trim(),
+    );
     const pubRaw =
       extractTag(block, "published") || extractTag(block, "updated") || extractTag(block, "date");
     if (!title || !link) continue;
@@ -690,7 +717,7 @@ export async function fetchArxivDaily(config, { limit = 5, runFetch: doFetch } =
       if (!title || !id) continue;
 
       // arXiv IDs look like http://arxiv.org/abs/1234.56789v1
-      const absUrl = id.replace(/v\d+$/i, "").replace(/^http:/, "https:");
+      const absUrl = normalizeFeedUrl(id.replace(/v\d+$/i, "").replace(/^http:/, "https:"));
 
       const publishedAt = published ? new Date(published).getTime() : 0;
       // 2026-09-27 review C1: the cutoff was a strict `publishedAt < todayStart`
