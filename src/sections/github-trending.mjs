@@ -2,6 +2,7 @@ import path from "node:path";
 import { runFetch } from "../grok-cli.mjs";
 import { frontMatter, table } from "../markdown.mjs";
 import { cacheKeyFor } from "../report-window.mjs";
+import { localizeRepos } from "../poster/translate.mjs";
 
 // 2026-09-28 weekly: the trending page is period-parameterised. Only the daily
 // URL was ever fetched, and it is not a superset — GitHub re-renders the star
@@ -344,7 +345,9 @@ export async function githubTrendingSection(config) {
   }
 
   const rows = parseTrending(text);
-  const top = rows.slice(0, TOP_N);
+  const rawTop = rows.slice(0, TOP_N);
+  // Best-effort localization: translate descriptions to concise Chinese for table and poster
+  const top = await localizeRepos(rawTop).catch(() => rawTop);
 
   const weekly = config.reportMode === "weekly";
   const fm = frontMatter({

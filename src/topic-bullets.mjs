@@ -139,9 +139,28 @@ export function driftsFromTitle(claim, title) {
 }
 
 function chineseRunsDiffer(claim, title) {
-  const compactTitle = String(title).replace(/\s+/g, "");
-  const runs = String(claim).match(/[\u4e00-\u9fff]{2,}/g) || [];
-  return runs.some((run) => !compactTitle.includes(run));
+  const cleanTitle = String(title).replace(/[^\u4e00-\u9fff]/g, "");
+  if (cleanTitle.length < 2) return false;
+
+  const titleBigrams = new Set();
+  for (let i = 0; i < cleanTitle.length - 1; i++) {
+    titleBigrams.add(cleanTitle.slice(i, i + 2));
+  }
+
+  const cleanClaim = String(claim).replace(/[^\u4e00-\u9fff]/g, "");
+  if (cleanClaim.length < 2) return true;
+
+  let matchedBigrams = 0;
+  for (let i = 0; i < cleanClaim.length - 1; i++) {
+    if (titleBigrams.has(cleanClaim.slice(i, i + 2))) {
+      matchedBigrams++;
+    }
+  }
+
+  const minRequired = Math.min(2, cleanTitle.length - 1);
+  const titleRatio = matchedBigrams / (cleanTitle.length - 1);
+  // Drift occurs if there is virtually no overlap between the claim and the source title
+  return matchedBigrams < minRequired || titleRatio < 0.15;
 }
 
 function amountValues(text) {

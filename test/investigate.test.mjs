@@ -548,6 +548,15 @@ test("driftsFromTitle: allows entity aliases and common tech vocabulary without 
   const tOpenAi = "The Lenfest Institute grows landmark program with expanded OpenAI support";
   const cAnthropic = "Anthropic、OpenAI 及其他相关动态：伦费斯特研究所扩大了项目";
   assert.equal(driftsFromTitle(cAnthropic, tOpenAi), true);
+
+  // Natural Chinese expansion must not be rejected as drift
+  const tScion = "Anthropic 五个月自研版本控制系统 Scion，全面替代 Git";
+  const cScion = "Anthropic 自研版本控制系统 Scion 替代 Git：据社区讨论，Anthropic 用五个月时间自研了版本控制系统 Scion，并全面替代 Git";
+  assert.equal(driftsFromTitle(cScion, tScion), false);
+
+  const tMuse = "Meta 新模型杀回AI第一梯队，Alexandr Wang 亲述 Muse 7个月翻身内幕";
+  const cMuse = "Meta 新模型杀回AI第一梯队：Alexandr Wang 亲述 Muse 7个月翻身内幕，详细回顾了研发过程";
+  assert.equal(driftsFromTitle(cMuse, tMuse), false);
 });
 
 test("enforceOneTopicPerBullet: preserves natural Chinese translation for English source without bare title degradation", async () => {
