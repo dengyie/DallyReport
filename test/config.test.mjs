@@ -16,6 +16,7 @@ const ENV_KEYS = [
   "IMAGE_ENABLED",
   "IMAGE_SIPS_TIMEOUT_MS",
   "GROK_DAYS",
+  "GROK_MODEL",
 ];
 
 async function withEnv(values, fn) {

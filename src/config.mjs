@@ -484,9 +484,9 @@ export function loadConfig({ date = null, mode = null } = {}) {
     aiAltSynthTimeoutMs: positiveInt("AI_ALT_SYNTH_TIMEOUT_MS", 300000),
     // The alt writer needs its own completion budget too: deepseek-v4-flash
     // was upgraded to v4.1-flash by the gateway and now generates reasoning_content
-    // (thinking tokens) before visible completion. Raising to 8192 prevents
-    // SYNTH_TRUNCATED_EMPTY caused by reasoning tokens exhausting a 4000 cap,
-    // while executing within ~10-15s (well below the ~120s gateway cap).
+    // (thinking tokens) before visible completion. Raising to 16384 prevents
+    // SYNTH_TRUNCATED_EMPTY caused by reasoning tokens exhausting smaller caps,
+    // while executing well below the gateway timeout cap.
     aiAltSynthMaxTokens: positiveInt("AI_ALT_SYNTH_MAX_TOKENS", 8192),
     // --- gemini-3.6-flash alt writer: client-side web_search tool loop ---
     // gemini is the only writer model on the gateway that voluntarily emits
@@ -543,9 +543,14 @@ const ALT_MODEL_SLUGS = {
   "grok-4.5": "Grok",
   "gpt-5.6-luna": "Luna",
   "gemini-3.6-flash": "Gemini",
+  "gemini-3.7-flash": "Gemini",
+  "gemini-3.8-flash": "Gemini",
+  "gemini-3.8-flash-high": "Gemini",
 };
 export function modelSlug(model) {
   if (ALT_MODEL_SLUGS[model]) return ALT_MODEL_SLUGS[model];
+  if (typeof model === "string" && model.startsWith("gemini-")) return "Gemini";
+  if (typeof model === "string" && model.startsWith("deepseek-")) return "DeepSeek";
   const slug = String(model ?? "")
     .replace(/[^A-Za-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");

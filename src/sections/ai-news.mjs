@@ -482,7 +482,9 @@ export async function aiNewsSection(
     // (gemini emits web_search queries -> we execute them via grok-search -> feed
     // results back -> converge). All other writers keep the one-shot synthesis.
     const geminiLoop =
-      model === "gemini-3.6-flash" && config.aiAltGeminiWebSearch !== false;
+      typeof model === "string" &&
+      model.startsWith("gemini") &&
+      config.aiAltGeminiWebSearch !== false;
     const synthSources = investigation.sources;
     const synthQuery = investigation.preamble ? `${ai}\n\n${investigation.preamble}` : ai;
     runOneShot = (m, instruction) =>
