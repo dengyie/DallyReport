@@ -460,7 +460,16 @@ export function loadConfig({ date = null, mode = null } = {}) {
     // raw-answer fallback. When set, a failed one-shot synthesis automatically
     // retries once with this model so the daily report still completes. Only used
     // for the non-gemini one-shot path; the gemini web_search loop is unaffected.
-    synthFallbackModel: val("GROK_SYNTH_FALLBACK_MODEL") || "grok-4.5",
+    synthFallbackModel: (() => {
+      const primary = val("GROK_MODEL") || DEFAULT_SYNTH_MODEL;
+      const raw = val("GROK_SYNTH_FALLBACK_MODEL");
+      if (raw && raw !== primary) return raw;
+      if (raw && raw === primary) {
+        // Fallback cannot be identical to primary - switch to alternate provider
+        return primary.startsWith("gemini") ? "deepseek-v4-flash" : "gemini-3.8-flash";
+      }
+      return raw || (primary.startsWith("gemini") ? "deepseek-v4-flash" : "grok-4.5");
+    })(),
     // --- second AI channel (full dual-channel, ai-news.mjs + run.mjs) ---
     // When enabled, run.mjs registers an "ai-alt" section that reuses the whole
     // aiNewsSection pipeline (independent search + community merge + synthesis) with

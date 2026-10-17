@@ -179,6 +179,37 @@ export function probeCandidates(config) {
   return out;
 }
 
+/**
+ * Pre-flight network and proxy connectivity probe.
+ * Checks external (e.g. GitHub/foreign sources) and internal reachability
+ * with short timeouts to catch proxy dropouts before launching the crawler.
+ */
+export async function probeNetworkConnectivity(timeoutMs = 4000) {
+  const check = async (url) => {
+    try {
+      const res = await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(timeoutMs) });
+      return res.ok || res.status < 500;
+    } catch {
+      return false;
+    }
+  };
+
+  const [foreignOk, domesticOk] = await Promise.all([
+    check("https://api.github.com"),
+    check("https://linux.do"),
+  ]);
+
+  if (foreignOk && domesticOk) {
+    return { ok: true, status: "all_healthy" };
+  } else if (!foreignOk && domesticOk) {
+    return { ok: false, status: "foreign_blocked", warning: "境外网络或代理节点连接受阻（HN/ArXiv/Google等外文源可能受影响）" };
+  } else if (foreignOk && !domesticOk) {
+    return { ok: false, status: "domestic_blocked", warning: "境内社区/服务连接受阻" };
+  } else {
+    return { ok: false, status: "network_down", warning: "外网完全不可达，请检查本地网络、DNS或代理配置" };
+  }
+}
+
 // ── 3. Product self-check ─────────────────────────────────────────────────
 
 const PRODUCT_DAILY = ["AI.md", "GitHub.md"];
@@ -348,6 +379,18 @@ async function main() {
     return 0;
   }
 
+  // ── 7a-2. Network & proxy connectivity probe ──────────────────────────
+  try {
+    const netStatus = await probeNetworkConnectivity(4000);
+    if (!netStatus.ok && netStatus.warning) {
+      log(`${stamp} WARN: [network-probe] ${netStatus.warning} (${netStatus.status})`);
+    } else {
+      log(`${stamp} NET-PROBE OK: 网络连通性良好`);
+    }
+  } catch (_) {
+    // Non-blocking diagnostic probe
+  }
+
   // ── 7b. Gateway model probe ───────────────────────────────────────────
   const apiUrl = env("GROK_API_URL");
   const apiKey = env("GROK_API_KEY");
@@ -381,6 +424,12 @@ async function main() {
   if (probe.model !== config.synthModel) {
     process.env.GROK_MODEL = probe.model;
     log(`${stamp} PROBE-FALLBACK: primary ${config.synthModel} → ${probe.model}`);
+  }
+  // Prevent duplicate primary and fallback if probe selected the fallback model
+  if (process.env.GROK_SYNTH_FALLBACK_MODEL === probe.model) {
+    const altFallback = probe.model.startsWith("gemini") ? "deepseek-v4-flash" : "gemini-3.8-flash";
+    process.env.GROK_SYNTH_FALLBACK_MODEL = altFallback;
+    log(`${stamp} PROBE-FALLBACK: reassigned GROK_SYNTH_FALLBACK_MODEL to ${altFallback}`);
   }
 
   const startMs = Date.now();

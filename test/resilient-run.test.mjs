@@ -9,6 +9,7 @@ import {
   probeModel,
   probeLadder,
   probeCandidates,
+  probeNetworkConnectivity,
   spawnRunner,
   PROBE_TIMEOUT_MS,
 } from "../src/resilient-run.mjs";
@@ -331,4 +332,40 @@ test("spawnRunner: a child that produces the watch file is NOT stalled", async (
   assert.equal(result.code, 0, "the child exited cleanly");
   assert.equal(result.stalled, false, "production of the watch file clears the stall flag");
   assert.equal(fs.readFileSync(watchPath, "utf-8"), "ok");
+});
+
+// ── probeNetworkConnectivity ─────────────────────────────────────────────
+
+test("probeNetworkConnectivity: all healthy when endpoints respond ok", async () => {
+  const result = await withFetch(
+    async () => ({ ok: true, status: 200 }),
+    () => probeNetworkConnectivity(100),
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "all_healthy");
+});
+
+test("probeNetworkConnectivity: detects foreign endpoint block", async () => {
+  const result = await withFetch(
+    async (url) => {
+      if (url.includes("github.com")) throw new Error("connection timeout");
+      return { ok: true, status: 200 };
+    },
+    () => probeNetworkConnectivity(100),
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "foreign_blocked");
+  assert.match(result.warning, /境外/);
+});
+
+test("probeNetworkConnectivity: detects total network down", async () => {
+  const result = await withFetch(
+    async () => {
+      throw new Error("ENETUNREACH");
+    },
+    () => probeNetworkConnectivity(100),
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "network_down");
+  assert.match(result.warning, /完全不可达/);
 });

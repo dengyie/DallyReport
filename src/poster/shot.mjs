@@ -14,7 +14,7 @@
 // halfway down a 10-row table. No prompt change fixes a capability gap, so the
 // text is laid out by a real typesetting engine and only pixels are captured.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -89,6 +89,9 @@ export function buildChromeArgs({ htmlPath, outPath, width, height, scale = DEVI
     "--hide-scrollbars",
     "--no-first-run",
     "--no-default-browser-check",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--disable-sync",
     // A poster must never inherit a dark-mode or forced-colors stylesheet from
     // the host OS; the design below declares its own colours outright.
     "--force-color-profile=srgb",
@@ -129,8 +132,15 @@ function runChrome(bin, args, timeoutMs) {
       fn(arg);
     };
     const timer = setTimeout(() => {
-      // No signal on win32: Node's child.kill("SIGKILL") is not a portable kill.
+      // Tree-kill on Windows ensures helper renderer/gpu processes are not orphaned.
       try {
+        if (process.platform === "win32" && typeof child.pid === "number" && child.pid > 0) {
+          try {
+            spawnSync("taskkill", ["/T", "/F", "/PID", String(child.pid)], { stdio: "ignore" });
+          } catch {
+            /* best-effort tree kill */
+          }
+        }
         child.kill(process.platform === "win32" ? undefined : "SIGKILL");
       } catch {
         /* already gone */

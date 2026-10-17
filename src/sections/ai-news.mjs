@@ -456,6 +456,7 @@ export async function aiNewsSection(
   let synthError = null;
   let synthFellBack = false;
   let synthFallbackFrom = null;
+  let synthEffectiveModel = model;
   let bodyText = rawAnswerText;
   const hasUsableDegradedDump = degraded && rawAnswerText.trim().length >= 120;
   // When to synthesize:
@@ -487,13 +488,13 @@ export async function aiNewsSection(
       config.aiAltGeminiWebSearch !== false;
     const synthSources = investigation.sources;
     const synthQuery = investigation.preamble ? `${ai}\n\n${investigation.preamble}` : ai;
-    runOneShot = (m, instruction) =>
+    runOneShot = (m, instruction, maxTokensOverride = null) =>
       synthesizeFromSources({
         query: synthQuery,
         date: config.date,
         sources: synthSources,
         model: m,
-        maxTokens: synthMaxTokens,
+        maxTokens: maxTokensOverride || synthMaxTokens,
         timeoutMs: synthTimeoutMs,
         reportMode: config.reportMode,
         instruction,
@@ -514,34 +515,75 @@ export async function aiNewsSection(
         : await runOneShot(model);
       synthesized = true;
     } catch (e) {
-      // Main writer failed (e.g. a slow reasoning model that 524s over the
-      // gateway's ~120s Cloudflare cap). Retry the one-shot synthesis once with
-      // the configured fallback model so the daily report still completes. The
-      // gemini web_search loop is skipped here — it has its own bounded loop.
-      // The stdout summary only carries the error code, so the full detail
-      // (status + body snippet) must land in stderr (launchd/task log) — this
-      // was the 2026-10-02 weekly outage's diagnosability gap.
       console.error(
         `[ai-news] synthesis failed (writer ${model}): code=${e?.code || "?"} status=${e?.status ?? "?"} ${redactSecrets(String(e?.message || e))}`,
       );
-      const fb = config.synthFallbackModel;
-      if (!geminiLoop && fb && fb !== model) {
+
+      // Self-healing: if truncated by reasoning tokens or token budget, retry once with expanded cap
+      const isTruncation = e?.code === "SYNTH_TRUNCATED_EMPTY" || e?.code === "SYNTH_TRUNCATED";
+      if (isTruncation && synthMaxTokens < 24576) {
         try {
-          bodyText = await runOneShot(fb);
-          synthesized = true;
-          synthFellBack = true;
-          synthFallbackFrom = model;
-          synthError = null;
-        } catch (e2) {
-          console.error(
-            `[ai-news] synthesis failed (fallback ${fb}): code=${e2?.code || "?"} status=${e2?.status ?? "?"} ${redactSecrets(String(e2?.message || e2))}`,
+          const expandedTokens = Math.min(Math.max(synthMaxTokens * 2, 16384), 32768);
+          console.warn(
+            `[ai-news] synthesis truncated for ${model} (maxTokens=${synthMaxTokens}), retrying with expanded maxTokens=${expandedTokens}`,
           );
-          synthError = e2;
-          // bodyText already = rawAnswerText; keep going, document the fallback.
+          bodyText = await runOneShot(model, undefined, expandedTokens);
+          synthesized = true;
+          synthError = null;
+        } catch (retryErr) {
+          console.error(
+            `[ai-news] expanded token retry failed (${model}): code=${retryErr?.code || "?"} ${redactSecrets(String(retryErr?.message || retryErr))}`,
+          );
         }
-      } else {
-        synthError = e;
-        // bodyText already = rawAnswerText; keep going, document the fallback.
+      }
+
+      // Cross-provider fallback ladder: engage if primary (or retry) failed
+      if (!synthesized) {
+        const fallbackCandidates = [];
+        if (channel != null || name === "ai-alt") {
+          // Alt channel falls back to primary synthModel, then fallbackModel
+          if (config.synthModel && config.synthModel !== model) {
+            fallbackCandidates.push(config.synthModel);
+          }
+          if (config.synthFallbackModel && config.synthFallbackModel !== model && !fallbackCandidates.includes(config.synthFallbackModel)) {
+            fallbackCandidates.push(config.synthFallbackModel);
+          }
+        } else {
+          // Main channel falls back to synthFallbackModel, then aiAltModel
+          if (config.synthFallbackModel && config.synthFallbackModel !== model) {
+            fallbackCandidates.push(config.synthFallbackModel);
+          }
+          if (config.aiAltModel && config.aiAltModel !== model && !fallbackCandidates.includes(config.aiAltModel)) {
+            fallbackCandidates.push(config.aiAltModel);
+          }
+          for (const backstop of ["deepseek-v4-flash", "gemini-3.8-flash"]) {
+            if (backstop !== model && !fallbackCandidates.includes(backstop)) {
+              fallbackCandidates.push(backstop);
+            }
+          }
+        }
+
+        let lastErr = e;
+        for (const fb of fallbackCandidates) {
+          try {
+            console.warn(`[ai-news] attempting synthesis fallback: ${model} -> ${fb}`);
+            bodyText = await runOneShot(fb);
+            synthesized = true;
+            synthFellBack = true;
+            synthFallbackFrom = model;
+            synthEffectiveModel = fb;
+            synthError = null;
+            break;
+          } catch (eFb) {
+            console.error(
+              `[ai-news] synthesis failed (fallback ${fb}): code=${eFb?.code || "?"} status=${eFb?.status ?? "?"} ${redactSecrets(String(eFb?.message || eFb))}`,
+            );
+            lastErr = eFb;
+          }
+        }
+        if (!synthesized) {
+          synthError = lastErr;
+        }
       }
     }
   }
@@ -602,7 +644,7 @@ export async function aiNewsSection(
   // splitting a bullet afterwards would move text out from under a [N] the
   // scan had already resolved. Doing it here means the markers and the prose
   // stay in the same state.
-  const effectiveModel = synthFellBack && config.synthFallbackModel ? config.synthFallbackModel : model;
+  const effectiveModel = synthFellBack && synthEffectiveModel ? synthEffectiveModel : model;
   const bodyTextChecked = await enforceOneTopicPerBullet(bodyText || "", {
     topics: investigation.topics,
     sources: shownSources,
@@ -668,7 +710,7 @@ export async function aiNewsSection(
     credErr,
     searchError,
     synthError,
-    synthModel: synthFellBack && synthFallbackFrom ? config.synthFallbackModel : model,
+    synthModel: synthFellBack && synthEffectiveModel ? synthEffectiveModel : model,
     synthFellBack,
     synthFallbackFrom,
   });
