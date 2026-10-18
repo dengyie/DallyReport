@@ -69,38 +69,77 @@ const GENERIC_TECH_WORDS = new Set([
   "https", "url", "html", "css", "rss", "cdp", "tts", "asr", "rag", "rlhf",
   "dpo", "sft", "cot", "vlm", "nlp", "ml", "dl", "ar", "vr", "xr", "mr",
   "ceo", "cto", "coo", "cfo", "ipo", "oss", "repo", "star", "stars", "arxiv",
-  "github", "huggingface", "show", "tech", "code"
+  "github", "huggingface", "show", "tech", "code",
+  // Document/announcement words that are capitalized in a headline but name no
+  // entity (2026-10-18 review): "Apple Intelligence 接入千问" under a title about
+  // 苹果智能 used to read as two fabricated names.
+  "intelligence", "institute", "university", "foundation", "research",
+  "center", "centre", "report", "paper", "blog", "update", "release",
+  "launch", "preview", "beta", "plus", "pro", "max", "mini", "turbo", "ultra"
 ]);
 
 // Known entity alias groups: if a source title mentions any name in the group,
 // mentioning another alias from the same group in the summary is valid context/attribution.
+//
+// Each group carries BOTH scripts for entities with a common Chinese name
+// (苹果/Apple, 字节/ByteDance…). The 2026-10-18 thinness review: `properNames` is
+// ASCII-only by construction, so a Chinese title naming 苹果 could never satisfy a
+// Latin `Apple` in the prose — every cross-script mention read as a fabricated
+// entity and (before fix #1) deleted the whole bullet. The CJK members are what
+// `nameMatchesTitle` substring-matches inside the title.
 const ALIAS_GROUPS = [
-  new Set(["google", "gemini", "deepmind", "waymo", "android", "alphabet"]),
-  new Set(["meta", "facebook", "instagram", "whatsapp", "llama"]),
-  new Set(["microsoft", "xbox", "azure", "copilot", "windows"]),
+  new Set(["google", "谷歌", "gemini", "deepmind", "waymo", "android", "alphabet"]),
+  new Set(["meta", "facebook", "脸书", "instagram", "whatsapp", "llama"]),
+  new Set(["microsoft", "微软", "xbox", "azure", "copilot", "windows"]),
   new Set(["openai", "chatgpt", "codex", "sora", "dall-e", "gpt"]),
   new Set(["anthropic", "claude"]),
   new Set(["liquid", "liquidai", "lfm", "lfm2", "lfm2.5"]),
-  new Set(["alibaba", "qwen", "tongyi", "aliyun"]),
-  new Set(["bytedance", "doubao", "tiktok"]),
-  new Set(["zhipu", "glm", "chatglm"]),
-  new Set(["moonshot", "kimi"]),
-  new Set(["stepfun", "step"]),
-  new Set(["deepseek"]),
+  new Set(["alibaba", "阿里巴巴", "阿里", "qwen", "tongyi", "千问", "通义千问", "aliyun"]),
+  new Set(["bytedance", "字节跳动", "字节", "doubao", "豆包", "tiktok"]),
+  new Set(["zhipu", "智谱", "glm", "chatglm"]),
+  new Set(["moonshot", "月之暗面", "kimi"]),
+  new Set(["stepfun", "step", "阶跃"]),
+  new Set(["deepseek", "深度求索"]),
   new Set(["xai", "grok", "twitter"]),
-  new Set(["amazon", "aws", "bedrock", "titan", "alexa"]),
-  new Set(["apple", "ios", "macos", "siri"])
+  new Set(["amazon", "亚马逊", "aws", "bedrock", "titan", "alexa"]),
+  new Set(["apple", "苹果", "ios", "macos", "siri"]),
+  new Set(["nvidia", "英伟达"]),
+  new Set(["intel", "英特尔"]),
+  new Set(["tesla", "特斯拉"]),
+  new Set(["samsung", "三星"]),
+  new Set(["huawei", "华为"]),
+  new Set(["xiaomi", "小米"]),
+  new Set(["meituan", "美团"]),
+  new Set(["baidu", "百度", "ernie", "文心"]),
+  new Set(["tencent", "腾讯", "hunyuan", "混元"]),
+  new Set(["sensetime", "商汤"]),
+  new Set(["iflytek", "科大讯飞", "讯飞"]),
+  new Set(["kuaishou", "快手"]),
+  new Set(["jd", "京东"]),
+  new Set(["netease", "网易"]),
+  new Set(["stability", "stabilityai"])
 ];
 
-function nameMatchesTitle(name, titleNames) {
+// alias token → its group, so a Latin name in the prose resolves to the Chinese
+// spelling when the title is checked. One flat index beats scanning every group.
+const ALIAS_INDEX = new Map();
+for (const group of ALIAS_GROUPS) {
+  for (const name of group) ALIAS_INDEX.set(name, group);
+}
+
+function nameMatchesTitle(name, titleNames, titleText) {
   if (GENERIC_TECH_WORDS.has(name)) return true;
   if (titleNames.has(name)) return true;
-  for (const group of ALIAS_GROUPS) {
-    if (group.has(name)) {
-      for (const tn of titleNames) {
-        if (group.has(tn)) return true;
-      }
-    }
+  const group = ALIAS_INDEX.get(name);
+  if (!group) return false;
+  for (const tn of titleNames) {
+    if (group.has(tn)) return true;
+  }
+  // Cross-script: the same entity under its Chinese name. Only CJK aliases are
+  // substring-matched; a Latin alias still has to be a whole word (titleNames).
+  const lowerTitle = String(titleText || "").toLowerCase();
+  for (const alias of group) {
+    if (/[\u4e00-\u9fff]/.test(alias) && lowerTitle.includes(alias)) return true;
   }
   return false;
 }
@@ -119,22 +158,42 @@ function faithfulSingle(text, sources) {
   const titled = text.match(/^(\s*)(?:[*+-]|\d+\.)\s+\*\*([\s\S]*?)\*\*(?:[：:]\s*)?([\s\S]*)$/);
   if (!titled) return text;
   const [, indent, headline, rest = ""] = titled;
-  const claim = `${headline} ${rest}`;
+  const body = rest.replace(/^\s+/, "").trim();
+  const claim = body ? `${headline}：${body}` : headline;
   if (!driftsFromTitle(claim, title)) return text;
-  return `${indent}* **${title}** [${cites[0]}]`;
+  // 2026-10-18 P0 (thinness review): this used to return `* **title** [N]`,
+  // deleting the elaboration outright. That produced the shipped reports where
+  // 33%–91% of bullets were a bare source title. The headline is the claim that
+  // has to match the source; the body is the reader's value. Correct the
+  // headline, keep the body verbatim, and never degrade a bullet to a title.
+  const bodyText = body.replace(/\[\d+(?:\s*,\s*\d+)*\]/g, "").trim();
+  if (!bodyText) {
+    // Title-only bullet (the model gave no elaboration): keep the compact shape.
+    return `${indent}* **${title}** ${/\[\d+\]/.test(body) ? body : `[${cites[0]}]`}`;
+  }
+  const withCite = /\[\d+\]/.test(body) ? body : `${body} [${cites[0]}]`;
+  return `${indent}* **${title}**：${withCite}`;
 }
 
 export function driftsFromTitle(claim, title) {
-  const prose = String(claim).replace(CITE_GROUP, " ");
+  const raw = String(claim).replace(CITE_GROUP, " ");
+  // Proper-name drift is judged on the HEADLINE only (2026-10-18 review). The
+  // elaboration is where the writer legitimately adds vendor/product context; a
+  // body that named Apple under a title that said 苹果 used to delete the whole
+  // bullet as "drift". Amount mis-scaling and Chinese-overlap still cover the
+  // full claim, so a fabricated figure or an invented event is still caught.
+  const colon = raw.search(/[：:]/);
+  const headline = colon === -1 ? raw : raw.slice(0, colon);
+
   const titleAmounts = new Set(amountValues(title));
-  for (const value of amountValues(prose)) {
+  for (const value of amountValues(raw)) {
     if (!titleAmounts.has(value)) return true;
   }
   const titleNames = new Set(properNames(title));
-  for (const name of properNames(prose)) {
-    if (!nameMatchesTitle(name, titleNames)) return true;
+  for (const name of properNames(headline)) {
+    if (!nameMatchesTitle(name, titleNames, title)) return true;
   }
-  if (/[\u4e00-\u9fff]/.test(title) && chineseRunsDiffer(prose, title)) return true;
+  if (/[\u4e00-\u9fff]/.test(title) && chineseRunsDiffer(raw, title)) return true;
   return false;
 }
 
@@ -235,9 +294,12 @@ function topicIdsIn(text, topics, sources) {
 const BULLET_PATTERN = /^(\s*)(?:[*+-]|\d+\.)\s+\*\*([\s\S]*?)\*\*(?:([：:])\s*)?([\s\S]*)$/;
 
 /**
- * Detect bullets that lack Chinese text (e.g. raw English titles from fallback
- * or models) and translate them into Simplified Chinese via the provided translate function.
- * Preserves citations [N], list markers, indentation and existing Chinese bullets.
+ * Detect bullets whose HEADLINE is English (raw English titles from a fallback
+ * or from a corrected source title) and translate them into Simplified Chinese
+ * via the provided translate function. An English body under an English headline
+ * is translated too; a Chinese body is kept verbatim (it is the reader's
+ * content). Preserves citations [N], list markers, indentation and existing
+ * Chinese bullets.
  */
 export async function localizeEnglishBullets(markdown, { translate } = {}) {
   if (typeof translate !== "function") return markdown;
@@ -246,12 +308,16 @@ export async function localizeEnglishBullets(markdown, { translate } = {}) {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (/[\u4e00-\u9fff]/.test(line)) continue;
     const m = line.match(BULLET_PATTERN);
     if (!m) continue;
-    const [, indent, headline, colon, rest = ""] = m;
+    const [, indent, headline, , rest = ""] = m;
     const cites = [...rest.matchAll(CITE_GROUP)].map((cm) => cm[0]).join(" ");
     const restText = rest.replace(CITE_GROUP, " ").replace(/\s{2,}/g, " ").trim();
+    // 2026-10-18 (§9.4 #1 side effect): the old whole-line CJK test skipped any
+    // bullet whose body was Chinese, so an English source title placed above a
+    // Chinese body (a corrected headline) survived untranslated. Gate on the
+    // HEADLINE only — a Chinese headline is left alone as before.
+    if (/[\u4e00-\u9fff]/.test(headline)) continue;
     candidates.push({
       index: i,
       indent,
@@ -262,7 +328,6 @@ export async function localizeEnglishBullets(markdown, { translate } = {}) {
   }
 
   if (candidates.length === 0) return markdown;
-
   const workItems = [];
   for (const c of candidates) {
     if (!c.restText) {
@@ -272,9 +337,18 @@ export async function localizeEnglishBullets(markdown, { translate } = {}) {
       if (words.length > 2) {
         workItems.push({ type: "headline", text: c.headline, cand: c });
       }
-      workItems.push({ type: "desc", text: c.restText, cand: c });
+      // The body is localized only when it is itself English; a Chinese body
+      // stays verbatim.
+      if (!/[\u4e00-\u9fff]/.test(c.restText)) {
+        workItems.push({ type: "desc", text: c.restText, cand: c });
+      }
     }
   }
+
+  // A short English headline over a Chinese body queues nothing (the headline is
+  // a brand name, the body is already Chinese) — do not call the translator with
+  // an empty batch.
+  if (workItems.length === 0) return markdown;
 
   const rawTexts = workItems.map((w) => w.text);
   const translated = await translate(rawTexts);
@@ -289,9 +363,15 @@ export async function localizeEnglishBullets(markdown, { translate } = {}) {
     const citePart = c.cites ? ` ${c.cites}` : "";
     if (dItem) {
       lines[c.index] = `${c.indent}* **${finalHeadline}**：${dItem.translated}${citePart}`;
-    } else {
-      lines[c.index] = `${c.indent}* **${finalHeadline}**${citePart}`;
+    } else if (hItem) {
+      // Headline translated, body (Chinese) kept verbatim: splice only the bold
+      // headline, everything after it (colon, body, citations) stays untouched.
+      lines[c.index] = lines[c.index].replace(
+        /^\s*(?:[*+-]|\d+\.)\s+\*\*[\s\S]*?\*\*/,
+        `${c.indent}* **${finalHeadline}**`,
+      );
     }
+    // else: a short English headline over a Chinese body queued nothing.
   }
 
   return lines.join("\n");

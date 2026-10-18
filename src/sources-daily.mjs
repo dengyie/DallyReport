@@ -356,6 +356,7 @@ export async function fetch36krDaily(config, { limit = 5, runFetch: doFetch } = 
           title: extractTag(m[1], "title"),
           url: extractTag(m[1], "link"),
           pubDate: extractTag(m[1], "pubDate") || "",
+          summary: feedExcerpt(m[1]),
         });
       }
     }
@@ -377,7 +378,7 @@ export async function fetch36krDaily(config, { limit = 5, runFetch: doFetch } = 
       sources.push({
         url,
         title: title.slice(0, 300),
-        snippet: title.slice(0, 500),
+        snippet: excerptSnippet(item.summary, title) || title.slice(0, 500),
         provider: "36kr",
         score: 0,
         publishedAt,
@@ -423,6 +424,7 @@ export function parseRssItems(xml, { maxChars = 20000 } = {}) {
       title: title.slice(0, 300),
       url: link,
       pubDateMs: Number.isFinite(pubDateMs) ? pubDateMs : null,
+      summary: feedExcerpt(block),
     });
   }
   // 2026-09-28 review H2: Atom. The Verge's AI feed is Atom, and this parser
@@ -457,6 +459,7 @@ export function parseRssItems(xml, { maxChars = 20000 } = {}) {
       title: title.slice(0, 300),
       url: link,
       pubDateMs: Number.isFinite(pubDateMs) ? pubDateMs : null,
+      summary: feedExcerpt(block),
     });
   }
   return out;
@@ -493,6 +496,49 @@ function safeFromCodePoint(code) {
   } catch {
     return "";
   }
+}
+
+/**
+ * The excerpt a feed carries for one entry: RSS <description>, Atom <summary>,
+ * or a full-body <content:encoded>/<content>. extractTag already strips CDATA,
+ * HTML tags and newlines, so what comes back is plain text. Feeds differ in
+ * which of the four they ship (and some ship several), so they are tried in
+ * signal order — description is the curated excerpt, content is the fallback.
+ */
+function feedExcerpt(block) {
+  for (const tag of ["description", "summary", "content:encoded", "content"]) {
+    const raw = decodeEntities(extractTag(block, tag));
+    if (raw) return raw;
+  }
+  return "";
+}
+
+/**
+ * The snippet for an RSS card (2026-10-18 thinness review, §9.4 #3).
+ *
+ * A vendor-blog card used to ship `snippet = title` ("blog RSS has no excerpt;
+ * title carries the signal"), so the synthesis model had only the headline to
+ * write from — and the faithfulness guard then often deleted whatever body it
+ * invented from that headline alone. Feeds DO carry an excerpt; use it. An echo
+ * of the title, a "Continue reading" stub, or anything too short to be prose
+ * falls back to the title rather than shipping chrome to the model.
+ */
+function excerptSnippet(summary, title) {
+  let text = sanitizeSnippet(String(summary || ""), { maxChars: 500 });
+  if (!text) return "";
+  const t = sanitizeSnippet(String(title || ""), { maxChars: 300 });
+  if (!t) return "";
+  // The excerpt is (or is shorter than) the headline → it adds nothing.
+  if (text === t || t.startsWith(text)) return "";
+  // A feed that repeats the headline before the body is common; drop the echo.
+  if (text.startsWith(t)) text = text.slice(t.length).replace(/^[\s:：\-—–|·.]+/, "");
+  // Trailing publication chrome is not part of the story.
+  text = text
+    .replace(/\s*(?:continue\s+reading|read\s+more|阅读全文|查看全文|点击查看)[\s\S]*$/i, "")
+    .replace(/\s*the\s+post\s+[\s\S]*$/i, "")
+    .trim();
+  if (text.length < 40) return "";
+  return text;
 }
 
 /**
@@ -551,7 +597,11 @@ export async function fetchOfficialBlogRss(
       sources.push({
         url: item.url,
         title: item.title,
-        snippet: item.title, // blog RSS has no excerpt; title carries the signal
+        // 2026-10-18 thinness review (§9.4 #3): the snippet used to be the bare
+        // title, so the model had to invent a body from the headline alone — and
+        // the faithfulness guard then deleted what it invented. The feed's own
+        // excerpt (when substantive) gives the model real material to write from.
+        snippet: excerptSnippet(item.summary, item.title) || item.title,
         provider: provider || site,
         score: 0,
         publishedAt: item.pubDateMs ?? Date.now(),

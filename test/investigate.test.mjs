@@ -459,24 +459,63 @@ test("enforceOneTopicPerBullet: a translated amount that matches the title stays
   assert.doesNotMatch(shifted, /15\.75 亿美元/);
 });
 
-test("enforceOneTopicPerBullet: a name or a Chinese fact the title does not contain is replaced by the title", async () => {
+test("enforceOneTopicPerBullet: a drifting headline is corrected to the source title, the body is kept", async () => {
   const sources = [
     { url: "https://openai.com/lenfest", title: "The Lenfest Institute grows landmark program with expanded OpenAI support" },
     { url: "https://linux.do/t/sand", title: "窃贼为盗取英伟达人工智能芯片，却卷走了18吨沙子" },
   ];
   const topics = sources.map((s, i) => ({ id: `t${i}`, cards: [s] }));
+  // "Anthropic" is fabricated — the source is a Lenfest/OpenAI announcement. The
+  // fabricated headline is replaced with the source's own title, and (2026-10-18
+  // thinness review, fix #1) the elaboration that used to be deleted survives.
   const named = await enforceOneTopicPerBullet(
     "* **Anthropic、OpenAI 及其他相关动态**：伦费斯特研究所扩大了项目 [1]",
     { topics, sources },
   );
-  assert.match(named, /\*\*The Lenfest Institute grows landmark program with expanded OpenAI support\*\* \[1\]/);
+  assert.match(
+    named,
+    /\*\*The Lenfest Institute grows landmark program with expanded OpenAI support\*\*：伦费斯特研究所扩大了项目 \[1\]/,
+  );
   assert.doesNotMatch(named, /Anthropic/);
+  // A fabricated Chinese event ("自动驾驶公司卡车" for a story about 窃贼偷沙子)
+  // still has its headline corrected to the source title; no body existed to keep.
   const sand = await enforceOneTopicPerBullet(
     "* **有用户在社区中分享了一起涉及自动驾驶公司卡车与沙子搬运的奇特盗窃案** [2]",
     { topics, sources },
   );
   assert.match(sand, /\*\*窃贼为盗取英伟达人工智能芯片，却卷走了18吨沙子\*\* \[2\]/);
   assert.doesNotMatch(sand, /自动驾驶/);
+});
+
+test("enforceOneTopicPerBullet: a drifted headline keeps its elaboration, not a bare title", async () => {
+  const sources = [
+    { url: "https://techcrunch.com/modal", title: "Source: Modal Labs closing in on $750M round at $15.75B valuation" },
+  ];
+  const topics = [{ id: "t0", cards: [sources[0]] }];
+  // Real mis-scale drift (15.75亿 vs $15.75B) still fires, but the body is kept.
+  const out = await enforceOneTopicPerBullet(
+    "* **Modal Labs 的估值将达到 15.75 亿美元**：知情人士称融资谈判已进入尾声 [1]",
+    { topics, sources },
+  );
+  assert.match(
+    out,
+    /\*\*Source: Modal Labs closing in on \$750M round at \$15\.75B valuation\*\*：知情人士称融资谈判已进入尾声 \[1\]/,
+  );
+});
+
+test("enforceOneTopicPerBullet: cross-script aliases do not trigger drift (苹果/Apple)", async () => {
+  const sources = [
+    { url: "https://apple.example/qwen", title: "库克：苹果智能接入阿里千问大模型，10月底在中国发布测试版本" },
+  ];
+  const topics = [{ id: "t0", cards: [sources[0]] }];
+  // The shipped 2026-10-17 reproduction: a body naming Apple under a Chinese
+  // title naming 苹果 used to be deleted wholesale as "drift". The cross-script
+  // alias table (fix #2) resolves 苹果↔Apple, so the bullet survives verbatim.
+  const bullet =
+    "* **库克宣布苹果智能将接入阿里千问，计划 10 月底在中国上线测试版**：苹果 CEO 库克在公开场合确认，Apple Intelligence 将在中国市场接入阿里巴巴的通义千问大模型，相关测试版本最快于 10 月底面向中国用户发布 [1]";
+  const out = await enforceOneTopicPerBullet(bullet, { topics, sources });
+  assert.equal(out, bullet);
+  assert.match(out, /Apple Intelligence/);
 });
 
 test("enforceOneTopicPerBullet: investigation off still splits three different URLs", async () => {
@@ -522,7 +561,8 @@ test("enforceOneTopicPerBullet: strips markdown markup and control characters fr
   assert.equal(out.includes("**加粗标题**"), false);
   assert.equal(out.includes("[链接]"), false);
   assert.equal(out.includes("\n新行"), false);
-  assert.match(out, /\* \*\*加粗标题 与 链接 新行\*\* \[1\]/);
+  // The drifting headline is replaced; the body "内容" is preserved (fix #1).
+  assert.match(out, /\* \*\*加粗标题 与 链接 新行\*\*：内容 \[1\]/);
 });
 
 test("driftsFromTitle: allows entity aliases and common tech vocabulary without false positive drift", () => {
@@ -557,6 +597,31 @@ test("driftsFromTitle: allows entity aliases and common tech vocabulary without 
   const tMuse = "Meta 新模型杀回AI第一梯队，Alexandr Wang 亲述 Muse 7个月翻身内幕";
   const cMuse = "Meta 新模型杀回AI第一梯队：Alexandr Wang 亲述 Muse 7个月翻身内幕，详细回顾了研发过程";
   assert.equal(driftsFromTitle(cMuse, tMuse), false);
+
+  // Cross-script aliases are the SAME entity (2026-10-18 review, fix #2): a Latin
+  // name in the prose whose Chinese spelling is in the title is not fabricated —
+  // 苹果↔Apple, 英伟达↔NVIDIA, 字节↔ByteDance, 深度求索↔DeepSeek…
+  assert.equal(
+    driftsFromTitle("库克宣布 Apple 智能将接入千问大模型", "库克：苹果智能接入阿里千问大模型"),
+    false,
+  );
+  assert.equal(
+    driftsFromTitle("NVIDIA 发布新一代芯片", "英伟达发布新一代芯片"),
+    false,
+  );
+  assert.equal(
+    driftsFromTitle("ByteDance 发布新视频模型", "字节跳动发布新视频模型"),
+    false,
+  );
+  assert.equal(
+    driftsFromTitle("DeepSeek 发布新一代推理模型", "深度求索发布新一代推理模型"),
+    false,
+  );
+  // …and a genuinely different vendor is still caught (Gemini ≠ 深度求索).
+  assert.equal(
+    driftsFromTitle("Gemini 发布新一代推理模型", "深度求索发布新一代推理模型"),
+    true,
+  );
 });
 
 test("enforceOneTopicPerBullet: preserves natural Chinese translation for English source without bare title degradation", async () => {
@@ -598,4 +663,35 @@ test("localizeEnglishBullets: translates bare English bullets and preserves exis
   // Translated brand title with English description
   assert.match(out, /\* \*\*Spotatui\*\*：一款无 API 速率限制的 Spotify 终端界面客户端 \[23\]/);
   assert.doesNotMatch(out, /without web API rate limits/);
+});
+
+test("localizeEnglishBullets: an English headline over a Chinese body is translated, the body is kept", async () => {
+  // 2026-10-18 review: preserving bodies (§9.4 #1) put corrected English source
+  // titles above Chinese bodies. The old whole-line CJK test skipped those lines,
+  // so the English headline survived in a Chinese report — the body must not be
+  // dropped in exchange for the translation.
+  const body = "Meta 正式推出前沿开放权重模型 Muse Spark Open，采用多模态混合专家架构；为开发者提供本地部署与二次训练支持 [1]";
+  const markdown = `* **Welcome Muse Spark Open: open-weight frontier multimodal mixture-of-experts model from Meta**：${body}`;
+  const seen = [];
+  const mockTranslate = async (texts) => {
+    seen.push(...texts);
+    return texts.map((t) => `【译】${t}`);
+  };
+
+  const out = await localizeEnglishBullets(markdown, { translate: mockTranslate });
+
+  assert.match(out, /^\* \*\*【译】Welcome Muse Spark Open: open-weight frontier multimodal mixture-of-experts model from Meta\*\*：/);
+  assert.equal(out.includes(body), true);
+  assert.equal(out.includes("[1]"), true);
+  // Only the headline was queued — the Chinese body is not sent for translation.
+  assert.equal(seen.length, 1);
+  assert.match(seen[0], /^Welcome Muse Spark Open/);
+});
+
+test("localizeEnglishBullets: a short English headline over a Chinese body is left alone", async () => {
+  const markdown = "* **Spotatui**：这是一款无 API 速率限制的 Spotify 终端界面客户端，支持播放列表浏览 [7]";
+  let called = false;
+  const out = await localizeEnglishBullets(markdown, { translate: async () => { called = true; return []; } });
+  assert.equal(called, false);
+  assert.equal(out, markdown);
 });

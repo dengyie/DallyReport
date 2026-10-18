@@ -1,6 +1,6 @@
 ---
-title: DallyReport 优化开发文档
-status: draft-pending-approval
+title: DallyReport 优化开发文档（2026-08-11 首版 · 已取代）
+status: superseded
 updated: 2026-08-11
 tags:
   - dallyreport
@@ -10,9 +10,11 @@ tags:
 
 # DallyReport 优化开发文档(DEV 合同)
 
-> 状态:**草稿,待用户批准后实施**
+> ⚠️ **本文件已被取代，只作历史留档**。现行版本在 vault：`Note/Project/DallyReport/DallyReport 优化开发文档.md`（含 2026-10-07 三阶段 P1–P3 与 2026-10-18 §9 内容质量专项）。不要再按本文件实施改动——这里的路径（`/Users/mango/...`）与状态都已过期。
+>
+> 状态:~~草稿,待用户批准后实施~~（首版；其中「当日性 + 硬源保底 + 解耦」已于 2026-08-11 落地）
 > 关联:[[DallyReport 运维]](canonical 运维文档,代码现状以此为准)
-> 代码仓:`/Users/mango/project/claude-project/DallyReport`(git,当前 HEAD `9f2e14b`)
+> 代码仓:`/Users/mango/project/claude-project/DallyReport`(git,当前 HEAD `9f2e14b`；**现为 Windows `E:\code\DallyReport`**)
 > 依据:GitHub 开源调研(4 项目深度阅读)+ 本机只读验证 + 2026-08-11 review
 
 ## 0. 为什么优化(问题定义,按验证证据)

@@ -2,6 +2,18 @@
 
 每日 AI / GitHub 日报生成器。复用 [`grok-search`](https://github.com/) skill 拉取当前 AI 资讯与 GitHub 热门项目，渲染成带 front-matter 的 Markdown，写入 Obsidian vault。设计上可扩展到更多板块（其它报告类型）。
 
+## 2026-10-18 优化（内容厚度：护栏不再删正文）
+
+用户反馈「日报内容还是偏薄」。把近 12 期产物逐条量了一遍，这不是口味问题：**33%–91% 的要点只有粗体标题、没有正文**，有正文的平均也只有 50–90 字。
+
+- **根因是护栏自己删的**。`src/topic-bullets.mjs` 的 `faithfulSingle()` 对**每一条单引用要点**做忠实性检查：判「与来源标题有出入」就把整条替换成来源裸标题，正文全丢。判据里的专有名词比对是 ASCII 的（`\b[A-Z][A-Za-z0-9.+-]{2,}\b`），所以正文写 `Apple`、标题写「苹果」时**永远匹配不上**，合法改写被判成 drift。线上 `2026-10-17/AI.md` 第 22 行的「库克：苹果智能接入阿里千问…」就是这条路径的产物，本机可逐字复现。
+- **改成换头行、留正文**。判 drift 时只把粗体标题换成来源标题（原标题确实是错的，留着会把错误事实留在报告里），正文原样保留；只有正文本身为空时才退回裸标题。同时给 `driftsFromTitle` 加跨语种实体表（苹果↔Apple、英伟达↔NVIDIA、字节↔ByteDance…），并把专有名词校验收窄到**头行**——正文里补充厂商名、机构名不再算 drift。金额校验（`15.75亿美元` vs `$15.75B`）与 CJK bigram 重合率仍看整条，所以 `自动驾驶卡车` 这类**凭空实体仍会被拦**。
+- **采集端补正文**。厂商博客 RSS / 36kr 以前一律 `snippet = 标题`，模型手上没有正文只能凭标题扩写，扩写出来的又刚好被护栏判 drift 删掉——**采集薄 → 模型补 → 护栏删**。现在取 feed 自带的 `<description>` / `<summary>` / `<content:encoded>` 作 snippet，并剥掉「Continue reading」这类尾缀与标题回声。arXiv 本来就用 `<summary>`；HN 纯链接帖没有正文，保持留空。
+- **主频道 token 上限对齐**。`.env` 以前没设 `GROK_SYNTH_MAX_TOKENS`，主频道吃默认 4000、alt 频道是 16384——正文在上限处就被截了。现对齐为 16384。
+- **可量的验收**。新增 `scripts/report-thinness.mjs`：按 `* **标题** 正文 [N]` 分类，正文去掉 `[N]` 后无中文即判纯标题，输出纯标题占比与有正文平均字数。`node scripts/report-thinness.mjs --dir <日期目录>`，退出码 0=PASS（纯标题 <15%、有正文平均 ≥120 字）/ 1=FAIL。**2026-10-18 生产实测：纯标题占比 `AI.md` 36.0% → 8.0%、`AI-DeepSeek.md` 40.7% → 0.0%（达标）；正文总量 1335 → 2043、1105 → 2254 字符（翻倍）**。注意「有正文均值 ≥120」这一条未达标（88 / 62）且**会失真**——把纯标题要点变成短正文后均值反被稀释，看**正文总量 + 纯标题占比**更准；要抬高单条长度得改综合 prompt，是另一个杠杆。
+- **顺带修掉实测暴露的回归**。保留正文后，换上去的英文来源标题与中文正文同处一条，而 `localizeEnglishBullets` 当时按**整行**判 CJK（整行含中文就跳过），于是这些英文标题不再被翻译：实测 `AI.md` 英文标题 1 → 8 条。改成**按头行判定**，并让「头行已翻译、正文中文」只替换粗体头行、正文原样保留（原分支会把正文整段丢掉）；同时修掉「候选非空但工作项为空时拿空批次调翻译」。用当天真实产物验证：命中 8 / 6 条，**正文总字符数逐字不变**。
+- 测试 615 → **689（684 pass / 5 skipped / 0 fail）**。新增用例锁住「头行被纠正、正文保留」「跨脚本别名不误判」「真 drift 仍拦」「英文头行在中文正文之上仍被翻译且正文不丢」。契约变更细节见 vault `DallyReport 优化开发文档` §9.4.1 / §9.5。
+
 ## 2026-09-28 优化（海报重做 + 去 AI 味儿 + 引用修复）
 
 这一轮的起因是实测：把 2026-09-25 那周的周报正文和两张海报都拿出来逐条看，量出来的缺陷有据可查，不是口味问题。
@@ -25,7 +37,7 @@
 - **launchd 定时（可选）**：`node scripts/install-launchd.mjs` 注册每日 09:00 本机定时任务（日志 `logs/launchd.{out,err}.log`），`node scripts/uninstall-launchd.mjs` 卸载。
 - 测试 211 → **228（全部 pass）**。
 
-> 开发文档：`docs/dallyreport-optimization-dev.md`（Obsidian: `Note/Infra/DallyReport 优化开发文档.md`）
+> 开发文档：vault `Note/Project/DallyReport/DallyReport 优化开发文档.md`（DEV 合同，**现行版本**；含 §9 内容质量专项）。仓内 `docs/dallyreport-optimization-dev.md` 是 2026-08-11 首版，已被 vault 版取代，只作历史留档。
 
 ## 目录结构
 
@@ -52,6 +64,9 @@ DallyReport/
 │       ├── ai-news.mjs         # AI 板块：搜索 -> 零回引则综合 -> 来源卡片
 │       └── github-trending.mjs # GitHub 板块：fetch trending -> 解析 star 增量 -> 表格（+暴露 repos 给海报）
 ├── test/                       # node:test 单测（配置、缓存、注入清洗、原子写、综合、海报等）
+├── scripts/                    # 运维 / 验收脚本（不是运行时依赖）
+│   ├── report-thinness.mjs     # 内容厚度验收：纯标题要点占比 / 有正文平均字数，退出码即判定
+│   └── verify-poster.mjs       # 海报像素级验收：真实数据重渲染 + OCR 回读（39 项断言）
 ├── reports-cache/              # 抓取结果缓存 + 写入失败时的抢救正文（gitignore）
 ├── .env.example
 └── package.json
@@ -187,6 +202,7 @@ npm test
 - `config`：验证默认路径基于 `os.homedir()`、显式环境变量覆盖、正整数超时校验，以及缺失运行路径只产生 warning。
 - `obsidian`：验证同目录临时文件 + `rename` 的原子覆盖语义、替换失败时旧文件完整保留，以及临时文件清理。
 - `grok-cli`：验证缓存命中标记、实时抓取与缓存区分，以及缓存写失败不会反转实时成功。
+- `topic-bullets`（`enforceOneTopicPerBullet` / `driftsFromTitle`）：锁住 2026-10-18 的新契约——判 drift 时**只换头行、正文保留**；跨脚本别名（苹果↔Apple、字节↔ByteDance、深度求索↔DeepSeek）与标题里已有的厂商名不误判；真 drift 仍拦（`15.75亿` vs `$15.75B` 量级误译、`自动驾驶卡车` 凭空实体）。同一套断言也覆盖 `scripts/report-thinness.mjs` 的纯标题分类口径。
 - `snippet-hygiene` 与 `renderSources`：覆盖中英文 prompt injection/paraphrase 清洗、合法新闻保留、来源 `<untrusted-source>` 边界和字段转义。
 - `llm-synthesize.synthesizeFromSources`：注入 `fetch` 桩，覆盖 `finish_reason=length` 截断（`SYNTH_TRUNCATED`）、超时（`SYNTH_FETCH_FAILED`/`aborted`）、空内容（`SYNTH_EMPTY`）、缺凭证（`MISSING_GROK_CREDS`）等失败路径。
 - `linuxdo`：解析列表页 topic 链接、AI 标题过滤、广告降权、来源合并去重、注入 `runFetch` 的抓取路径与失败隔离，并验证缓存状态是非枚举元数据且 listing 失败仍可观测。

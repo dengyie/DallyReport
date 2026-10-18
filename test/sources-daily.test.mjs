@@ -581,6 +581,42 @@ test("official blog RSS: a 3-day-old post is still excluded", async () => {
   assert.equal(out.length, 0);
 });
 
+test("official blog RSS: the feed's own excerpt becomes the snippet, not an echo of the title", async () => {
+  // 2026-10-18 thinness review (§9.4 #3): `snippet = title` left the writer with
+  // nothing but the headline. The feed's <description> is real material.
+  const feed = `<?xml version="1.0"?><rss><channel><item>` +
+    `<title>OpenAI ships a new model</title>` +
+    `<link>https://openai.test/3</link>` +
+    `<pubDate>${new Date("2026-09-27T02:00:00Z").toUTCString()}</pubDate>` +
+    `<description><![CDATA[<p>The new model cuts inference cost by 40% and ships to all API tiers, the company said in a blog post.</p>]]></description>` +
+    `</item></channel></rss>`;
+  const out = await fetchOfficialBlogRss(
+    "https://openai.test/feed",
+    { cacheDir: null, date: "2026-09-27" },
+    { site: "openai", runFetch: async () => ({ text: feed, fromCache: false, provider: "t" }) },
+  );
+  assert.equal(out.length, 1);
+  assert.match(out[0].snippet, /cuts inference cost by 40%/);
+  assert.doesNotMatch(out[0].snippet, /<p>/);
+  assert.notEqual(out[0].snippet, out[0].title);
+});
+
+test("official blog RSS: a title-only feed still falls back to the title", async () => {
+  const feed = `<?xml version="1.0"?><rss><channel><item>` +
+    `<title>OpenAI ships another model</title>` +
+    `<link>https://openai.test/4</link>` +
+    `<pubDate>${new Date("2026-09-27T02:00:00Z").toUTCString()}</pubDate>` +
+    `<description>Continue reading</description>` +
+    `</item></channel></rss>`;
+  const out = await fetchOfficialBlogRss(
+    "https://openai.test/feed",
+    { cacheDir: null, date: "2026-09-27" },
+    { site: "openai", runFetch: async () => ({ text: feed, fromCache: false, provider: "t" }) },
+  );
+  assert.equal(out.length, 1);
+  assert.equal(out[0].snippet, "OpenAI ships another model");
+});
+
 test("arxiv: a two-Beijing-days-ago paper survives the declared 2-day grace", async () => {
   // A 09:00 Beijing run on 2026-09-27: the previous Beijing day began at
   // 2026-09-25T16:00Z, so an arXiv submit at 2026-09-25T20:00Z is one Beijing day
