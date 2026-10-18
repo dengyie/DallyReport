@@ -12,6 +12,20 @@
 // inconsistent. The header now states what the file actually is, and the list is
 // deduped by id/url and sorted newest-first so the same card set always renders
 // byte-identically.
+// Numeric sort key for a card id. Non-numeric / missing ids sort last (a card
+// with a real id outranks one without). Number() rather than parseInt so "1e3"
+// and "  12 " behave like the values they denote.
+function idValue(card) {
+  const n = Number(card?.id);
+  return Number.isFinite(n) ? n : -1;
+}
+
+// A scraped title/excerpt is a single-line field; collapse any whitespace run
+// around an embedded newline to one space.
+function oneLine(s) {
+  return String(s ?? "").replace(/\s*\n\s*/g, " ");
+}
+
 export function renderLinuxDoPostAuxiliary(cards, date, postsById = new Map()) {
   const seen = new Set();
   const list = [];
@@ -21,19 +35,20 @@ export function renderLinuxDoPostAuxiliary(cards, date, postsById = new Map()) {
     seen.add(key);
     list.push(c);
   }
-  // Newest first; ties broken by id descending so the order never depends on the
-  // order the fetch happened to return cards in.
+  // Newest first; ties broken by id DESCENDING NUMERICALLY so the order never
+  // depends on the order the fetch happened to return cards in. A numeric compare,
+  // not localeCompare on the string forms: localeCompare is locale-dependent and
+  // collates "999" after "3038853".
   list.sort((a, b) => {
     const ta = Date.parse(a?.created_at) || 0;
     const tb = Date.parse(b?.created_at) || 0;
     if (tb !== ta) return tb - ta;
-    return String(b?.id ?? "").localeCompare(String(a?.id ?? ""));
+    return idValue(b) - idValue(a);
   });
-  const newest = list
-    .map((c) => c?.created_at)
-    .filter(Boolean)
-    .sort()
-    .pop();
+  // list is sorted, so the newest stamp is the first card that carries one. (A
+  // lexicographic max over the raw strings also worked for ISO-UTC, but it would
+  // pick the wrong card for any other stamp format.)
+  const newest = list.find((c) => c?.created_at)?.created_at || "";
 
   const lines = [
     `# linux.do 前沿快讯 辅助资料 · ${date}`,
@@ -44,19 +59,22 @@ export function renderLinuxDoPostAuxiliary(cards, date, postsById = new Map()) {
     "",
   ];
   for (const c of list) {
-    lines.push(`## ${c.title}`);
+    // A scraped title or excerpt can carry an embedded newline (the 2026-10-18 top
+    // card's title did, and the placeholder excerpt built from it kept the raw
+    // "\n" even after enrichment gave the card a one-line title). A title and an
+    // excerpt are single-line fields: a newline splits the "## heading" or the
+    // "- 正文摘录：" list item in two, and it also made the published file
+    // unreproducible from its own cards. Collapse any whitespace around a newline
+    // to one space — the same treatment the <summary> title below already got.
+    lines.push(`## ${oneLine(c.title)}`);
     lines.push(`- 链接：${c.url}`);
     if (c.created_at) lines.push(`- 时间：${c.created_at}`);
-    if (c.excerpt) lines.push(`- 正文摘录：${c.excerpt}`);
+    if (c.excerpt) lines.push(`- 正文摘录：${oneLine(c.excerpt)}`);
     const rec = postsById.get(c.url) || postsById.get(c.id);
     if (rec?.attachments?.length) lines.push(`- 附件：${rec.attachments.length} 个已下载`);
     if (rec?.embed) {
-      // The enriched post title can carry an embedded newline (seen 2026-10-18 on
-      // the top card), which split the <summary> across two lines. Collapse it so
-      // the summary is always one line.
-      const summaryTitle = String(rec.title ?? "").replace(/\s*\n\s*/g, " ");
       lines.push("");
-      lines.push(`<details><summary>展开完整帖子（${summaryTitle}）</summary>`);
+      lines.push(`<details><summary>展开完整帖子（${oneLine(rec.title)}）</summary>`);
       lines.push("");
       lines.push(rec.embed);
       lines.push("");

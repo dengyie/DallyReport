@@ -60,3 +60,48 @@ test("renderLinuxDoPostAuxiliary: a newline in the enriched title does not split
   const out = renderLinuxDoPostAuxiliary([c], "2026-10-18", byId);
   assert.match(out, /^<details><summary>展开完整帖子（上半句 下半句）<\/summary>$/m);
 });
+
+test("renderLinuxDoPostAuxiliary: a newline in a card title/excerpt never splits the heading or the 摘录 line", () => {
+  // 2026-10-18 top card: the JSON title carried a raw "\n", so the placeholder
+  // excerpt built from it printed across two lines while the heading (rendered
+  // from the enriched one-line title) did not — the published file could not be
+  // reproduced from its own cards.
+  const out = renderLinuxDoPostAuxiliary(
+    [{ ...card(9, "2026-10-17T10:00:00.000Z"), title: "上半句\n下半句", excerpt: "linux.do 前沿讨论：上半句\n下半句" }],
+    "2026-10-18",
+  );
+  assert.match(out, /^## 上半句 下半句$/m);
+  assert.match(out, /^- 正文摘录：linux\.do 前沿讨论：上半句 下半句$/m);
+  assert.equal(out.split("\n").filter((l) => l.startsWith("下半句")).length, 0);
+});
+
+test("renderLinuxDoPostAuxiliary: equal timestamps tie-break on the id NUMERICALLY", () => {
+  // 999 vs 3038853: numeric desc says (3038853, 999), a localeCompare on the
+  // string forms says the opposite ("9" collates after "3"), so this pins the
+  // intent. The tie-break must also not depend on input order.
+  const iso = "2026-10-17T10:00:00.000Z";
+  const desc = (out) =>
+    [...out.matchAll(/^- 链接：https:\/\/linux\.do\/t\/topic\/(\d+)$/gm)].map((m) => m[1]);
+  const a = renderLinuxDoPostAuxiliary([card(999, iso), card(3038853, iso)], "2026-10-18");
+  const b = renderLinuxDoPostAuxiliary([card(3038853, iso), card(999, iso)], "2026-10-18");
+  assert.deepEqual(desc(a), ["3038853", "999"]);
+  assert.equal(a, b);
+});
+
+test("renderLinuxDoPostAuxiliary: a card with no created_at sorts last and cannot become 最新", () => {
+  const stamped = card(5, "2026-10-17T10:00:00.000Z");
+  const unstamped = { id: 6, url: "https://linux.do/t/topic/6", title: "帖子 6", excerpt: "摘录 6" };
+  const out = renderLinuxDoPostAuxiliary([unstamped, stamped], "2026-10-18");
+  const order = [...out.matchAll(/^## (.+)$/gm)].map((m) => m[1]);
+  assert.deepEqual(order, ["帖子 5", "帖子 6"]);
+  assert.match(out, /最新一条 2026-10-17T10:00:00\.000Z/);
+  // Only the stamped card gets a 时间 line, and 帖子 6's line does not follow 帖子 5's.
+  assert.equal(out.match(/^- 时间：/gm).length, 1);
+});
+
+test("renderLinuxDoPostAuxiliary: an empty list still states a truthful 0-count header", () => {
+  const out = renderLinuxDoPostAuxiliary([], "2026-10-18");
+  assert.match(out, /^# linux\.do 前沿快讯 辅助资料 · 2026-10-18$/m);
+  assert.match(out, /共 0 条 linux\.do 帖子（实时快照，按发布时间倒序；来源：https:\/\/linux\.do\/c\/news\/34）$/m);
+  assert.doesNotMatch(out, /最新一条/);
+});
