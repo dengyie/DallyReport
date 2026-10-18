@@ -43,10 +43,10 @@ test("renderLinuxDoPostAuxiliary: a duplicate url is archived once", () => {
 
 test("renderLinuxDoPostAuxiliary: attachment count and full-thread embed are kept", () => {
   const c = card(9, "2026-10-17T10:00:00.000Z");
-  const byId = new Map([
+  const byUrl = new Map([
     [c.url, { title: "帖子 9", attachments: [{}, {}, {}], embed: "![[2026-10-18/linuxdo-posts/9-post]]" }],
   ]);
-  const out = renderLinuxDoPostAuxiliary([c], "2026-10-18", byId);
+  const out = renderLinuxDoPostAuxiliary([c], "2026-10-18", byUrl);
   assert.match(out, /^- 附件：3 个已下载$/m);
   assert.match(out, /<details><summary>展开完整帖子（帖子 9）<\/summary>/);
   assert.match(out, /!\[\[2026-10-18\/linuxdo-posts\/9-post\]\]/);
@@ -54,10 +54,10 @@ test("renderLinuxDoPostAuxiliary: attachment count and full-thread embed are kep
 
 test("renderLinuxDoPostAuxiliary: a newline in the enriched title does not split the summary", () => {
   const c = card(9, "2026-10-17T10:00:00.000Z");
-  const byId = new Map([
+  const byUrl = new Map([
     [c.url, { title: "上半句\n下半句", attachments: [], embed: "![[2026-10-18/linuxdo-posts/9-post]]" }],
   ]);
-  const out = renderLinuxDoPostAuxiliary([c], "2026-10-18", byId);
+  const out = renderLinuxDoPostAuxiliary([c], "2026-10-18", byUrl);
   assert.match(out, /^<details><summary>展开完整帖子（上半句 下半句）<\/summary>$/m);
 });
 
@@ -97,6 +97,21 @@ test("renderLinuxDoPostAuxiliary: a card with no created_at sorts last and canno
   assert.match(out, /最新一条 2026-10-17T10:00:00\.000Z/);
   // Only the stamped card gets a 时间 line, and 帖子 6's line does not follow 帖子 5's.
   assert.equal(out.match(/^- 时间：/gm).length, 1);
+});
+
+test("renderLinuxDoPostAuxiliary: cards with neither a timestamp nor an id value still render in a fixed order", () => {
+  // 2026-10-19 review R3: the comparator had only (time, id). Two cards sharing
+  // both — no created_at AND no numeric id — compared equal, so Array.sort kept
+  // the FETCH order and the file stopped being byte-reproducible from its own card
+  // set, contradicting the invariant this renderer advertises. The dedupe key is
+  // the final tie-break that makes the order total.
+  const x = { url: "https://linux.do/t/topic/x", title: "X", excerpt: "ex" };
+  const y = { url: "https://linux.do/t/topic/y", title: "Y", excerpt: "ey" };
+  const forward = renderLinuxDoPostAuxiliary([x, y], "2026-10-19");
+  const reverse = renderLinuxDoPostAuxiliary([y, x], "2026-10-19");
+  assert.equal(forward, reverse);
+  const order = [...forward.matchAll(/^## (.+)$/gm)].map((m) => m[1]);
+  assert.deepEqual(order, ["X", "Y"]);
 });
 
 test("renderLinuxDoPostAuxiliary: an empty list still states a truthful 0-count header", () => {

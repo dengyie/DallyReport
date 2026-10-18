@@ -26,7 +26,7 @@ function oneLine(s) {
   return String(s ?? "").replace(/\s*\n\s*/g, " ");
 }
 
-export function renderLinuxDoPostAuxiliary(cards, date, postsById = new Map()) {
+export function renderLinuxDoPostAuxiliary(cards, date, postsByUrl = new Map()) {
   const seen = new Set();
   const list = [];
   for (const c of Array.isArray(cards) ? cards : []) {
@@ -43,7 +43,17 @@ export function renderLinuxDoPostAuxiliary(cards, date, postsById = new Map()) {
     const ta = Date.parse(a?.created_at) || 0;
     const tb = Date.parse(b?.created_at) || 0;
     if (tb !== ta) return tb - ta;
-    return idValue(b) - idValue(a);
+    const byId = idValue(b) - idValue(a);
+    if (byId !== 0) return byId;
+    // Final tie-break so the comparator is a TOTAL order and can never fall back
+    // to the fetch order: two cards sharing a timestamp AND an id value (both
+    // missing, or both non-numeric) would otherwise render in whatever order the
+    // fetch returned them, and the file would stop being reproducible from its own
+    // card set. Ordered by the dedupe key for determinism only — it means nothing.
+    // Compared with < / >, not localeCompare, for the reason above.
+    const ka = String(a?.url ?? a?.id ?? "");
+    const kb = String(b?.url ?? b?.id ?? "");
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
   });
   // list is sorted, so the newest stamp is the first card that carries one. (A
   // lexicographic max over the raw strings also worked for ISO-UTC, but it would
@@ -70,7 +80,11 @@ export function renderLinuxDoPostAuxiliary(cards, date, postsById = new Map()) {
     lines.push(`- 链接：${c.url}`);
     if (c.created_at) lines.push(`- 时间：${c.created_at}`);
     if (c.excerpt) lines.push(`- 正文摘录：${oneLine(c.excerpt)}`);
-    const rec = postsById.get(c.url) || postsById.get(c.id);
+    // Keyed by url: the only caller (run.mjs) builds this map from the enriched
+    // posts' own `url`, which is copied verbatim from the card. The old
+    // `|| postsByUrl.get(c.id)` fallback could never fire and its parameter name
+    // (postsById) described a key nothing ever used.
+    const rec = postsByUrl.get(c.url);
     if (rec?.attachments?.length) lines.push(`- 附件：${rec.attachments.length} 个已下载`);
     if (rec?.embed) {
       lines.push("");
