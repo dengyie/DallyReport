@@ -1,4 +1,5 @@
 import { stripMarkdown } from "./markdown.mjs";
+import { clarifySnippet } from "./snippet-hygiene.mjs";
 
 // One bullet, one topic.
 //
@@ -40,6 +41,115 @@ export async function enforceOneTopicPerBullet(markdown, { topics, sources, retr
 
 export function crossesTopics(text, topics, sources) {
   return topicIdsIn(text, topics, sources).size > 1;
+}
+
+// 2026-10-18 §9.5.2 fallback: the deterministic safety net for title-only bullets.
+//
+// The synthesis prompt forbids them (rule 6), but two runs of the SAME code
+// produced 8% and 32% bare bullets — the model emits them on some draws, and no
+// guard can invent a body it never wrote. This is the last line, and it is
+// deliberately non-generative: a bullet that is a bold headline plus a [N] with
+// no body either
+//   (a) takes the cited source's OWN excerpt as its body — real material the
+//       model was already shown (same `clarifySnippet` hygiene as renderSources),
+//       so nothing is fabricated; or
+//   (b) is dropped when the source has no usable excerpt (empty, or one that only
+//       echoes the title). Its [N] then stops being cited and leaves the
+//       reference list — which is what rule 3 ("宁可整条略去也不要凑数") asks for.
+// An English excerpt is translated with the same helper the localizer uses, so a
+// backfilled body is Chinese like every other body.
+const BARE_BODY_MIN = 20;
+// A backfilled body should read like an authored bullet (~60-150 chars), not like
+// a source card. Take a generous slice of the excerpt, then cut back to the last
+// sentence end so the body never stops mid-clause.
+const EXCERPT_MAX = 400;
+const BODY_MAX = 240;
+const SENTENCE_END = /[。！？；!?;.]/;
+
+function clipExcerpt(s, max = BODY_MAX) {
+  const text = String(s || "").trim();
+  if (text.length <= max) return text;
+  const head = text.slice(0, max);
+  let cut = -1;
+  for (let i = head.length - 1; i >= 0; i--) {
+    if (SENTENCE_END.test(head[i])) { cut = i; break; }
+  }
+  return cut >= 60 ? head.slice(0, cut + 1).trim() : `${head.trim()}…`;
+}
+
+function parseBulletHeadline(text) {
+  const first = String(text).split("\n")[0];
+  const m = first.match(/^(\s*)(?:[*+-]|\d+\.)\s+\*\*([\s\S]*?)\*\*([\s\S]*)$/);
+  if (!m) return null;
+  return { indent: m[1], headline: m[2].trim(), rest: m[3] || "" };
+}
+
+// Lowercase and drop all whitespace/punctuation/symbols, so "title echo" is a
+// comparison of content rather than of formatting.
+function echoKey(s) {
+  return String(s || "").toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+
+export async function fillBareBullets(markdown, { sources = [], translate } = {}) {
+  const blocks = bulletBlocks(markdown);
+  const list = Array.isArray(sources) ? sources : [];
+  const filled = [];
+  const english = [];
+  let dropped = 0;
+
+  for (const block of blocks) {
+    if (!block.bullet) continue;
+    // A bare bullet is one physical line — there is no body to wrap. A multi-line
+    // "headline-only" block is actually a glued bullet (headline, then a body line
+    // without a list marker), which belongs to splitOverMergedBullets; filling it
+    // here would delete the glued half.
+    if (block.text.includes("\n")) continue;
+    const parsed = parseBulletHeadline(block.text);
+    if (!parsed) continue;
+    // "Bare" = no body. Whitespace, punctuation and [N] markers are not content, so
+    // both "* **T**。" and "* **T** [1]" are bare; only real text counts as a body.
+    if (echoKey(parsed.rest.replace(CITE_GROUP, " "))) continue;
+
+    const cites = [...block.text.matchAll(CITE_GROUP)].map((m) => m[1]).join(",");
+    const n = Number.parseInt(String(cites).split(",")[0], 10);
+    const src = Number.isInteger(n) && n >= 1 ? list[n - 1] : null;
+    const title = src?.title ? String(src.title).trim() : "";
+    let body = src ? clarifySnippet(src.snippet || "", title, { maxChars: EXCERPT_MAX }) : "";
+    // clarifySnippet prefixes the title for an "obscure" (all-codename) excerpt;
+    // strip that lead-in so the body does not restate its own headline.
+    if (title && body.startsWith(title)) body = body.slice(title.length).replace(/^[。.，,、；;：:\s]+/, "");
+    body = clipExcerpt(body);
+
+    const key = echoKey(body);
+    const titleKey = echoKey(title);
+    const usable = body.length >= BARE_BODY_MIN && key && !(titleKey && titleKey.includes(key));
+    if (!usable) {
+      block.drop = true; // no excerpt to stand on → omit the bullet entirely
+      dropped += 1;
+      continue;
+    }
+    const entry = { block, indent: parsed.indent, headline: parsed.headline.replace(/[：:]\s*$/, ""), cites, body };
+    filled.push(entry);
+    if (!/[\u4e00-\u9fff]/.test(body)) english.push(entry);
+  }
+
+  // Nothing to fill AND nothing to drop → the text is already fine; return it
+  // untouched. (Checking the drop count matters: an all-dropped section must
+  // still return the filtered text, not the original.)
+  if (filled.length === 0 && dropped === 0) return markdown;
+
+  if (english.length && typeof translate === "function") {
+    const out = await translate(english.map((e) => e.body));
+    english.forEach((e, i) => {
+      const t = out && out[i];
+      if (t && String(t).trim()) e.body = String(t).trim();
+    });
+  }
+
+  for (const e of filled) {
+    e.block.text = `${e.indent}* **${e.headline}**：${e.body}${e.cites ? ` [${e.cites}]` : ""}`;
+  }
+  return blocks.filter((b) => !b.drop).map((b) => b.text).join("\n");
 }
 
 function bulletBlocks(markdown) {

@@ -12,7 +12,7 @@ import { filterByRecency, isInWindowSource } from "../snippet-hygiene.mjs";
 import { materialWindow } from "../report-window.mjs";
 import { topicize, gradeTopics, applyGradeCap } from "../topics.mjs";
 import { investigateTopics, renderInvestigationInput } from "../investigate.mjs";
-import { enforceOneTopicPerBullet, localizeEnglishBullets } from "../topic-bullets.mjs";
+import { enforceOneTopicPerBullet, fillBareBullets, localizeEnglishBullets } from "../topic-bullets.mjs";
 import { translateToChinese } from "../poster/translate.mjs";
 
 export function computeAiNewsStatus({
@@ -652,7 +652,16 @@ export async function aiNewsSection(
       ? (bullet) => retryBullet(bullet, (instruction) => runOneShot(effectiveModel, instruction))
       : undefined,
   });
-  const bodyTextLocalized = await localizeEnglishBullets(bodyTextChecked, {
+  // 2026-10-18 §9.5.2 last-line: a bullet that is a headline plus [N] with no body
+  // must never ship bare. Deterministic fill from the cited source's own excerpt,
+  // or drop — see fillBareBullets. Runs before localization (an English excerpt
+  // is translated by the same helper) and before the citation scan, so a dropped
+  // bullet's marker cannot linger in the reference list.
+  const bodyTextFilled = await fillBareBullets(bodyTextChecked, {
+    sources: shownSources,
+    translate: (lines) => translateToChinese(lines, { model: effectiveModel }),
+  });
+  const bodyTextLocalized = await localizeEnglishBullets(bodyTextFilled, {
     translate: (lines) => translateToChinese(lines, { model: effectiveModel }),
   });
   // 2026-10-07 P2 sanitizers (safety net for reasoning-model truncation):

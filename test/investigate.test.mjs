@@ -11,7 +11,7 @@ import {
   saveTopicCache,
 } from "../src/investigate.mjs";
 import { investigateIfEnabled, assembleInvestigatedBody } from "../src/sections/ai-news.mjs";
-import { enforceOneTopicPerBullet, localizeEnglishBullets, driftsFromTitle } from "../src/topic-bullets.mjs";
+import { enforceOneTopicPerBullet, fillBareBullets, localizeEnglishBullets, driftsFromTitle } from "../src/topic-bullets.mjs";
 import { tmpDirSync } from "./helpers/tmp.mjs";
 
 const topic = {
@@ -695,3 +695,86 @@ test("localizeEnglishBullets: a short English headline over a Chinese body is le
   assert.equal(called, false);
   assert.equal(out, markdown);
 });
+
+// 2026-10-18 §9.5.2 fallback. Two runs of the SAME guard code shipped 8% and 32%
+// bare bullets; the model emits them on some draws and no guard can invent a body.
+// fillBareBullets is the last line: backfill from the cited source's own excerpt,
+// or drop the bullet (and its [N], so the reference list shrinks with it).
+test("fillBareBullets: a title-only bullet takes the cited source's excerpt as its body", async () => {
+  const sources = [
+    { url: "https://example.com/a", title: "Qwen 发布新一代开源模型", snippet: "阿里巴巴通义千问团队发布了新一代开源模型，上下文窗口扩展至 100 万 token，并首次支持原生多模态输入。该模型已在 Hugging Face 上开放权重下载。" },
+  ];
+  const markdown = "* **Qwen 发布新一代开源模型** [1]";
+  const out = await fillBareBullets(markdown, { sources });
+  assert.match(out, /^\* \*\*Qwen 发布新一代开源模型\*\*：阿里巴巴通义千问团队发布了新一代开源模型/);
+  assert.match(out, /\[1\]$/);
+  assert.doesNotMatch(out, /\*\* \[1\]/);
+});
+
+test("fillBareBullets: a bare bullet whose source has no excerpt is dropped, and the next bullet survives", async () => {
+  const sources = [
+    { url: "https://example.com/a", title: "无摘要的来源", snippet: "" },
+    { url: "https://example.com/b", title: "有摘要的来源", snippet: "这条来源有足够长的正文摘要，可以支撑一条要点。" },
+  ];
+  const markdown = [
+    "* **无摘要的来源** [1]",
+    "* **有摘要的来源** [2]",
+  ].join("\n");
+  const out = await fillBareBullets(markdown, { sources });
+  assert.doesNotMatch(out, /无摘要的来源/);
+  assert.match(out, /\* \*\*有摘要的来源\*\*：这条来源有足够长的正文摘要/);
+});
+
+test("fillBareBullets: an excerpt that only echoes the title is not a body", async () => {
+  const sources = [
+    { url: "https://example.com/a", title: "某公司发布新模型", snippet: "某公司发布新模型。" },
+  ];
+  const out = await fillBareBullets("* **某公司发布新模型** [1]", { sources });
+  assert.equal(out, "");
+});
+
+test("fillBareBullets: an English excerpt is translated, a Chinese body is untouched", async () => {
+  const sources = [
+    { url: "https://example.com/a", title: "Anthropic ships a new agent tool", snippet: "Anthropic released a new agent tool that can run multi-step tasks without supervision, and it is available today for all paid plans." },
+    { url: "https://example.com/b", title: "字节发布新功能", snippet: "字节跳动为豆包加入了长文档解析能力，单次可处理上百页 PDF。" },
+  ];
+  const markdown = [
+    "* **Anthropic ships a new agent tool** [1]",
+    "* **字节发布新功能** [2]",
+  ].join("\n");
+  const seen = [];
+  const mockTranslate = async (texts) => {
+    seen.push(...texts);
+    return texts.map(() => "Anthropic 发布了可自主执行多步任务的智能体工具，现已向所有付费方案开放。");
+  };
+  const out = await fillBareBullets(markdown, { sources, translate: mockTranslate });
+  assert.match(out, /Anthropic 发布了可自主执行多步任务的智能体工具/);
+  assert.doesNotMatch(out, /released a new agent tool/);
+  assert.match(out, /字节跳动为豆包加入了长文档解析能力/);
+  // Only the English excerpt was queued.
+  assert.equal(seen.length, 1);
+  assert.match(seen[0], /^Anthropic released/);
+});
+
+test("fillBareBullets: bullets that already have a body are left exactly as they were", async () => {
+  const sources = [{ url: "https://example.com/a", title: "来源", snippet: "来源正文摘要，长度足够。" }];
+  const markdown = [
+    "## 今日焦点",
+    "* **有条目的标题**：这里本来就有正文，不该被改动 [1]",
+    "普通段落",
+  ].join("\n");
+  let called = false;
+  const out = await fillBareBullets(markdown, { sources, translate: async () => { called = true; return []; } });
+  assert.equal(out, markdown);
+  assert.equal(called, false);
+});
+
+test("fillBareBullets: a glued multi-line bullet is not treated as bare", async () => {
+  // "* **A**\n**B**：正文" is two glued bullets, not a bare A. Backfilling A would
+  // delete B; splitOverMergedBullets owns this shape.
+  const sources = [{ url: "https://example.com/a", title: "A 标题", snippet: "A 的来源摘要，长度足够支撑正文。" }];
+  const markdown = "* **A 标题**\n**B 标题**：这是 B 的正文 [1]";
+  const out = await fillBareBullets(markdown, { sources });
+  assert.equal(out, markdown);
+});
+
