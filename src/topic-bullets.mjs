@@ -1,5 +1,5 @@
 import { stripMarkdown } from "./markdown.mjs";
-import { clarifySnippet } from "./snippet-hygiene.mjs";
+import { clarifySnippet, sanitizeSnippet } from "./snippet-hygiene.mjs";
 
 // One bullet, one topic.
 //
@@ -64,6 +64,14 @@ const BARE_BODY_MIN = 20;
 // sentence end so the body never stops mid-clause.
 const EXCERPT_MAX = 400;
 const BODY_MAX = 240;
+// A body that still needs translation is handed to translateToChinese, which
+// slices each input to MAX_INPUT_CHARS (200) and then REPLACES the whole body
+// with the reply — so an English body longer than that would come back as a
+// translation of its first 200 chars only, the tail lost mid-clause. Cap the
+// English body to that same budget BEFORE translating (our clip is
+// sentence-aligned), so the reply covers the whole body. Keep in sync with
+// src/poster/translate.mjs MAX_INPUT_CHARS.
+const TRANSLATE_MAX = 200;
 const SENTENCE_END = /[。！？；!?;.]/;
 
 function clipExcerpt(s, max = BODY_MAX) {
@@ -74,7 +82,8 @@ function clipExcerpt(s, max = BODY_MAX) {
   for (let i = head.length - 1; i >= 0; i--) {
     if (SENTENCE_END.test(head[i])) { cut = i; break; }
   }
-  return cut >= 60 ? head.slice(0, cut + 1).trim() : `${head.trim()}…`;
+  // Reserve one char for the ellipsis so the result never exceeds `max` either way.
+  return cut >= 60 ? head.slice(0, cut + 1).trim() : `${head.slice(0, max - 1).trim()}…`;
 }
 
 function parseBulletHeadline(text) {
@@ -115,22 +124,38 @@ export async function fillBareBullets(markdown, { sources = [], translate } = {}
     const src = Number.isInteger(n) && n >= 1 ? list[n - 1] : null;
     const title = src?.title ? String(src.title).trim() : "";
     let body = src ? clarifySnippet(src.snippet || "", title, { maxChars: EXCERPT_MAX }) : "";
-    // clarifySnippet prefixes the title for an "obscure" (all-codename) excerpt;
-    // strip that lead-in so the body does not restate its own headline.
-    if (title && body.startsWith(title)) body = body.slice(title.length).replace(/^[。.，,、；;：:\s]+/, "");
+    // clarifySnippet rebuilds an "obscure" excerpt as "<sanitized title>。<clean>".
+    // Strip EXACTLY that lead-in so the body does not restate its own headline. The
+    // "。" separator must be required: a plain excerpt that merely BEGINS with the
+    // same words as the title (title "来源一", excerpt "来源一的正文摘要…") is real
+    // content, and a bare startsWith(title) test would eat its opening words.
+    const leadTitle = title ? sanitizeSnippet(title, { maxChars: 200 }) : "";
+    const lead = leadTitle ? `${leadTitle}。` : "";
+    if (lead && body.startsWith(lead)) body = body.slice(lead.length);
     body = clipExcerpt(body);
+    // An English body is about to be translated; cap it to the translator's own
+    // input budget first (see TRANSLATE_MAX), so the clip is ours instead of the
+    // translator slicing the tail off and replacing the whole body with the
+    // shorter reply. The usable gate below then judges the text that ships.
+    const englishBody = !/[\u4e00-\u9fff]/.test(body);
+    if (englishBody) body = clipExcerpt(body, TRANSLATE_MAX);
 
     const key = echoKey(body);
     const titleKey = echoKey(title);
     const usable = body.length >= BARE_BODY_MIN && key && !(titleKey && titleKey.includes(key));
     if (!usable) {
-      block.drop = true; // no excerpt to stand on → omit the bullet entirely
+      // No excerpt to stand on → omit the bullet entirely, and its [N] leaves the
+      // reference list with it. This is the specified trade-off (rule 3, "宁可整条
+      // 略去也不要凑数"): a bullet whose source carries no body text has nothing
+      // behind its claim, so it is not shipped as a bare headline. See 优化开发
+      // 文档 §9.5.3.
+      block.drop = true;
       dropped += 1;
       continue;
     }
     const entry = { block, indent: parsed.indent, headline: parsed.headline.replace(/[：:]\s*$/, ""), cites, body };
     filled.push(entry);
-    if (!/[\u4e00-\u9fff]/.test(body)) english.push(entry);
+    if (englishBody) english.push(entry);
   }
 
   // Nothing to fill AND nothing to drop → the text is already fine; return it

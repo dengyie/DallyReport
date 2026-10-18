@@ -778,3 +778,81 @@ test("fillBareBullets: a glued multi-line bullet is not treated as bare", async 
   assert.equal(out, markdown);
 });
 
+test("fillBareBullets: an English body is clipped to the translator's 200-char budget BEFORE the call", async () => {
+  // 2026-10-19 review F1: translateToChinese slices each input to MAX_INPUT_CHARS
+  // (200) and replaces the whole body with the reply, so a ~370-char English body
+  // came back as a translation of its first 200 chars — the tail silently gone.
+  // The clip must be ours (and sentence-aligned), not the translator's.
+  const sources = [
+    {
+      url: "https://example.com/a",
+      title: "Anthropic ships a new agent tool",
+      snippet:
+        "Anthropic released a new agent tool that can run multi-step tasks without supervision, " +
+        "and it is available today for all paid plans. The company says the tool can browse the web, " +
+        "read files, and call internal APIs on the user's behalf. Pricing for teams that want the " +
+        "higher rate limits has not been announced yet.",
+    },
+  ];
+  const seen = [];
+  const mockTranslate = async (texts) => {
+    seen.push(...texts);
+    return texts.map(() => "Anthropic 发布了可自主执行多步任务的智能体工具，现已向所有付费方案开放。");
+  };
+  const out = await fillBareBullets("* **Anthropic ships a new agent tool** [1]", { sources, translate: mockTranslate });
+  assert.equal(seen.length, 1);
+  assert.ok(seen[0].length <= 200, `sent ${seen[0].length} chars for translation`);
+  // Our own sentence-aligned clip won, not the translator's blind 200-char slice.
+  assert.ok(seen[0].length < 200);
+  assert.match(seen[0], /\.$/);
+  assert.doesNotMatch(seen[0], /Pricing for teams/);
+  assert.match(out, /^\* \*\*Anthropic ships a new agent tool\*\*：Anthropic 发布了可自主执行多步任务的智能体工具/);
+  assert.match(out, /\[1\]$/);
+});
+
+test("fillBareBullets: an out-of-range [N] with no source behind it is dropped", async () => {
+  const sources = [{ url: "https://example.com/a", title: "唯一来源", snippet: "唯一来源的正文摘要，长度足够支撑一条要点。" }];
+  const out = await fillBareBullets("* **越界引用** [99]", { sources });
+  assert.equal(out, "");
+});
+
+test("fillBareBullets: a multi-cite bullet takes the FIRST source's body and keeps the whole marker", async () => {
+  const sources = [
+    { url: "https://example.com/a", title: "来源一", snippet: "来源一的正文摘要，长度足够支撑这条要点的正文内容。" },
+    { url: "https://example.com/b", title: "来源二", snippet: "来源二的正文摘要，长度同样足够。" },
+  ];
+  const out = await fillBareBullets("* **跨来源的要点** [1, 2]", { sources });
+  assert.match(out, /来源一的正文摘要/);
+  assert.doesNotMatch(out, /来源二的正文摘要/);
+  assert.match(out, /\[1, 2\]$/);
+});
+
+test("fillBareBullets: a trailing colon on the headline is not doubled", async () => {
+  const sources = [{ url: "https://example.com/a", title: "某公司发布新模型", snippet: "该模型上下文窗口扩展至 100 万 token，并首次支持原生多模态输入。" }];
+  const out = await fillBareBullets("* **某公司发布新模型**： [1]", { sources });
+  assert.match(out, /^\* \*\*某公司发布新模型\*\*：该模型上下文窗口/);
+  assert.doesNotMatch(out, /：：/);
+});
+
+test("fillBareBullets: a dropped bullet takes its [N] out of the text (reference list shrinks with it)", async () => {
+  const sources = [
+    { url: "https://example.com/a", title: "无摘要的来源", snippet: "" },
+    { url: "https://example.com/b", title: "有摘要的来源", snippet: "这条来源有足够长的正文摘要，可以支撑一条要点。" },
+  ];
+  const markdown = ["* **无摘要的来源** [1]", "* **有摘要的来源** [2]"].join("\n");
+  const out = await fillBareBullets(markdown, { sources });
+  assert.doesNotMatch(out, /\[1\]/);
+  assert.match(out, /\[2\]$/);
+});
+
+test("fillBareBullets: running it twice changes nothing (idempotent)", async () => {
+  const sources = [
+    { url: "https://example.com/a", title: "Qwen 发布新一代开源模型", snippet: "阿里巴巴通义千问团队发布了新一代开源模型，上下文窗口扩展至 100 万 token。" },
+    { url: "https://example.com/b", title: "无摘要的来源", snippet: "" },
+  ];
+  const markdown = ["* **Qwen 发布新一代开源模型** [1]", "* **无摘要的来源** [2]"].join("\n");
+  const once = await fillBareBullets(markdown, { sources });
+  const twice = await fillBareBullets(once, { sources });
+  assert.equal(twice, once);
+});
+
