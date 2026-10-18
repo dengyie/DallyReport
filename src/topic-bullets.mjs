@@ -1,5 +1,6 @@
 import { stripMarkdown } from "./markdown.mjs";
 import { clarifySnippet, sanitizeSnippet } from "./snippet-hygiene.mjs";
+import { MAX_INPUT_CHARS } from "./poster/translate.mjs";
 
 // One bullet, one topic.
 //
@@ -65,13 +66,13 @@ const BARE_BODY_MIN = 20;
 const EXCERPT_MAX = 400;
 const BODY_MAX = 240;
 // A body that still needs translation is handed to translateToChinese, which
-// slices each input to MAX_INPUT_CHARS (200) and then REPLACES the whole body
-// with the reply — so an English body longer than that would come back as a
-// translation of its first 200 chars only, the tail lost mid-clause. Cap the
-// English body to that same budget BEFORE translating (our clip is
-// sentence-aligned), so the reply covers the whole body. Keep in sync with
-// src/poster/translate.mjs MAX_INPUT_CHARS.
-const TRANSLATE_MAX = 200;
+// slices each input to MAX_INPUT_CHARS and then REPLACES the whole body with the
+// reply — so an English body longer than that would come back as a translation of
+// its first N chars only, the tail lost mid-clause. Cap the English body to that
+// same budget BEFORE translating (our clip is sentence-aligned), so the reply
+// covers the whole body. The budget is the translator's own exported constant,
+// not a copy that can drift.
+const TRANSLATE_MAX = MAX_INPUT_CHARS;
 const SENTENCE_END = /[。！？；!?;.]/;
 
 function clipExcerpt(s, max = BODY_MAX) {
@@ -108,11 +109,15 @@ export async function fillBareBullets(markdown, { sources = [], translate } = {}
 
   for (const block of blocks) {
     if (!block.bullet) continue;
-    // A bare bullet is one physical line — there is no body to wrap. A multi-line
-    // "headline-only" block is actually a glued bullet (headline, then a body line
-    // without a list marker), which belongs to splitOverMergedBullets; filling it
-    // here would delete the glued half.
-    if (block.text.includes("\n")) continue;
+    // A multi-line block is skipped only when a line AFTER the first carries real
+    // text: that is a glued bullet (headline, then a body line without a list
+    // marker), which belongs to splitOverMergedBullets — filling it here would
+    // delete the glued half. A block whose later lines hold nothing but the
+    // citation marker ("* **T**\n[1]") is a bare bullet like any other; testing
+    // merely for a newline let that shape ship unfilled, which is the one thing
+    // this function exists to prevent.
+    const tail = block.text.includes("\n") ? block.text.slice(block.text.indexOf("\n") + 1) : "";
+    if (echoKey(tail.replace(CITE_GROUP, " "))) continue;
     const parsed = parseBulletHeadline(block.text);
     if (!parsed) continue;
     // "Bare" = no body. Whitespace, punctuation and [N] markers are not content, so
@@ -174,7 +179,34 @@ export async function fillBareBullets(markdown, { sources = [], translate } = {}
   for (const e of filled) {
     e.block.text = `${e.indent}* **${e.headline}**：${e.body}${e.cites ? ` [${e.cites}]` : ""}`;
   }
-  return blocks.filter((b) => !b.drop).map((b) => b.text).join("\n");
+  const survived = blocks.filter((b) => !b.drop).map((b) => b.text).join("\n");
+  // Dropping a bullet can leave its section heading standing over nothing. Prune
+  // such a heading only when the next content is another heading or the end of the
+  // body — a heading over a paragraph or a surviving bullet is kept. This runs
+  // only on a pass that dropped something, so an unrelated empty heading is never
+  // touched.
+  return dropped ? pruneOrphanHeadings(survived) : survived;
+}
+
+const HEADING = /^#{1,6}\s+\S/;
+
+function pruneOrphanHeadings(text) {
+  const lines = String(text).split("\n");
+  const out = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (HEADING.test(lines[i])) {
+      let j = i + 1;
+      while (j < lines.length && !lines[j].trim()) j += 1;
+      if (lines[j] === undefined || HEADING.test(lines[j])) {
+        i = j - 1; // drop the heading and the blank run that followed it
+        continue;
+      }
+    }
+    out.push(lines[i]);
+  }
+  // A pruned heading takes its blank run with it, which can leave the body ending
+  // in blank lines right before the reference section. Trim them.
+  return out.join("\n").replace(/\n+$/, "");
 }
 
 function bulletBlocks(markdown) {

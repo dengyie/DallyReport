@@ -18,7 +18,13 @@
 // trade for it.
 
 const DEFAULT_TIMEOUT_MS = 30_000;
-const MAX_INPUT_CHARS = 200;
+// Per-item input budget. The prompt slices each input to this, and the reply then
+// REPLACES that item wholesale, so a caller that hands us more than this silently
+// gets back a translation of the head only. Exported so a caller that builds the
+// text (src/topic-bullets.mjs backfills a bullet body from a source excerpt) can
+// clip to the SAME budget itself — a copy of the number would drift out of sync
+// and quietly reinstate the truncated tail.
+export const MAX_INPUT_CHARS = 200;
 
 // Same precedence the rest of the pipeline uses: a trimmed non-empty env value
 // wins, anything else falls through. Credentials are read by NAME only and are

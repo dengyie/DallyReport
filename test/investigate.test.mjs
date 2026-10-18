@@ -12,6 +12,7 @@ import {
 } from "../src/investigate.mjs";
 import { investigateIfEnabled, assembleInvestigatedBody } from "../src/sections/ai-news.mjs";
 import { enforceOneTopicPerBullet, fillBareBullets, localizeEnglishBullets, driftsFromTitle } from "../src/topic-bullets.mjs";
+import { MAX_INPUT_CHARS } from "../src/poster/translate.mjs";
 import { tmpDirSync } from "./helpers/tmp.mjs";
 
 const topic = {
@@ -801,9 +802,11 @@ test("fillBareBullets: an English body is clipped to the translator's 200-char b
   };
   const out = await fillBareBullets("* **Anthropic ships a new agent tool** [1]", { sources, translate: mockTranslate });
   assert.equal(seen.length, 1);
-  assert.ok(seen[0].length <= 200, `sent ${seen[0].length} chars for translation`);
-  // Our own sentence-aligned clip won, not the translator's blind 200-char slice.
-  assert.ok(seen[0].length < 200);
+  assert.ok(seen[0].length <= MAX_INPUT_CHARS, `sent ${seen[0].length} chars for translation`);
+  // Our own sentence-aligned clip won, not the translator's blind slice. The cap
+  // is the translator's OWN exported budget — asserting against it pins the
+  // contract instead of a copy that could drift while this test stayed green.
+  assert.ok(seen[0].length < MAX_INPUT_CHARS);
   assert.match(seen[0], /\.$/);
   assert.doesNotMatch(seen[0], /Pricing for teams/);
   assert.match(out, /^\* \*\*Anthropic ships a new agent tool\*\*：Anthropic 发布了可自主执行多步任务的智能体工具/);
@@ -854,5 +857,61 @@ test("fillBareBullets: running it twice changes nothing (idempotent)", async () 
   const once = await fillBareBullets(markdown, { sources });
   const twice = await fillBareBullets(once, { sources });
   assert.equal(twice, once);
+});
+
+// 2026-10-19 review R2: the "bare" test used to be "the block is one physical
+// line", so a bare bullet whose citation wrapped onto the next line was skipped as
+// if it were a glued pair — and shipped bare, which is the one outcome this
+// function exists to prevent. The skip has to be about the TAIL carrying text.
+test("fillBareBullets: a bare bullet whose citation wrapped onto the next line is still backfilled", async () => {
+  const sources = [{ url: "https://example.com/a", title: "A 标题", snippet: "这条来源有足够长的正文摘要，可以支撑一条要点。" }];
+  const out = await fillBareBullets("* **A 标题**\n[1]", { sources });
+  assert.equal(out.split("\n").length, 1);
+  assert.match(out, /^\* \*\*A 标题\*\*：这条来源有足够长的正文摘要，可以支撑一条要点。 \[1\]$/);
+});
+
+test("fillBareBullets: a wrapped bullet whose tail carries real text is still left to splitOverMergedBullets", async () => {
+  // The complement of the case above: when a later line DOES hold wording, the
+  // block may be two glued bullets, and backfilling the first would delete the
+  // second's body. That must still be skipped.
+  const sources = [{ url: "https://example.com/a", title: "A 标题", snippet: "这条来源有足够长的正文摘要，可以支撑一条要点。" }];
+  const markdown = "* **A 标题**\n**B 标题**：这是 B 的正文 [1]";
+  const out = await fillBareBullets(markdown, { sources });
+  assert.equal(out, markdown);
+});
+
+// 2026-10-19 review R4: dropping every bullet of a section must not leave its
+// heading standing over nothing.
+test("fillBareBullets: a heading left with no bullets is pruned along with its blank run", async () => {
+  const sources = [{ url: "https://example.com/a", title: "无摘要的来源", snippet: "" }];
+  const markdown = ["## 空的小节", "", "* **无摘要的来源** [1]"].join("\n");
+  const out = await fillBareBullets(markdown, { sources });
+  assert.equal(out, "");
+});
+
+test("fillBareBullets: a heading over a paragraph or a surviving bullet is kept", async () => {
+  const sources = [{ url: "https://example.com/a", title: "无摘要的来源", snippet: "" }];
+  const markdown = [
+    "## 有要点的节",
+    "",
+    "* **无摘要的来源** [1]",
+    "* **有正文的要点**：这里本来就有正文 [1]",
+    "",
+    "## 有导语的节",
+    "",
+    "这是小节开头的一段导语。",
+    "",
+    "## 空尾节",
+    "",
+    "* **无摘要的来源** [1]",
+  ].join("\n");
+  const out = await fillBareBullets(markdown, { sources });
+  assert.doesNotMatch(out, /无摘要的来源/);
+  assert.match(out, /^## 有要点的节$/m);
+  assert.match(out, /有正文的要点/);
+  assert.match(out, /^## 有导语的节$/m);
+  assert.match(out, /这是小节开头的一段导语。/);
+  // Only the heading whose bullets all left is gone.
+  assert.doesNotMatch(out, /空尾节/);
 });
 

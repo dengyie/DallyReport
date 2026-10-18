@@ -682,9 +682,25 @@ export async function aiNewsSection(
   // list would stop resolving mid-note. Weekly doubles it.
   const citedSources = selectCitedSources(shownSources, bodyTextTightened);
   const refLines = buildReferenceLines(citedSources, undefined, weekly ? 60 : 30);
-  const refSection = refLines.length
+  // The reference list exists to resolve the body's [N] markers. With no body
+  // text there is nothing to resolve, yet selectCitedSources' no-marker fallback
+  // would list EVERY source — a numbered list nothing in the note points at. The
+  // fallback stays for a degraded-but-present body (the synthesis-failed dump),
+  // and is skipped only when the body is empty.
+  const refSection = bodyTextTightened.trim() && refLines.length
     ? `\n\n---\n\n### 参考来源\n\n${refLines.join("\n")}`
     : "";
+
+  // An empty body has two very different causes, and the note must not confuse
+  // them. The model returning nothing is one. The other: it wrote bullets that the
+  // deterministic net dropped (each a bare headline whose cited source carries no
+  // usable excerpt — see fillBareBullets). fillBareBullets is the only step
+  // between the two texts that can empty a non-empty body, so a non-empty checked
+  // body with an empty filled body is exactly that case: report it honestly rather
+  // than blame the model for content it did send.
+  const emptyBodyNote = bodyTextChecked.trim() && !bodyTextFilled.trim()
+    ? "（本节要点因所引来源缺少可用正文摘录已略去）"
+    : "（模型未返回正文内容）";
 
   const body = [
     fm,
@@ -693,7 +709,7 @@ export async function aiNewsSection(
     "",
     header,
     synthFailedNote,
-    bodyTextTightened || "（模型未返回正文内容）",
+    bodyTextTightened || emptyBodyNote,
     refSection,
     "",
   ].join("\n");
