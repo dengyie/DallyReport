@@ -217,6 +217,18 @@ test("SYSTEM_PROMPT: contains a clarity-detection clause", () => {
   assert.match(SYSTEM_PROMPT, /易读|改写/);
 });
 
+test("SYSTEM_PROMPT: forbids title-only bullets and resolves the empty-body tension", () => {
+  // 2026-10-18 §9.5.2: a single re-run of the SAME guard code shipped 32% bare
+  // bullets. The model emits them because rule 3 ("宁可空着") reads as "leave the
+  // body empty" while rule 6 forbids title-only bullets — the two rules pull
+  // opposite ways. Lock both the concrete minimum and the resolution ("略去"
+  // means drop the item, not print a bare title) so a regression that re-opens
+  // the tension fails loudly.
+  assert.match(SYSTEM_PROMPT, /正文不少于 2 句/);
+  assert.match(SYSTEM_PROMPT, /不要留一个光秃秃的标题/);
+  assert.match(SYSTEM_PROMPT, /整条略去/);
+});
+
 test("SYSTEM_PROMPT: de-polluted — no [N] citation markers or linux.do priority", () => {
   // Locks the "normal daily report" rewrite: the brief must not be told to tag each
   // bullet with a source number ([1]、[3]), and must not prefer linux.do sources.
