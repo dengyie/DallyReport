@@ -29,46 +29,11 @@ import {
 } from "./poster/index.mjs";
 import { writeSection, rescueMarkdown } from "./obsidian.mjs";
 import { enrichLinuxdoPosts } from "./linuxdo.mjs";
+import { renderLinuxDoPostAuxiliary } from "./linuxdo-aux.mjs";
 import { acquireSingletonLock } from "./lock.mjs";
 import { killAllChildren } from "./child-tracker.mjs";
 import { REPORT_MODES } from "./report-window.mjs";
 
-// Render the raw linux.do news/34 posts (all of today's, verbatim) as a self-contained
-// 辅助资料 (auxiliary materials) note. Pure markdown, no pollution: it lists titles,
-// URLs, Beijing timestamps, and the Discourse excerpts — the raw input that fed the
-// AI synthesis. Kept separate from the shipped AI report so the brief stays clean.
-// postsById (optional) comes from enrichLinuxdoPosts: full body + attachments for
-// this post were crawled to <date>/linuxdo-posts & linuxdo-attachments. When present
-// we surface the attachment count and embed the full thread so Obsidian lazy-embeds
-// the whole post instead of a giant inline note.
-function renderLinuxDoPostAuxiliary(cards, date, postsById = new Map()) {
-  const lines = [
-    `# linux.do 前沿快讯 辅助资料 · ${date}`,
-    "",
-    `共 ${cards.length} 条当天帖子（来源：https://linux.do/c/news/34）`,
-    "",
-  ];
-  for (const c of cards) {
-    lines.push(`## ${c.title}`);
-    lines.push(`- 链接：${c.url}`);
-    if (c.created_at) lines.push(`- 时间：${c.created_at}`);
-    if (c.excerpt) lines.push(`- 正文摘录：${c.excerpt}`);
-    const rec = postsById.get(c.url) || postsById.get(c.id);
-    if (rec?.attachments?.length) lines.push(`- 附件：${rec.attachments.length} 个已下载`);
-    if (rec?.embed) {
-      lines.push("");
-      lines.push(`<details><summary>展开完整帖子（${rec.title}）</summary>`);
-      lines.push("");
-      lines.push(rec.embed);
-      lines.push("");
-      lines.push(`</details>`);
-      lines.push("");
-      continue;
-    }
-    lines.push("");
-  }
-  return lines.join("\n");
-}
 
 // The report and posters label their timestamp as 北京时间, so config.date must be
 // the Beijing (UTC+8) calendar date — not the host machine's local date, which on
