@@ -20,7 +20,7 @@ import { escapeHtml, posterShell, POSTER_WIDTH, POSTER_HEIGHT } from "../src/pos
 import { githubPosterHtml, GITHUB_POSTER_MAX_ROWS, formatCount } from "../src/poster/github.mjs";
 import { aiPosterHtml, buildStories, buildStoriesFromBody, cleanSummaryProse, BODY_TITLE_MAX, AI_POSTER_MAX_STORIES, AI_WEEKLY_POSTER_MAX_STORIES } from "../src/poster/ai.mjs";
 import { buildChromeArgs, renderHtmlToPng, PosterRenderError } from "../src/poster/shot.mjs";
-import { parseTranslationLines, translateToChinese } from "../src/poster/translate.mjs";
+import { parseTranslationLines, translateToChinese, localizeRepos } from "../src/poster/translate.mjs";
 
 const WEEKLY = {
   weekly: true,
@@ -430,6 +430,87 @@ test("translateToChinese: a reply identical to the input is not accepted as a tr
   return translateToChinese(["English one"], { fetch: fetchImpl })
     .then((out) => {
       assert.deepEqual(out, ["English one"]);
+    })
+    .finally(() => {
+      if (saved.url === undefined) delete process.env.GROK_API_URL;
+      else process.env.GROK_API_URL = saved.url;
+      if (saved.key === undefined) delete process.env.GROK_API_KEY;
+      else process.env.GROK_API_KEY = saved.key;
+    });
+});
+
+// A stub that reproduces the ONE model behaviour that broke the 2026-10-19
+// GitHub poster: given numbered inputs, it drops any slot whose text is empty
+// and renumbers the survivors. The prompt itself is not at fault — the model is
+// free to do this, so the caller must not hand it a slot it can drop.
+function renumberingStub() {
+  return async (_url, init) => {
+    const body = JSON.parse(init.body);
+    const user = body.messages.find((m) => m.role === "user").content;
+    const items = [];
+    for (const line of user.split("\n")) {
+      const m = line.match(/^(\d{1,3})[.、)]\s*(.*)$/);
+      if (m) items.push(m[2].trim());
+    }
+    const kept = items.filter(Boolean);
+    const content = kept.map((t, i) => `${i + 1}. [中]${t}`).join("\n");
+    return { ok: true, json: async () => ({ choices: [{ message: { content } }] }) };
+  };
+}
+
+test("translateToChinese: an empty entry mid-list does not shift its neighbours", () => {
+  // The shipped 2026-10-19 GitHub.md attributed every description to the
+  // repository one rank ABOVE it, from rank 10 down, because rank 9
+  // (android/skills) has no description line on the trending page. The empty
+  // slot was being sent to the model as a numbered input ("9. "), the model
+  // dropped it and renumbered, and parseTranslationLines then placed the reply
+  // by number — one slot too high from that point on.
+  const saved = { url: process.env.GROK_API_URL, key: process.env.GROK_API_KEY };
+  process.env.GROK_API_URL = "https://api.test";
+  process.env.GROK_API_KEY = "k";
+  const input = ["Alpha framework", "Beta toolkit", "", "Gamma engine", "Delta model"];
+  return translateToChinese(input, { fetch: renumberingStub() })
+    .then((out) => {
+      assert.equal(out[2], "", "the empty entry must stay empty, not absorb its neighbour's translation");
+      for (const i of [0, 1, 3, 4]) {
+        assert.ok(
+          out[i].includes(input[i]),
+          `out[${i}] must be a translation of input[${i}], got ${JSON.stringify(out[i])}`,
+        );
+      }
+    })
+    .finally(() => {
+      if (saved.url === undefined) delete process.env.GROK_API_URL;
+      else process.env.GROK_API_URL = saved.url;
+      if (saved.key === undefined) delete process.env.GROK_API_KEY;
+      else process.env.GROK_API_KEY = saved.key;
+    });
+});
+
+test("localizeRepos: a repo with no description does not steal the one below it", () => {
+  // The end-to-end shape of the same defect, at the layer the GitHub section
+  // actually calls. A wrong description here is a wrong FACT in the poster, not
+  // a cosmetic wobble: the reader is told ComfyUI is "Cursor 插件规范与官方插件".
+  const saved = { url: process.env.GROK_API_URL, key: process.env.GROK_API_KEY };
+  process.env.GROK_API_URL = "https://api.test";
+  process.env.GROK_API_KEY = "k";
+  const repos = [
+    { repo: "acme/alpha", description: "Alpha framework" },
+    { repo: "acme/beta", description: "Beta toolkit" },
+    { repo: "android/skills", description: "" },
+    { repo: "Comfy-Org/ComfyUI", description: "A diffusion GUI" },
+    { repo: "acme/delta", description: "Delta model" },
+  ];
+  return localizeRepos(repos, { fetch: renumberingStub() })
+    .then((out) => {
+      assert.equal(out[2].description, "", "android/skills has no description and must keep none");
+      for (let i = 0; i < repos.length; i += 1) {
+        if (!repos[i].description) continue;
+        assert.ok(
+          out[i].description.includes(repos[i].description),
+          `${repos[i].repo} must keep its own description, got ${JSON.stringify(out[i].description)}`,
+        );
+      }
     })
     .finally(() => {
       if (saved.url === undefined) delete process.env.GROK_API_URL;

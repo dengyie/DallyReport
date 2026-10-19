@@ -86,7 +86,15 @@ export function parseTranslationLines(text, expected) {
 export async function translateToChinese(lines, { model, timeoutMs = DEFAULT_TIMEOUT_MS, fetch: fetchImpl, deps = {} } = {}) {
   const input = (lines || []).map((s) => String(s ?? "").trim());
   const result = input.map((s) => s);
-  const targets = input.map((s, i) => (s && /[\u4e00-\u9fff]/.test(s) ? -1 : i)).filter((i) => i >= 0);
+  // Only non-empty, non-Chinese lines need translating. An empty line is already
+  // done, and it MUST be excluded: handing the model an empty numbered slot
+  // ("9. ") invites it to drop that line and renumber the rest, which shifts
+  // every later translation onto the entry above it. The shipped 2026-10-19
+  // GitHub.md attributed each repository's description to the repository one rank
+  // higher for exactly this reason (rank 9 android/skills has no description).
+  const targets = input
+    .map((s, i) => (s && !/[\u4e00-\u9fff]/.test(s) ? i : -1))
+    .filter((i) => i >= 0);
   // Nothing to do: either empty, or every line is already Chinese.
   if (targets.length === 0) return result;
 
@@ -97,7 +105,14 @@ export async function translateToChinese(lines, { model, timeoutMs = DEFAULT_TIM
   const doFetch = fetchImpl || deps.defaultFetch || globalThis.fetch;
   if (!doFetch) return result;
 
-  const numbered = targets.map((i) => `${i + 1}. ${input[i].slice(0, MAX_INPUT_CHARS)}`).join("\n");
+  // Number by TARGET POSITION (k + 1), never by the entry's original index. The
+  // reply is placed back by number (parseTranslationLines), and `targets` is
+  // non-contiguous once empty/Chinese lines are excluded — numbering by the
+  // original index would leave the reply's 1..M count out of step with the M
+  // target positions and misattribute every translation after the first gap.
+  const numbered = targets
+    .map((idx, k) => `${k + 1}. ${input[idx].slice(0, MAX_INPUT_CHARS)}`)
+    .join("\n");
   const userContent = [
     `把下面 ${targets.length} 条英文项目简介逐条翻译成简体中文。`,
     "要求：每条一行，输出行数必须与输入条数完全相同，不要编号，不要添加解释，不要合并或拆分条目，保留其中的专有名词与技术名词（模型名、框架名等）原文。",
