@@ -188,25 +188,48 @@ export async function fillBareBullets(markdown, { sources = [], translate } = {}
   return dropped ? pruneOrphanHeadings(survived) : survived;
 }
 
-const HEADING = /^#{1,6}\s+\S/;
+const HEADING = /^(#{1,6})\s+\S/;
 
-function pruneOrphanHeadings(text) {
-  const lines = String(text).split("\n");
+function headingDepth(line) {
+  const m = String(line || "").match(HEADING);
+  return m ? m[1].length : 0;
+}
+
+function pruneOrphanHeadingsOnce(lines) {
   const out = [];
+  let pruned = false;
   for (let i = 0; i < lines.length; i += 1) {
-    if (HEADING.test(lines[i])) {
+    const depth = headingDepth(lines[i]);
+    if (depth > 0) {
       let j = i + 1;
       while (j < lines.length && !lines[j].trim()) j += 1;
-      if (lines[j] === undefined || HEADING.test(lines[j])) {
+      const nextDepth = j < lines.length ? headingDepth(lines[j]) : -1;
+      // An orphan heading is one whose section ends with no content under it:
+      // either at EOF, or at another heading of equal or shallower depth (<= depth).
+      // A heading followed by a deeper heading (> depth) is a parent heading
+      // opening a subsection; it is kept unless its subsections are also pruned.
+      if (j >= lines.length || (nextDepth > 0 && nextDepth <= depth)) {
         i = j - 1; // drop the heading and the blank run that followed it
+        pruned = true;
         continue;
       }
     }
     out.push(lines[i]);
   }
+  return { lines: out, pruned };
+}
+
+export function pruneOrphanHeadings(text) {
+  let lines = String(text || "").split("\n");
+  // Multi-pass pruning collapses nested empty headings bottom-up (at most 6 levels).
+  for (let pass = 0; pass < 6; pass += 1) {
+    const { lines: next, pruned } = pruneOrphanHeadingsOnce(lines);
+    lines = next;
+    if (!pruned) break;
+  }
   // A pruned heading takes its blank run with it, which can leave the body ending
   // in blank lines right before the reference section. Trim them.
-  return out.join("\n").replace(/\n+$/, "");
+  return lines.join("\n").replace(/\n+$/, "");
 }
 
 function bulletBlocks(markdown) {

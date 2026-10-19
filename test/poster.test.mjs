@@ -21,6 +21,7 @@ import { githubPosterHtml, GITHUB_POSTER_MAX_ROWS, formatCount } from "../src/po
 import { aiPosterHtml, buildStories, buildStoriesFromBody, cleanSummaryProse, BODY_TITLE_MAX, AI_POSTER_MAX_STORIES, AI_WEEKLY_POSTER_MAX_STORIES } from "../src/poster/ai.mjs";
 import { buildChromeArgs, renderHtmlToPng, PosterRenderError } from "../src/poster/shot.mjs";
 import { parseTranslationLines, translateToChinese, localizeRepos } from "../src/poster/translate.mjs";
+import { DEFAULT_SYNTH_MODEL } from "../src/config.mjs";
 
 const WEEKLY = {
   weekly: true,
@@ -518,6 +519,39 @@ test("localizeRepos: a repo with no description does not steal the one below it"
       if (saved.key === undefined) delete process.env.GROK_API_KEY;
       else process.env.GROK_API_KEY = saved.key;
     });
+});
+
+test("translateToChinese: prompt instructs model to keep numbers and default model is DEFAULT_SYNTH_MODEL", async () => {
+  const saved = { url: process.env.GROK_API_URL, key: process.env.GROK_API_KEY, model: process.env.GROK_MODEL };
+  process.env.GROK_API_URL = "https://api.test";
+  process.env.GROK_API_KEY = "k";
+  delete process.env.GROK_MODEL;
+  let sentBody = null;
+  const fetchImpl = async (_url, init) => {
+    sentBody = JSON.parse(init.body);
+    return {
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: "1. 示例简介" } }],
+      }),
+    };
+  };
+  try {
+    const out = await translateToChinese(["Sample description"], { fetch: fetchImpl });
+    assert.deepEqual(out, ["示例简介"]);
+    assert.ok(sentBody, "fetch must have been called");
+    assert.equal(sentBody.model, DEFAULT_SYNTH_MODEL, "default model must match DEFAULT_SYNTH_MODEL");
+    const userMsg = sentBody.messages.find((m) => m.role === "user")?.content || "";
+    assert.match(userMsg, /严格保留对应的输入序号/, "prompt must require keeping number prefixes");
+    assert.doesNotMatch(userMsg, /不要编号/, "prompt must not tell model to drop numbers");
+  } finally {
+    if (saved.url === undefined) delete process.env.GROK_API_URL;
+    else process.env.GROK_API_URL = saved.url;
+    if (saved.key === undefined) delete process.env.GROK_API_KEY;
+    else process.env.GROK_API_KEY = saved.key;
+    if (saved.model === undefined) delete process.env.GROK_MODEL;
+    else process.env.GROK_MODEL = saved.model;
+  }
 });
 
 // --- source cards are the fallback, so they are covered too ----------------

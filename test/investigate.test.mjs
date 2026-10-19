@@ -11,7 +11,7 @@ import {
   saveTopicCache,
 } from "../src/investigate.mjs";
 import { investigateIfEnabled, assembleInvestigatedBody } from "../src/sections/ai-news.mjs";
-import { enforceOneTopicPerBullet, fillBareBullets, localizeEnglishBullets, driftsFromTitle } from "../src/topic-bullets.mjs";
+import { enforceOneTopicPerBullet, fillBareBullets, localizeEnglishBullets, driftsFromTitle, pruneOrphanHeadings } from "../src/topic-bullets.mjs";
 import { MAX_INPUT_CHARS } from "../src/poster/translate.mjs";
 import { tmpDirSync } from "./helpers/tmp.mjs";
 
@@ -913,5 +913,53 @@ test("fillBareBullets: a heading over a paragraph or a surviving bullet is kept"
   assert.match(out, /这是小节开头的一段导语。/);
   // Only the heading whose bullets all left is gone.
   assert.doesNotMatch(out, /空尾节/);
+});
+
+test("pruneOrphanHeadings: keeps parent heading when followed by a non-empty child heading", () => {
+  const input = [
+    "## 一、行业综述",
+    "",
+    "### 1. 模型动态",
+    "",
+    "* **GPT-5**：正文内容 [1]",
+  ].join("\n");
+  const out = pruneOrphanHeadings(input);
+  assert.equal(out, input);
+});
+
+test("pruneOrphanHeadings: prunes both parent and child when all nested children are empty", () => {
+  const input = [
+    "## 一、行业综述",
+    "",
+    "### 1. 模型动态",
+    "",
+    "## 二、技术趋势",
+    "",
+    "* **Claude**：正文 [2]",
+  ].join("\n");
+  const out = pruneOrphanHeadings(input);
+  assert.doesNotMatch(out, /一、行业综述/);
+  assert.doesNotMatch(out, /1\. 模型动态/);
+  assert.match(out, /^## 二、技术趋势$/m);
+  assert.match(out, /Claude/);
+});
+
+test("pruneOrphanHeadings: keeps parent with intro prose even if child section is empty", () => {
+  const input = [
+    "## 一、行业综述",
+    "",
+    "这里是小节的前言导语。",
+    "",
+    "### 1. 空子节",
+    "",
+    "## 二、技术趋势",
+    "",
+    "* **Claude**：正文 [2]",
+  ].join("\n");
+  const out = pruneOrphanHeadings(input);
+  assert.match(out, /^## 一、行业综述$/m);
+  assert.match(out, /这里是小节的前言导语。/);
+  assert.doesNotMatch(out, /空子节/);
+  assert.match(out, /^## 二、技术趋势$/m);
 });
 

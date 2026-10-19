@@ -28,7 +28,7 @@ const DEFAULT_OBSIDIAN_DIR = HOST_DEFAULTS.obsidianDir;
 // is NOT a usable default: it returns fake-empty SSE streams (chatcmpl-freeblock000)
 // and 500s on /responses, so it is listed in KNOWN_BAD_MODELS below and must be
 // probed out rather than shipped as the default.
-const DEFAULT_SYNTH_MODEL = "gemini-3.6-flash";
+export const DEFAULT_SYNTH_MODEL = "gemini-3.6-flash";
 const DEFAULT_SYNTH_MAX_TOKENS = 4000;
 const DEFAULT_SYNTH_TIMEOUT_MS = 90000;
 

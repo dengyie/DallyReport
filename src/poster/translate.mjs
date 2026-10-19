@@ -17,6 +17,8 @@
 // or a thrown error that takes the whole poster down is not an acceptable
 // trade for it.
 
+import { DEFAULT_SYNTH_MODEL } from "../config.mjs";
+
 const DEFAULT_TIMEOUT_MS = 30_000;
 // Per-item input budget. The prompt slices each input to this, and the reply then
 // REPLACES that item wholesale, so a caller that hands us more than this silently
@@ -115,7 +117,7 @@ export async function translateToChinese(lines, { model, timeoutMs = DEFAULT_TIM
     .join("\n");
   const userContent = [
     `把下面 ${targets.length} 条英文项目简介逐条翻译成简体中文。`,
-    "要求：每条一行，输出行数必须与输入条数完全相同，不要编号，不要添加解释，不要合并或拆分条目，保留其中的专有名词与技术名词（模型名、框架名等）原文。",
+    "要求：每条一行，严格保留对应的输入序号（如 1. 2. ），按序号输出译文，输出条数必须与输入条数完全相同，不要添加序号和译文以外的任何解释，不要合并或拆分条目，保留其中的专有名词与技术名词（模型名、框架名等）原文。",
     "",
     numbered,
   ].join("\n");
@@ -131,7 +133,7 @@ export async function translateToChinese(lines, { model, timeoutMs = DEFAULT_TIM
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
           body: JSON.stringify({
-            model: model || envOr("GROK_MODEL", "gpt-5.6-luna"),
+            model: model || envOr("GROK_MODEL", DEFAULT_SYNTH_MODEL),
             messages: [
               { role: "system", content: "你是技术文档翻译，只输出译文，不输出任何其他内容。" },
               { role: "user", content: userContent },
