@@ -307,3 +307,54 @@ test("H1: a bracket that is not a citation is still not a citation", () => {
   const selected = selectCitedSources(FIVE, "见 [链接](https://x.test) 与 [注] 以及 [3]");
   assert.deepEqual(selected.map((c) => c.n), [3]);
 });
+
+// ---------------------------------------------------------------------------
+// 2026-10-19 review R-G2: the reference list was CAPPED at 30 (weekly 60).
+//
+//   return (cited || []).slice(0, max).map(...)      // max = 30, weekly 60
+//
+// `cited` is already the exact set the body points at, so a cap can only drop a
+// source that a LATER marker resolves to. The list then stops resolving mid-note
+// with no visible sign: the note still renders, still looks complete, and two
+// assertions in it point at nothing.
+//
+// Shipped 2026-10-19 AI-DeepSeek.md: the body cites [38] and [39]; the reference
+// list ends at [37]. Six of the previous eight days carried a stranded tail the
+// same way — that channel cites 27–36 sources a day, so it crosses 30 often.
+//
+// The count of a day's citations is bounded by the body's own bullets. The list
+// cannot grow without prose to justify it, so there is nothing to cap.
+// ---------------------------------------------------------------------------
+
+const FORTY = Array.from({ length: 40 }, (_, i) => ({
+  title: `S${i + 1}`,
+  url: `https://s.test/${i + 1}`,
+}));
+
+test("R-G2: a body citing 40 sources resolves all 40", () => {
+  const body = FORTY.map((_, i) => `[${i + 1}]`).join(" ");
+  const lines = buildReferenceLines(selectCitedSources(FORTY, body), DEPS);
+  assert.equal(lines.length, 40, "no source the body cites may be dropped");
+  assert.match(lines[39], /^\- \[40\] /, "the last cited source must still be printed");
+});
+
+test("R-G2: the shipped DeepSeek shape resolves its [38] and [39]", () => {
+  // 30 markers inside the old cap plus two past it — exactly the shipped case.
+  const body = [
+    ...Array.from({ length: 30 }, (_, i) => `[${i + 1}]`),
+    "[38]",
+    "[39]",
+  ].join(" ");
+  const lines = buildReferenceLines(selectCitedSources(FORTY, body), DEPS);
+  assert.equal(lines.length, 32);
+  assert.match(lines[30], /^\- \[38\] /, "[38] must not fall off the end of the list");
+  assert.match(lines[31], /^\- \[39\] /, "[39] must not fall off the end of the list");
+});
+
+test("R-G2: the cap's removal does not invent entries for an uncited marker", () => {
+  // Removing a cap must widen nothing else: a marker past the source list is
+  // still ignored, not clamped onto a real source.
+  const lines = buildReferenceLines(selectCitedSources(FIVE, "见 [1] 与 [99]"), DEPS);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^\- \[1\] /);
+});

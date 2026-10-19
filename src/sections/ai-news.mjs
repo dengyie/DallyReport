@@ -233,9 +233,15 @@ export function assembleInvestigatedBody({ collected, investigation, body, date 
 export function buildReferenceLines(
   cited,
   deps = { stripMarkdown, sanitizeUrl },
-  max = 30,
 ) {
-  return (cited || []).slice(0, max).map(({ n, source: s }, i) => {
+  // No length cap. `cited` is already the exact set the body points at, so every
+  // entry here resolves a live `[N]`; truncating it can only strand the markers
+  // past the cut. The 2026-10-19 review found the old `slice(0, 30)` (weekly 60)
+  // doing exactly that on the DeepSeek channel — which cites 27–36 sources a day
+  // — leaving `[38]`/`[39]` in the body with no line to resolve them, on 6 of the
+  // previous 8 days. A day's citation count is bounded by the body itself, so the
+  // list cannot grow without the prose to justify it.
+  return (cited || []).map(({ n, source: s }, i) => {
     // Strip markdown fragments from scraped titles first (v2ex/linuxdo titles
     // can carry `[...](...)` residue and reply metadata), THEN escape what
     // remains so parens can't break the markdown link syntax.
@@ -676,12 +682,13 @@ export async function aiNewsSection(
   const bodyTextTightened = dedupeBullets(
     repairGluedHeadings(splitOverMergedBullets(bodyTextLocalized)),
   );
-  // 2026-09-28 weekly: the cap of 30 is a reading-budget sized for a day's
-  // worth of citations. A week's body cites proportionally more, and truncating
-  // the tail would drop the very sources a later [N] points at — the reference
-  // list would stop resolving mid-note. Weekly doubles it.
+  // 2026-09-28 weekly: the reference list is NOT capped. It exists to resolve the
+  // body's [N] markers, so a cap could only drop a source a later marker points
+  // at — the list would stop resolving mid-note. The old 30/60 cap did precisely
+  // that (2026-10-19 review); a body's citation count is already bounded by how
+  // many bullets it has.
   const citedSources = selectCitedSources(shownSources, bodyTextTightened);
-  const refLines = buildReferenceLines(citedSources, undefined, weekly ? 60 : 30);
+  const refLines = buildReferenceLines(citedSources);
   // The reference list exists to resolve the body's [N] markers. With no body
   // text there is nothing to resolve, yet selectCitedSources' no-marker fallback
   // would list EVERY source — a numbered list nothing in the note points at. The
