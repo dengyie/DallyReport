@@ -52,3 +52,12 @@ test("stripMarkdown: removes inline links, orphan tails, and emphasis", () => {
   assert.equal(stripMarkdown(""), "");
   assert.equal(stripMarkdown(null), "");
 });
+
+test("stripMarkdown: cleanly strips image markdown syntax without leaving exclamation marks", () => {
+  assert.equal(stripMarkdown("![截图描述](https://example.com/pic.png)"), "截图描述");
+  assert.equal(
+    stripMarkdown("前置文字 ![图标](https://example.com/icon.svg) 后续文字 [链接](https://example.com)"),
+    "前置文字 图标 后续文字 链接",
+  );
+  assert.equal(stripMarkdown("![](https://example.com/empty-alt.png)"), "");
+});

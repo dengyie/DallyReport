@@ -90,7 +90,7 @@ test("the table header names the period the numbers actually cover", () => {
 // "GitHub" — so a forced weekly for 2026-09-25 would have overwritten that
 // Friday's shipped GitHub.md. Both artifacts must carry the period in their
 // name or the run is destructive.
-import { githubNoteName } from "../src/sections/github-trending.mjs";
+import { githubNoteName, githubHeading } from "../src/sections/github-trending.mjs";
 import { githubPosterFileName } from "../src/image-gen.mjs";
 import { altChannelNoteName } from "../src/config.mjs";
 
@@ -98,6 +98,21 @@ test("the GitHub note name carries the period", () => {
   assert.equal(githubNoteName({ reportMode: "daily" }), "GitHub");
   assert.equal(githubNoteName({ reportMode: "weekly" }), "GitHub-周报");
   assert.equal(githubNoteName({ date: "2026-09-25" }), "GitHub");
+});
+
+test("the GitHub heading carries the weekly date span", () => {
+  assert.equal(
+    githubHeading({ reportMode: "daily", date: "2026-10-19" }),
+    "# GitHub Trending · 2026-10-19",
+  );
+  assert.equal(
+    githubHeading({
+      reportMode: "weekly",
+      date: "2026-09-25",
+      windowLabel: "2026-09-19 ~ 2026-09-25",
+    }),
+    "# GitHub Trending 周报 · 2026-09-19 ~ 2026-09-25",
+  );
 });
 
 test("the GitHub poster file name carries the period", () => {

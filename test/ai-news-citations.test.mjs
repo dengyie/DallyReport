@@ -4,6 +4,7 @@ import {
   selectCitedSources,
   buildReferenceLines,
   countDailySources,
+  assembleInvestigatedBody,
 } from "../src/sections/ai-news.mjs";
 
 // ---------------------------------------------------------------------------
@@ -357,4 +358,26 @@ test("R-G2: the cap's removal does not invent entries for an uncited marker", ()
   const lines = buildReferenceLines(selectCitedSources(FIVE, "见 [1] 与 [99]"), DEPS);
   assert.equal(lines.length, 1);
   assert.match(lines[0], /^\- \[1\] /);
+});
+
+test("selectCitedSources: stateless iteration does not leak lastIndex across repeated calls", () => {
+  // Repeatedly call with different texts, partial matches, and empty inputs to guarantee
+  // that RegExp lastIndex does not corrupt subsequent parsing.
+  const res1 = selectCitedSources(FIVE, "前文 [3]");
+  assert.deepEqual(res1.map((c) => c.n), [3]);
+  const resEmpty = selectCitedSources(FIVE, "");
+  assert.deepEqual(resEmpty.map((c) => c.n), [1, 2, 3, 4, 5]);
+  const res2 = selectCitedSources(FIVE, "[1, 2] 与 [4]");
+  assert.deepEqual(res2.map((c) => c.n), [1, 2, 4]);
+});
+
+test("assembleInvestigatedBody: recognizes multi-source citations without falling back to shown list", () => {
+  const result = assembleInvestigatedBody({
+    collected: FIVE,
+    body: "根据研究报告 [1, 3] 得出结论",
+    date: "2026-10-19",
+  });
+  assert.equal(result.posterSources.length, 2);
+  assert.equal(result.posterSources[0].title, "A");
+  assert.equal(result.posterSources[1].title, "C");
 });

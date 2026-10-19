@@ -266,6 +266,13 @@ export function parseTrending(text) {
   return filtered;
 }
 
+export function githubHeading(config) {
+  const weekly = config?.reportMode === "weekly";
+  return weekly
+    ? `# GitHub Trending 周报 · ${config?.windowLabel || config?.date}`
+    : `# GitHub Trending · ${config?.date}`;
+}
+
 export async function githubTrendingSection(config) {
   const cacheFile = path.join(
     config.cacheDir,
@@ -399,7 +406,7 @@ export async function githubTrendingSection(config) {
   const body = [
     fm,
     "",
-    `# GitHub Trending · ${config.date}`,
+    githubHeading(config),
     "",
     note,
     "",

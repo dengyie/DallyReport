@@ -8,6 +8,7 @@
 export function stripMarkdown(s) {
   if (!s) return "";
   return String(s)
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1") // ![alt](url) -> alt
     .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // [text](url) -> text
     .replace(/\]\([^)]*\)/g, "") // orphan ](url) tails -> ""
     .replace(/(\*\*|__)(.*?)\1/g, "$2") // **bold** / __bold__ -> bold

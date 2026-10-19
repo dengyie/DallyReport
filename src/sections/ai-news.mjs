@@ -110,13 +110,13 @@ export function shouldSynthesize({
 // The group is validated as a whole before any number inside it is trusted, so
 // a malformed half ("[2, abc]") contributes nothing rather than contributing its
 // well-formed neighbour under a marker the body never wrote.
+const CITE_MARKER_TEST = /\[\d+(?:\s*,\s*\d+)*\]/;
 const CITE_RE = /\[(\d+(?:\s*,\s*\d+)*)\]/g;
 
 export function selectCitedSources(sources, bodyText) {
   const list = sources || [];
   const indices = new Set();
-  let m;
-  while ((m = CITE_RE.exec(bodyText || "")) !== null) {
+  for (const m of String(bodyText || "").matchAll(CITE_RE)) {
     for (const part of m[1].split(",")) {
       const idx = Number.parseInt(part.trim(), 10) - 1;
       // Out-of-range markers are ignored rather than clamped: a body that cites
@@ -221,7 +221,7 @@ export function assembleInvestigatedBody({ collected, investigation, body, date 
   const shown = investigation?.sources || collected || [];
   const cited = selectCitedSources(shown, body);
   const ref = buildReferenceLines(cited).join("\n");
-  const noMarkers = !/\[\d+/.test(body || "");
+  const noMarkers = !CITE_MARKER_TEST.test(body || "");
   return {
     ref,
     posterSources: noMarkers ? shown : cited.map((c) => c.source),
