@@ -963,3 +963,22 @@ test("pruneOrphanHeadings: keeps parent with intro prose even if child section i
   assert.match(out, /^## 二、技术趋势$/m);
 });
 
+test("enforceOneTopicPerBullet: faithfulSingle does not duplicate citation markers", async () => {
+  const sources = [
+    { url: "https://example.com/a", title: "OpenAI 宣布获得 100 亿美元新一轮融资" },
+  ];
+  const topics = [{ id: "t0", cards: [sources[0]] }];
+
+  // 1. Body already has citation [1] with amount drift (50 亿美元 vs 100 亿美元): should correct headline and not duplicate [1]
+  const inputWithCite = "* **OpenAI 宣布获得 50 亿美元融资**：知情人士透露融资细节 [1]";
+  const out1 = await enforceOneTopicPerBullet(inputWithCite, { topics, sources });
+  assert.match(out1, /\* \*\*OpenAI 宣布获得 100 亿美元新一轮融资\*\*：知情人士透露融资细节 \[1\]$/);
+  assert.doesNotMatch(out1, /\[1\]\s*\[1\]/);
+
+  // 2. Title-only bullet with drift: should keep single [1]
+  const inputTitleOnly = "* **OpenAI 宣布获得 50 亿美元融资** [1]";
+  const out2 = await enforceOneTopicPerBullet(inputTitleOnly, { topics, sources });
+  assert.equal(out2, "* **OpenAI 宣布获得 100 亿美元新一轮融资** [1]");
+});
+
+

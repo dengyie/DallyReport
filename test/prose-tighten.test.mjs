@@ -258,3 +258,42 @@ test("dedupeBullets: non-bullet lines pass through", () => {
   const input = "普通段落。\n\n* **仅有一条**：甲 [1]。\n\n```\ncode\n```";
   assert.equal(dedupeBullets(input), input);
 });
+
+// --- multi-source citations [1, 2] / [22, 25] -----------------------------
+
+test("splitOverMergedBullets: splits when a tacked clause carries multi-source citations", () => {
+  const merged =
+    "* **AI 基础设施动态**：某云厂商升级了集群架构 [1]。同时，另外两家开源机构联合发布了新权重 [2, 3]。";
+  const out = splitOverMergedBullets(merged);
+  const lines = out.split("\n").filter(Boolean);
+  assert.equal(lines.length, 2, `expected 2 bullets, got ${lines.length}`);
+  assert.match(lines[0], /^\* \*\*AI 基础设施动态\*\*：/);
+  assert.match(lines[0], /\[1\]/);
+  assert.match(lines[1], /另外两家开源机构联合发布了新权重/);
+  assert.match(lines[1], /\[2, 3\]/);
+});
+
+test("countOverMergedBullets: multi-source citations [1, 2] count as multiple sources", () => {
+  const doc = [
+    "* **单源单标**：甲 [1]。",
+    "* **双源单标**：甲 [1, 2]。",
+    "* **双源双标**：甲 [1]。乙 [2]。",
+    "* **跨段双标**：甲 [22, 25]。",
+  ].join("\n");
+  assert.equal(countOverMergedBullets(doc), 3, "bullets citing [1, 2], [1]...[2], and [22, 25] count as over-merged");
+});
+
+test("posterBullets: multi-source citations [1, 2] / [22, 25] are cleanly stripped", () => {
+  const input = [
+    "* **Anthropic 发布 Claude 3.7 [1]**：支持混合推理能力 [1, 2]。",
+    "* 未命名要点也支持多引用 [22, 25]。",
+  ].join("\n");
+  const out = posterBullets(input);
+  assert.equal(out.length, 2);
+  assert.equal(out[0].title, "Anthropic 发布 Claude 3.7", "citation stripped from title");
+  assert.equal(out[0].body, "支持混合推理能力。", "multi-citation stripped from titled body");
+  assert.equal(out[1].body, "未命名要点也支持多引用。", "multi-citation stripped from plain body");
+  for (const b of out) {
+    assert.doesNotMatch(b.title + b.body, /\[\d+(?:\s*,\s*\d+)*\]/, "no citation remains");
+  }
+});

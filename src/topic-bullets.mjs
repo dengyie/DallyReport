@@ -17,6 +17,7 @@ import { MAX_INPUT_CHARS } from "./poster/translate.mjs";
 // next one stays.
 
 const CITE_GROUP = /\[(\d+(?:\s*,\s*\d+)*)\]/g;
+const CITE_MARKER_TEST = /\[\d+(?:\s*,\s*\d+)*\]/;
 const BULLET_START = /^(\s*)(?:[*+-]|\d+\.)\s+/;
 
 export async function enforceOneTopicPerBullet(markdown, { topics, sources, retry } = {}) {
@@ -359,9 +360,9 @@ function faithfulSingle(text, sources) {
   const bodyText = body.replace(/\[\d+(?:\s*,\s*\d+)*\]/g, "").trim();
   if (!bodyText) {
     // Title-only bullet (the model gave no elaboration): keep the compact shape.
-    return `${indent}* **${title}** ${/\[\d+\]/.test(body) ? body : `[${cites[0]}]`}`;
+    return `${indent}* **${title}** ${CITE_MARKER_TEST.test(body) ? body : `[${cites[0]}]`}`;
   }
-  const withCite = /\[\d+\]/.test(body) ? body : `${body} [${cites[0]}]`;
+  const withCite = CITE_MARKER_TEST.test(body) ? body : `${body} [${cites[0]}]`;
   return `${indent}* **${title}**：${withCite}`;
 }
 

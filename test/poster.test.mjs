@@ -680,6 +680,19 @@ test("buildStoriesFromBody: no body yields no stories rather than invented ones"
   assert.deepEqual(buildStoriesFromBody("（模型未返回正文内容）", {}), []);
 });
 
+test("buildStoriesFromBody: multi-source citations [1, 2] / [22, 25] never leak into story title or summary", () => {
+  const doc = [
+    "* **Anthropic 推出新模型 [1]**：全面提升推理能力并支持长上下文 [1, 2]。",
+    "* 某云厂商升级分布式算力网络，提升吞吐并降低集群通信延迟 [22, 25]。",
+  ].join("\n");
+  const stories = buildStoriesFromBody(doc, { period: { weekly: true } });
+  assert.equal(stories.length, 2);
+  assert.doesNotMatch(stories[0].title, /\[\d+(?:\s*,\s*\d+)*\]/, "title has no citations");
+  assert.doesNotMatch(stories[0].summary, /\[\d+(?:\s*,\s*\d+)*\]/, "summary has no citations");
+  assert.doesNotMatch(stories[1].title, /\[\d+(?:\s*,\s*\d+)*\]/, "untitled derived headline has no citations");
+  assert.doesNotMatch(stories[1].summary, /\[\d+(?:\s*,\s*\d+)*\]/, "untitled summary has no citations");
+});
+
 test("cleanSummaryProse: trims open brackets, connectives, and trailing commas", () => {
   assert.equal(cleanSummaryProse("该公司研发了新模型（"), "该公司研发了新模型");
   assert.equal(cleanSummaryProse("表现优异，"), "表现优异");

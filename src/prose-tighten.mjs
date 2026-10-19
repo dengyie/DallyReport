@@ -43,6 +43,13 @@
 const TACK_RE = /^(?:同时|此外|另外|与此同时|而且)[，,]\s*/;
 
 /**
+ * Citation marker patterns: support both single `[1]` and multi-source
+ * citations `[1, 2]` / `[22, 25]`.
+ */
+const CITE_MARKER_TEST = /\[\d+(?:\s*,\s*\d+)*\]/;
+const CITE_GROUP_EXTRACT = /\[(\d+(?:\s*,\s*\d+)*)\]/g;
+
+/**
  * The reference list heading. Everything from here down is apparatus.
  *
  * Deliberately NOT "any heading": the body is organised under headings of its
@@ -96,7 +103,7 @@ export function splitOverMergedBullets(markdown) {
         const tail = sentence.slice(cut.index + cut[0].length).trim();
         // Condition 2: the tacked clause must carry its own citation, or it is
         // a continuation of the same claim and must stay attached.
-        if (head && tail && /\[\d+\]/.test(tail)) {
+        if (head && tail && CITE_MARKER_TEST.test(tail)) {
           parts.push(head);
           current = tail;
           continue;
@@ -131,7 +138,10 @@ export function countOverMergedBullets(markdown) {
   for (const line of String(markdown || "").split("\n")) {
     const m = line.match(BULLET_RE);
     if (!m) continue;
-    const cites = (m[3].match(/\[\d+\]/g) || []).length;
+    let cites = 0;
+    for (const match of m[3].matchAll(CITE_GROUP_EXTRACT)) {
+      cites += match[1].split(",").length;
+    }
     if (cites > 1) n += 1;
   }
   return n;
@@ -224,13 +234,14 @@ export function posterBullets(markdown) {
     if (REFERENCE_HEADING_RE.test(line)) break;
     const titled = line.match(BULLET_RE);
     if (titled) {
-      const body = titled[3].replace(/\s*\[\d+\]/g, "").trim();
-      out.push({ titled: true, title: titled[2].trim(), body });
+      const title = titled[2].replace(/\s*\[\d+(?:\s*,\s*\d+)*\]/g, "").trim();
+      const body = titled[3].replace(/\s*\[\d+(?:\s*,\s*\d+)*\]/g, "").trim();
+      out.push({ titled: true, title, body });
       continue;
     }
     const plain = line.match(/^\s*[*+-]\s+([^*].*)$/);
     if (plain) {
-      const body = plain[1].replace(/\s*\[\d+\]/g, "").trim();
+      const body = plain[1].replace(/\s*\[\d+(?:\s*,\s*\d+)*\]/g, "").trim();
       if (body) out.push({ titled: false, title: "", body });
     }
   }
