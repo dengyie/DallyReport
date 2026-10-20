@@ -13,9 +13,15 @@
     "ai": "node src/run.mjs --section ai",
     "github": "node src/run.mjs --section github",
     "blog:draft": "node src/export-blog-draft.mjs",
-    "test": "node --test \"test/*.test.mjs\""
+    "lint": "eslint \"src/**/*.mjs\" \"test/**/*.mjs\" \"scripts/**/*.mjs\"",
+    "test": "node --test \"test/*.test.mjs\"",
+    "check": "npm run lint && npm test"
   },
   "dependencies": {
     "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "eslint": "^9.39.5",
+    "globals": "^16.5.0"
   }
 }

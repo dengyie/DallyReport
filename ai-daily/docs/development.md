@@ -192,7 +192,7 @@ meta.json 另有 `ledger_recorded`（recorded/skipped/failed，finalize 回写�
 - **必须 `cd scripts/ai-daily` 跑** `node --test test/*.test.mjs`（repo 根跑 glob 不中 → 0 tests 假绿）。
 - 当前 453 项：444 pass / 0 fail / 9 有意 skip（2026-10-03 第四轮根因修复：Windows runner 契约测试 7 项新增（此前 7 条 shim 断言在 Windows 全 SKIP）、host-paths 6 项、标定链 rejection 兜底 2 项、build 护栏「宿主 API 整类拦截」1 项；10-04 烟测再补预抓失败日志 rc 捕获回归 1 项）。
 - 测试原则：**纯函数直调**（测试直调 buildFallback/externalCheckState 等真实实现，不 grep 模板源码——消除 forward-test 缺陷）；realm 隔离（wallclock/budget 时钟注入 mock）；fail-open 契约固化（坏输入→null/[]，不抛穿）；skill-doc-contract 锁 SKILL.md 关键字面量（改 SKILL.md 前先看该测试）。
-- 改动门禁：模块/模板改动 → 全量测试 + `node scripts/ai-daily/build.mjs --check-only` + 产物 cp 同步 vault + 两仓提交。
+- 改动门禁：主仓根目录的 DallyReport 代码/测试改动必须先通过 `npm run check`（ESLint `no-undef` + 根目录全量测试）；`node --check` 只能证明语法可解析，不能替代未声明标识符检查。`ai-daily` 的 `ai-daily.template.js` 与生成的 `.claude/workflows/ai-daily.js` 使用工作流运行时语义，禁止按普通 Node 文件直接 `node --check` 或纳入根目录 ESLint；本子系统改动必须运行 `cd ai-daily/scripts/ai-daily && node --test test/*.test.mjs` 与 `node build.mjs --check-only`，再按既有流程同步 vault 产物并提交两仓。
 
 ## 11. 历史设计文档索引
 

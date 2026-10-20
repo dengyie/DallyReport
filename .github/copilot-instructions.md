@@ -27,6 +27,8 @@ DallyReport 生成中文 AI/GitHub 日报并写入 Obsidian vault，支持生成
 
 ## 测试要求
 - 每个 bug 修复必须附带回归测试（`test/*.test.mjs`，`node --test` 全绿）。
+- 每次提交必须通过 `npm run check`：它先运行 ESLint `no-undef` 静态门禁，再运行根目录全量测试；`node --check` 只能检查语法，不能替代未声明标识符检查。
+- `ai-daily` 的 workflow template/generated wrapper 不是普通 Node 文件，禁止对它们直接运行根目录 ESLint 或 `node --check`；改动该子系统时必须按 `ai-daily/docs/development.md` 执行 `cd ai-daily/scripts/ai-daily && node --test test/*.test.mjs` 与 `node build.mjs --check-only`。
 - 不要为了让测试通过而放宽断言；跳过（skip）只允许用于需要外部凭证的用例。
 
 ## 语言
