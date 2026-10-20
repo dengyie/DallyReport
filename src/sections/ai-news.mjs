@@ -289,6 +289,34 @@ async function gemSearch(query, config) {
   return renderSources(cards);
 }
 
+export function resolveFallbackCandidates({ config, model, name = "AI", channel = null, isAlt = false } = {}) {
+  const fallbackCandidates = [];
+  const isAltChannel = Boolean(channel || isAlt || name === "ai-alt" || (name !== "AI" && name !== "AI-周报"));
+  if (isAltChannel) {
+    // Alt channel falls back to primary synthModel, then fallbackModel
+    if (config?.synthModel && config.synthModel !== model) {
+      fallbackCandidates.push(config.synthModel);
+    }
+    if (config?.synthFallbackModel && config.synthFallbackModel !== model && !fallbackCandidates.includes(config.synthFallbackModel)) {
+      fallbackCandidates.push(config.synthFallbackModel);
+    }
+  } else {
+    // Main channel falls back to synthFallbackModel, then aiAltModel
+    if (config?.synthFallbackModel && config.synthFallbackModel !== model) {
+      fallbackCandidates.push(config.synthFallbackModel);
+    }
+    if (config?.aiAltModel && config.aiAltModel !== model && !fallbackCandidates.includes(config.aiAltModel)) {
+      fallbackCandidates.push(config.aiAltModel);
+    }
+    for (const backstop of ["deepseek-v4-flash", "gemini-3.8-flash"]) {
+      if (backstop !== model && !fallbackCandidates.includes(backstop)) {
+        fallbackCandidates.push(backstop);
+      }
+    }
+  }
+  return fallbackCandidates;
+}
+
 export async function aiNewsSection(
   config,
   {
@@ -302,6 +330,8 @@ export async function aiNewsSection(
     title,
     synthTimeoutMs = config.synthTimeoutMs,
     synthMaxTokens = config.synthMaxTokens,
+    channel = null,
+    isAlt = false,
   } = {},
 ) {
   // 2026-09-28 weekly: the weekly query template carries {start} ~ {end} instead
@@ -545,29 +575,7 @@ export async function aiNewsSection(
 
       // Cross-provider fallback ladder: engage if primary (or retry) failed
       if (!synthesized) {
-        const fallbackCandidates = [];
-        if (channel != null || name === "ai-alt") {
-          // Alt channel falls back to primary synthModel, then fallbackModel
-          if (config.synthModel && config.synthModel !== model) {
-            fallbackCandidates.push(config.synthModel);
-          }
-          if (config.synthFallbackModel && config.synthFallbackModel !== model && !fallbackCandidates.includes(config.synthFallbackModel)) {
-            fallbackCandidates.push(config.synthFallbackModel);
-          }
-        } else {
-          // Main channel falls back to synthFallbackModel, then aiAltModel
-          if (config.synthFallbackModel && config.synthFallbackModel !== model) {
-            fallbackCandidates.push(config.synthFallbackModel);
-          }
-          if (config.aiAltModel && config.aiAltModel !== model && !fallbackCandidates.includes(config.aiAltModel)) {
-            fallbackCandidates.push(config.aiAltModel);
-          }
-          for (const backstop of ["deepseek-v4-flash", "gemini-3.8-flash"]) {
-            if (backstop !== model && !fallbackCandidates.includes(backstop)) {
-              fallbackCandidates.push(backstop);
-            }
-          }
-        }
+        const fallbackCandidates = resolveFallbackCandidates({ config, model, name, channel, isAlt });
 
         let lastErr = e;
         for (const fb of fallbackCandidates) {

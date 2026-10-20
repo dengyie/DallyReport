@@ -4,6 +4,7 @@ import {
   computeAiNewsStatus,
   shouldSynthesize,
   formatDailySourceDiagnostics,
+  resolveFallbackCandidates,
 } from "../src/sections/ai-news.mjs";
 
 test("computeAiNewsStatus: zero-citation output with sources remains usable", () => {
@@ -281,3 +282,56 @@ test("H1: a healthy run produces no labels at all", () => {
   assert.deepEqual(formatDailySourceDiagnostics({}), []);
   assert.deepEqual(formatDailySourceDiagnostics({ openai: { count: 0 } }), []);
 });
+
+// --- resolveFallbackCandidates (pure fallback ladder resolution) ---
+
+test("resolveFallbackCandidates: main channel prioritizes synthFallbackModel, aiAltModel, and backstops without duplicates", () => {
+  const config = {
+    synthModel: "gemini-3.8-flash",
+    synthFallbackModel: "deepseek-v4-flash",
+    aiAltModel: "deepseek-v4-flash",
+  };
+  const candidates = resolveFallbackCandidates({
+    config,
+    model: "gemini-3.8-flash",
+    name: "AI",
+  });
+  // Should include deepseek-v4-flash once and exclude gemini-3.8-flash (current model)
+  assert.deepEqual(candidates, ["deepseek-v4-flash"]);
+});
+
+test("resolveFallbackCandidates: main channel includes distinct fallback models and backstops", () => {
+  const config = {
+    synthModel: "gemini-3.8-flash",
+    synthFallbackModel: "gpt-5.6-luna",
+    aiAltModel: "claude-4",
+  };
+  const candidates = resolveFallbackCandidates({
+    config,
+    model: "gemini-3.8-flash",
+    name: "AI",
+  });
+  assert.deepEqual(candidates, ["gpt-5.6-luna", "claude-4", "deepseek-v4-flash"]);
+});
+
+test("resolveFallbackCandidates: alt channel falls back to synthModel and synthFallbackModel", () => {
+  const config = {
+    synthModel: "gemini-3.8-flash",
+    synthFallbackModel: "gpt-5.6-luna",
+    aiAltModel: "deepseek-v4-flash",
+  };
+  const candidates = resolveFallbackCandidates({
+    config,
+    model: "deepseek-v4-flash",
+    name: "AI-DeepSeek",
+    channel: "deepseek",
+    isAlt: true,
+  });
+  assert.deepEqual(candidates, ["gemini-3.8-flash", "gpt-5.6-luna"]);
+});
+
+test("resolveFallbackCandidates: safe with empty options and undefined config", () => {
+  const candidates = resolveFallbackCandidates();
+  assert.deepEqual(candidates, ["deepseek-v4-flash", "gemini-3.8-flash"]);
+});
+
