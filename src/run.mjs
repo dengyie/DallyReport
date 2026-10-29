@@ -283,9 +283,6 @@ async function run() {
     } else if (gr.status === "rejected") {
       posterLines.push("⏭️ GitHubPoster: 跳过（GitHub 板块执行失败，未生成海报）");
     }
-  } else if (config.imageEnabled && !names.includes("github")) {
-    // running a non-github section with image enabled — the AI poster block
-    // (guarded by names.includes("ai")) handles its own section; nothing to do here.
   }
 
   // AI poster follows the same isolation rule as GitHub poster: AI.md is first

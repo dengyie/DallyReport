@@ -24,11 +24,12 @@ const DEFAULT_OBSIDIAN_DIR = HOST_DEFAULTS.obsidianDir;
 
 // Single source of truth for the synthesis model + tuning. Read here, not re-read
 // ad hoc from process.env in section modules, so the default lives in one place.
-// Default is gemini-3.6-flash, the writer verified live on the gateway. gpt-5.6-luna
-// is NOT a usable default: it returns fake-empty SSE streams (chatcmpl-freeblock000)
-// and 500s on /responses, so it is listed in KNOWN_BAD_MODELS below and must be
-// probed out rather than shipped as the default.
-export const DEFAULT_SYNTH_MODEL = "gemini-3.6-flash";
+// Default is gemini-3.8-flash, the production writer verified live on the
+// gateway (2026-10-18 起 .env 与文档同步到 3.8)。gpt-5.6-luna is NOT a usable
+// default: it returns fake-empty SSE streams (chatcmpl-freeblock000) and 500s on
+// /responses, so it is listed in KNOWN_BAD_MODELS below and must be probed out
+// rather than shipped as the default.
+export const DEFAULT_SYNTH_MODEL = "gemini-3.8-flash";
 const DEFAULT_SYNTH_MAX_TOKENS = 4000;
 const DEFAULT_SYNTH_TIMEOUT_MS = 90000;
 
@@ -90,11 +91,6 @@ function positiveInt(name, fallback) {
     throw new Error(`${name} 必须是 > 0 的整数，当前值: ${raw}`);
   }
   return n;
-}
-
-export function buildQuery(template, today) {
-  if (!template) return null;
-  return template.replace(/\{date\}/g, today);
 }
 
 // The report and posters self-describe their timestamp as 北京时间, so the date
@@ -257,10 +253,6 @@ export function loadConfig({ date = null, mode = null } = {}) {
     hnDailyLimit: int("HN_DAILY_LIMIT", weekly ? 12 : 10),
     // 2026-08-11 硬关：36kr 经 Firecrawl 的 URL 被重写为 feed 首页，所有条目 URL
     // 相同导致去重合并。待稳定 provider 或 raw RSS 绕过 WAF 后再恢复。
-    // （原 KR36_DAILY_ENABLED 环境变量分支位于 `if (true)` 之后，永不可达——
-    // 假开关已于 2026-09-25 review 删除，避免误导。）
-    kr36DailyEnabled: false,
-    kr36DailyLimit: int("KR36_DAILY_LIMIT", weekly ? 12 : 5),
     arxivDailyEnabled: (() => {
       const raw = val("ARXIV_DAILY_ENABLED");
       if (raw == null) return true;
@@ -482,7 +474,7 @@ export function loadConfig({ date = null, mode = null } = {}) {
       if (raw == null) return true;
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
-    aiAltModel: val("AI_ALT_MODEL") || "gemini-3.6-flash",
+    aiAltModel: val("AI_ALT_MODEL") || "gemini-3.8-flash",
     aiAltQueryTemplate: val("AI_ALT_QUERY"),
     aiAltFile: val("AI_ALT_FILE"),
     // The alt writer model gets its own synthesis budget instead of sharing
@@ -586,7 +578,7 @@ export function altChannelNoteName(config, slug) {
 
 export function resolveAltChannel(config) {
   if (!config.aiAltChannel) return null;
-  const model = config.aiAltModel || "gemini-3.6-flash";
+  const model = config.aiAltModel || "gemini-3.8-flash";
   const slug = modelSlug(model);
   // The name is a bare note name: writeSection appends ".md" itself and the
   // cross-link wikilink uses the same name. Strip a user-supplied ".md"
@@ -646,7 +638,7 @@ export function validateRuntimePaths(config) {
     ["GROK_SEARCH_MODEL", config?.searchModel],
   ]) {
     if (model && KNOWN_BAD_MODELS.includes(model)) {
-      warnings.push(`${name}=${model} 是已知坏模型（假空流/500），建议换用 gemini-3.6-flash 等可用写手`);
+      warnings.push(`${name}=${model} 是已知坏模型（假空流/500），建议换用 gemini-3.8-flash 等可用写手`);
     }
   }
   return warnings;

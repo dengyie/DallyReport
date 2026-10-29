@@ -29,12 +29,12 @@
 
 ## 2026-08-11 优化（当日性 + 硬源保底 + 解耦）
 
-- **当日硬源**：新增 HN(top+best 合并去重) / 36kr(默认关) / arXiv(1 天宽限) / OpenAI News / HF Blog 五个零配置公开 API/RSS 源（`src/sources-daily.mjs`），按发布时间过滤出**北京历法当日**素材，linux.do 安静日（如 08-10 仅 1 帖）时模型仍有 ≥10 条当日素材，降低凭记忆补白/编造风险。36kr 默认关闭（Firecrawl URL 被重写为 feed 首页，去重合并）。
+- **当日硬源**：新增 HN(top+best 合并去重) / arXiv(1 天宽限) / OpenAI News / HF Blog 四个零配置公开 API/RSS 源（`src/sources-daily.mjs`），按发布时间过滤出**北京历法当日**素材，linux.do 安静日（如 08-10 仅 1 帖）时模型仍有 ≥10 条当日素材，降低凭记忆补白/编造风险。（当时的第 5 个源 36kr 已于 2026-10-30 删除——config 硬编码关闭、Firecrawl URL 被重写为 feed 首页，从未投产。）
 - **时效过滤**：`filterByRecency`（`src/snippet-hygiene.mjs`）对带时间戳来源（含 linux.do `created_at`）按当日 00:00（北京）过滤，过期计数在报告头部标注；`GROK_DAYS` 默认收紧 2→1。
 - **素材窗口标注**：报告顶部 `> **素材窗口**：当日素材 N 条；近几日来源 M 条；过期已过滤 K 条`；当日硬源 < 10 时给出低素材提示。`REPORT_STRICT_DAILY=false` 可关闭。
 - **防补白 prompt**：`SYSTEM_PROMPT` 新增第 8 条（素材时效声明——来源不足显式标注"当日未见 X 类动态"而非编造）与第 9 条（轻栏目化——来源 ≥8 条时按今日焦点/产品模型/前沿研究/开源/社区组织，空栏不渲染，<8 条退化为扁平列表）。
 - **搜索/综合模型解耦**：`GROK_SEARCH_MODEL` 单独配置搜索子进程模型，综合写手仍用 `GROK_MODEL`；不设时行为与旧版完全一致。
-- **launchd 定时（可选）**：`node scripts/install-launchd.mjs` 注册每日 09:00 本机定时任务（日志 `logs/launchd.{out,err}.log`），`node scripts/uninstall-launchd.mjs` 卸载。
+- **定时入口**：生产为 Windows 任务计划程序（`scripts/run-daily-task.cmd` → `node src/resilient-run.mjs`，日志 `logs/task.{out,err}.log`）；Mac launchd 脚本已于 2026-10-30 删除。
 - 测试 211 → **228（全部 pass）**。
 
 > 开发文档：vault `Note/Project/DallyReport/DallyReport 优化开发文档.md`（DEV 合同，**现行版本**；含 §9 内容质量专项）。仓内 `docs/dallyreport-optimization-dev.md` 是 2026-08-11 首版，已被 vault 版取代，只作历史留档。
@@ -110,7 +110,7 @@ npm test           # = node --test，跑 test/ 下的单测
 
 ### 日报 / 周报
 
-同一个 launchd 任务（每天 09:00）同时产出两种报告，由 `REPORT_MODE` 决定：
+同一个定时任务（每天 09:00，Windows 任务计划程序 `DallyReport`）同时产出两种报告，由 `REPORT_MODE` 决定：
 
 | | 日报 | 周报 |
 |---|---|---|

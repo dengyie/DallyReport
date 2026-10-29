@@ -60,7 +60,7 @@ test("resolveAltChannel: disabled channel returns null (single-channel mode)", (
 test("resolveAltChannel: defaults to Gemini writer + shared AI_QUERY", () => {
   const ch = resolveAltChannel({ aiAltChannel: true, date: "2026-08-06" });
   assert.equal(ch.name, "AI-Gemini");
-  assert.equal(ch.model, "gemini-3.6-flash");
+  assert.equal(ch.model, "gemini-3.8-flash");
   assert.equal(ch.queryTemplate, undefined); // no aiQueryTemplate set -> undefined
   assert.equal(ch.title, "# AI 热点（Gemini）· 2026-08-06");
 });
@@ -138,11 +138,11 @@ test("resolveAltChannel: aiAltQuery overrides, aiAltFile overrides name, model s
 
 // --- loadConfig defaults ---
 
-test("loadConfig: aiAltModel defaults to gemini-3.6-flash and channel to on", async () => {
+test("loadConfig: aiAltModel defaults to gemini-3.8-flash and channel to on", async () => {
   await withEnv({}, async () => {
     const config = loadConfig({ date: "2026-08-06" });
     assert.equal(config.aiAltChannel, true);
-    assert.equal(config.aiAltModel, "gemini-3.6-flash");
+    assert.equal(config.aiAltModel, "gemini-3.8-flash");
     assert.equal(config.aiAltQueryTemplate, null);
     assert.equal(config.aiAltFile, null);
     assert.equal(config.aiAltSynthTimeoutMs, 300000);

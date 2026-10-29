@@ -29,27 +29,11 @@ export function frontMatter(fields) {
   return lines.join("\n");
 }
 
-export function sourceCard(src) {
-  if (!src) return "";
-  const rawUrl = sanitizeUrl(src.url);
-  const rawTitle = src.title || src.url || "（无标题）";
-  const title = escapeMarkdownText(rawTitle);
-  const link = rawUrl ? `- [${title}](<${escapeUrl(rawUrl)}>)` : `- ${title}`;
-  const snippet = escapeMarkdownText(src.snippet, { multiline: true });
-  const parts = [link];
-  if (snippet) parts.push(`  > ${snippet.replace(/\n/g, "\n  > ")}`);
-  return parts.join("\n");
-}
-
 function cleanText(value, { multiline = false } = {}) {
   let text = String(value ?? "").replace(/\r/g, "");
   if (!multiline) text = text.replace(/[\n\r]+/g, " ");
   // Keep ordinary whitespace and line breaks, but never emit control characters.
   return text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim();
-}
-
-function escapeMarkdownText(value, options) {
-  return cleanText(value, options).replace(/[\\`*_[\]<>#+.!|()-]/g, "\\$&");
 }
 
 // Exported because the production reference renderer (ai-news.mjs `refLines`) is
@@ -71,15 +55,6 @@ export function sanitizeUrl(value) {
 
 export function escapeUrl(value) {
   return String(value).replace(/[\\<>]/g, "\\$&");
-}
-
-export function escapeMdText(value, options) {
-  return escapeMarkdownText(value, options);
-}
-
-export function sourceList(sources) {
-  if (!sources || sources.length === 0) return "（暂无来源）";
-  return sources.map(sourceCard).join("\n");
 }
 
 export function table(headers, rows) {

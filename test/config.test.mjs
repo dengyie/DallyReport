@@ -63,7 +63,7 @@ test("loadConfig: derives portable defaults from the current host", async () => 
 test("loadConfig: synthModel default is a working writer, not a known-bad model", async () => {
   await withEnv({}, async () => {
     const config = loadConfig({ date: "2026-08-01" });
-    assert.equal(config.synthModel, "gemini-3.6-flash");
+    assert.equal(config.synthModel, "gemini-3.8-flash");
     assert.ok(
       !KNOWN_BAD_MODELS.includes(config.synthModel),
       "the shipped default writer must never be on the known-bad list",
@@ -173,7 +173,7 @@ test("validateRuntimePaths: warns when a known-bad model is configured", () => {
   const bad = warnings.filter((w) => w.includes("已知坏模型"));
   assert.equal(bad.length, 1);
   assert.match(bad[0], /GROK_MODEL=gpt-5\.6-luna/);
-  assert.match(bad[0], /gemini-3\.6-flash/);
+  assert.match(bad[0], /gemini-3\.8-flash/);
 });
 
 test("validateRuntimePaths: reports missing paths without throwing", () => {
