@@ -724,6 +724,20 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
             maxChars: Math.min(maxChars, 12000),
             provider: "auto",
             cacheFile,
+            // 2026-10-30 P2: this was the ONE fetch path without a cache gate.
+            // A Cloudflare challenge page is non-empty, so grok-cli's default
+            // `looksValid` (any non-empty body) cached it and replayed it as a
+            // hit for the rest of the day. The gate mirrors the sibling paths'
+            // intent (only cache a body that serves THIS topic): the page must
+            // name the topic itself (a challenge page never does) AND yield
+            // real OP prose. snippetFromTopicText alone is not enough — its
+            // `paras.find` fallback accepts any ≥24-char line, which a stripped
+            // challenge page satisfies.
+            cachePredicate: (text) =>
+              typeof text === "string" &&
+              !!card.title &&
+              text.includes(card.title) &&
+              snippetFromTopicText(text, card.title) !== "",
           });
           if (res?.cacheWriteError) {
             cacheWriteFailures.push({

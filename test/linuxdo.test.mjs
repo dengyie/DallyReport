@@ -38,6 +38,20 @@ const LISTING_FIXTURE = `
 | [duplicate DeepSeek](https://linux.do/t/topic/2683364/9) | 1 | 10 | 1h |
 `;
 
+// A real topic page body: guidelines chrome + OP prose. snippetFromTopicText
+// must extract the prose (used by the deep-fetch cache gate's predicate).
+const TOPIC_PAGE_FIXTURE = `
+[Skip to main content](https://linux.do/t/topic/1)
+
+**真诚**、 **友善**、 **团结**、 **专业**，共建你我引以为荣之社区。 [《社区准则》](https://linux.do/guidelines)
+
+# [DeepSeek-V4-Flash 正式版发布！](https://linux.do/t/topic/2683364)
+
+边缘数据库公司 SQLite AI 开源推理引擎 WASTE。它让保留全部层和专家的 Kimi K3，能在一台 64GB MacBook Pro 上运行。
+
+WASTE 把约 27GB 的模型主干留在内存。
+`;
+
 test("parseLinuxDoTopics: extracts unique topic urls + titles", () => {
   const topics = parseLinuxDoTopics(LISTING_FIXTURE);
   assert.ok(topics.length >= 7);
@@ -710,6 +724,52 @@ test("fetchLinuxDoAiSources: HTML list fetch carries a parse-validating cachePre
   assert.equal(typeof pred, "function");
   assert.equal(pred(LISTING_FIXTURE), true);
   assert.equal(pred("<html>Just a moment...</html>"), false, "challenge page must not validate as a list");
+});
+
+test("fetchLinuxDoAiSources: the deep-fetch path carries the same topic-prose cache gate", async () => {
+  // 2026-10-30 P2: the per-topic deep fetch was the one path WITHOUT a cache
+  // predicate — a challenge page is non-empty, so grok-cli's default
+  // `looksValid` cached it and replayed it all day. The gate requires the page
+  // to name the topic itself (a challenge page never does) AND yield real OP
+  // prose. Single-topic listing so the one deep-fetch call is deterministic.
+  const singleTopicListing = `
+# Latest topics in 前沿快讯
+
+| Topic | Replies | Views | Activity |
+| --- | --- | --- | --- |
+| [DeepSeek-V4-Flash 正式版发布！](https://linux.do/t/topic/2683364) | 5 | 2k | 1h |
+`;
+  const calls = [];
+  const runFetch = async (url, _cfg, opts = {}) => {
+    calls.push({ url, opts });
+    return { text: TOPIC_PAGE_FIXTURE, provider: "stub" };
+  };
+  const out = await fetchLinuxDoAiSources(
+    {
+      date: "2026-07-31",
+      cacheDir: "/tmp/dally-linuxdo-deeppred",
+      linuxdoEnabled: true,
+      linuxdoTopicLimit: 2,
+      linuxdoDeepFetch: true,
+      linuxdoNews34JsonApi: false,
+      linuxdoListUrls: ["https://linux.do/c/news/34"],
+      linuxdoListingText: singleTopicListing,
+    },
+    { runFetch },
+  );
+  assert.ok(out.length >= 1);
+  // The deep-fetch calls are every call AFTER the listing call.
+  const deepCalls = calls.slice(1);
+  assert.ok(deepCalls.length >= 1, "the deep-fetch path must have run");
+  for (const { opts } of deepCalls) {
+    assert.equal(typeof opts.cachePredicate, "function");
+    assert.equal(opts.cachePredicate(TOPIC_PAGE_FIXTURE), true, "the topic's own page validates");
+    assert.equal(
+      opts.cachePredicate("<html>Just a moment...</html>"),
+      false,
+      "a challenge page must never be cached for a topic",
+    );
+  }
 });
 
 // grok-search fetch.js fixture (same pattern as test/grok-cli.test.mjs) so the
