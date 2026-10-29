@@ -10,6 +10,8 @@ import {
   probeLadder,
   probeCandidates,
   probeNetworkConnectivity,
+  nextFallbackCandidate,
+  shouldSkipForIdempotency,
   spawnRunner,
   PROBE_TIMEOUT_MS,
 } from "../src/resilient-run.mjs";
@@ -31,6 +33,70 @@ async function withFetch(impl, fn) {
     globalThis.fetch = original;
   }
 }
+
+// ── probeModel: the 180s contract must hold through the BODY phase ────────
+
+test("probeModel: a 200 whose body stalls is aborted at the ceiling (timeout, not an eternal hang)", async () => {
+  // 2026-10-30 P2: the old probe cleared the abort timer as soon as response
+  // HEADERS arrived, so a gateway that returned 200 and then stalled made
+  // text() wait on undici's default body timeout (or forever on SSE
+  // keepalives) — the exported ceiling was a constant the code never enforced.
+  // The stub wires the abort signal into text() so the test observes exactly
+  // what a stalled gateway does under an armed deadline.
+  const result = await withFetch(async (_url, init = {}) => ({
+    ok: true,
+    status: 200,
+    text: () => new Promise((_, reject) => {
+      init.signal?.addEventListener("abort", () => {
+        const err = new Error("The operation was aborted");
+        err.name = "AbortError";
+        reject(err);
+      }, { once: true });
+    }),
+  }), () => probeModel("https://gateway.test/v1", "k", "m", { timeoutMs: 60 }));
+  assert.equal(result.reachable, false);
+  assert.equal(result.error, "timeout", "the armed deadline, not the body stall, decides the outcome");
+  assert.equal(result.status, null);
+});
+
+test("probeModel: default ceiling stays the exported PROBE_TIMEOUT_MS", async () => {
+  // The injectable override is for tests only; production callers pass nothing
+  // and must keep the 180s contract (spec §8).
+  assert.ok(PROBE_TIMEOUT_MS >= 120_000);
+});
+
+// ── nextFallbackCandidate (probe-driven fallback reassignment) ────────────
+
+test("nextFallbackCandidate: returns the next unprobed ladder entry, never the probed-dead primary", () => {
+  // 2026-10-30 P2: the old reassignment hardcoded the pair member — the exact
+  // primary the probe had just proved dead — leaving the child a fallback
+  // ladder of one dead model on a primary-outage day.
+  const candidates = ["gemini-3.8-flash", "deepseek-v4-flash", "grok-4.5"];
+  assert.equal(nextFallbackCandidate(candidates, "deepseek-v4-flash"), "grok-4.5");
+});
+
+test("nextFallbackCandidate: no entry after the last, and unknown models yield null", () => {
+  const candidates = ["gemini-3.8-flash", "deepseek-v4-flash"];
+  assert.equal(nextFallbackCandidate(candidates, "deepseek-v4-flash"), null);
+  assert.equal(nextFallbackCandidate(candidates, "not-in-ladder"), null);
+  assert.equal(nextFallbackCandidate([], "gemini-3.8-flash"), null);
+});
+
+// ── shouldSkipForIdempotency (all-products gate) ──────────────────────────
+
+test("shouldSkipForIdempotency: a full product set skips; a half-produced day does NOT", () => {
+  // 2026-10-30 P2: keying the idempotency skip on AI.md alone permanently
+  // orphaned days where GitHub.md was lost to a mid-run crash — every retry
+  // exited 0 before checkProducts ever ran.
+  const dir = tmpDir();
+  assert.equal(shouldSkipForIdempotency(dir, false), false, "nothing on disk → run");
+  fs.writeFileSync(path.join(dir, "AI.md"), "# AI 日报\n内容", "utf-8");
+  assert.equal(shouldSkipForIdempotency(dir, false), false, "AI.md alone is a half-produced day → still run");
+  fs.writeFileSync(path.join(dir, "GitHub.md"), "# GitHub\n内容", "utf-8");
+  assert.equal(shouldSkipForIdempotency(dir, false), true, "every product present → skip");
+  fs.writeFileSync(path.join(dir, "GitHub.md"), "", "utf-8");
+  assert.equal(shouldSkipForIdempotency(dir, false), false, "a 0-byte product is not a product");
+});
 
 // ── checkProducts ─────────────────────────────────────────────────────────
 
@@ -332,6 +398,32 @@ test("spawnRunner: a child that produces the watch file is NOT stalled", async (
   assert.equal(result.code, 0, "the child exited cleanly");
   assert.equal(result.stalled, false, "production of the watch file clears the stall flag");
   assert.equal(fs.readFileSync(watchPath, "utf-8"), "ok");
+});
+
+test("spawnRunner: a child that hangs AFTER producing the watch file is killed at the 2× hard cap", async () => {
+  // 2026-10-30 P2: the old one-shot watchdog returned on "produced" and never
+  // looked again — a hang in the poster/enrichment phase (after AI.md) ran
+  // forever while its lock heartbeat refused every later day. Progress must
+  // re-arm once; the hard cap then kills even a productive hang.
+  const dir = tmpDir();
+  const watchPath = path.join(dir, "AI.md");
+  const script = writeChildScript(
+    dir,
+    "write-then-hang.mjs",
+    `import fs from "node:fs";\nfs.writeFileSync(${JSON.stringify(watchPath)}, "ok");\nsetTimeout(() => {}, 30000);\n`,
+  );
+  const result = await spawnRunner(
+    process.execPath,
+    script,
+    [],
+    path.join(dir, "out.log"),
+    path.join(dir, "err.log"),
+    { watchPath, stallCeilMs: 200 },
+  );
+  assert.equal(result.stalled, true, "the hard cap must flag the stall");
+  assert.notEqual(result.code, 0, "a productive hang still settles non-zero");
+  assert.match(result.stderr, /hard cap/, "stderr records the hard-cap line");
+  assert.equal(fs.existsSync(watchPath), true, "the produced product survives the kill");
 });
 
 // ── probeNetworkConnectivity ─────────────────────────────────────────────

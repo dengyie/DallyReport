@@ -116,9 +116,9 @@ const STDERR_TAIL_CAP = 64 * 1024;
  * cheapest verifiable signal that the gateway + model are alive, so a run that
  * is about to spend minutes of writing can be aborted before it starts.
  */
-export async function probeModel(apiUrl, apiKey, model) {
+export async function probeModel(apiUrl, apiKey, model, { timeoutMs = PROBE_TIMEOUT_MS } = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${apiUrl}/chat/completions`, {
       method: "POST",
@@ -133,14 +133,29 @@ export async function probeModel(apiUrl, apiKey, model) {
       }),
       signal: controller.signal,
     });
-    clearTimeout(timer);
-    const body = await res.text().catch(() => "");
+    // The timer stays armed through the BODY read: a gateway that returns 200
+    // headers and then stalls (the fake-empty-stream failure class this gateway
+    // actually exhibits) would otherwise wait on undici's default body timeout —
+    // or forever on SSE keepalive bytes, which reset it per chunk. A 4-model
+    // ladder could then idle ~20 minutes before spawning anything. The abort
+    // signal cancels body reads; an aborted read IS the deadline firing, so it
+    // must surface as "timeout" rather than be swallowed into an empty body.
+    let body = "";
+    try {
+      body = await res.text();
+    } catch (e) {
+      if (e?.name === "AbortError") {
+        return { reachable: false, status: null, error: "timeout" };
+      }
+      return { reachable: false, status: null, error: e?.message || String(e) };
+    }
     const reachable = res.ok && body.length > 0;
     return { reachable, status: res.status, error: reachable ? null : `HTTP ${res.status}` };
   } catch (e) {
-    clearTimeout(timer);
     const error = e?.name === "AbortError" ? "timeout" : (e?.message || String(e));
     return { reachable: false, status: null, error };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -177,6 +192,21 @@ export function probeCandidates(config) {
     out.push(m);
   }
   return out;
+}
+
+/**
+ * When the probe skipped past a dead primary and selected the configured
+ * fallback itself, GROK_SYNTH_FALLBACK_MODEL must be re-pointed so the child's
+ * fallback ladder still offers something else. The 2026-10-29 behaviour
+ * reassigned the hardcoded pair member — which is exactly the primary the probe
+ * just proved dead, leaving a fallback ladder of one dead model. The next
+ * unprobed ladder entry is strictly better. Returns null when nothing follows
+ * (the caller leaves the env untouched; the child's own dedup makes that safe).
+ */
+export function nextFallbackCandidate(candidates, probedModel) {
+  const idx = candidates.indexOf(probedModel);
+  if (idx === -1) return null;
+  return candidates[idx + 1] ?? null;
 }
 
 /**
@@ -223,6 +253,16 @@ export function checkProducts(outDir, isWeekly) {
     try { size = fs.statSync(p).size; } catch (_) { /* missing */ }
     return { name, path: p, ok: size > 0, size };
   });
+}
+
+/**
+ * The idempotency gate: skip the day only when EVERY product for this mode is
+ * present and non-empty. Keying on AI.md alone permanently orphaned
+ * half-produced days (AI.md on disk, GitHub.md lost to a crash) — every retry,
+ * scheduled or manual, exited 0 before checkProducts ever got a say.
+ */
+export function shouldSkipForIdempotency(outDir, isWeekly) {
+  return checkProducts(outDir, isWeekly).every((p) => p.ok);
 }
 
 // ── 4. Log rotation ───────────────────────────────────────────────────────
@@ -336,14 +376,16 @@ export function spawnRunner(nodeExe, runMjs, args, outLog, errLog, { watchPath =
     // Stall ceiling: kill a child that has been running too long with nothing to
     // show. The singleton lock heartbeat stays alive as long as the child does;
     // without this, a hung run refuses every future day until killed by hand.
+    //
+    // One firing is not enough: a child that hangs AFTER writing the watch file
+    // (poster render, full-post crawl, a socket with no timeout) used to run
+    // forever behind the old one-shot check. Progress re-arms the guard once and
+    // a hard cap of 2× the ceiling then kills even a "productive" hang — one
+    // ceiling to produce the note, one for posters + enrichment.
     if (watchPath && stallCeilMs > 0) {
-      watchdog = setTimeout(() => {
-        if (settled) return;
-        let produced = false;
-        try { produced = fs.existsSync(watchPath) && fs.statSync(watchPath).size > 0; } catch (_) { /* missing */ }
-        if (produced) return; // run is making progress
+      const killStalled = (reason) => {
         stalled = true;
-        stderrBuf += `\n[stall] no ${watchPath} after ${Math.round(stallCeilMs / 1000)}s; killing run.mjs\n`;
+        stderrBuf += `\n[stall] ${reason}; killing run.mjs\n`;
         if (process.platform === "win32" && typeof child.pid === "number" && child.pid > 0) {
           try {
             spawnSync("taskkill", ["/T", "/F", "/PID", String(child.pid)], { stdio: "ignore" });
@@ -354,6 +396,20 @@ export function spawnRunner(nodeExe, runMjs, args, outLog, errLog, { watchPath =
         // is blocked too.
         const fallback = setTimeout(() => finish(1), 5000);
         fallback.unref?.();
+      };
+      watchdog = setTimeout(function checkStall() {
+        if (settled) return;
+        let produced = false;
+        try { produced = fs.existsSync(watchPath) && fs.statSync(watchPath).size > 0; } catch (_) { /* missing */ }
+        if (produced) {
+          watchdog = setTimeout(() => {
+            if (settled) return;
+            killStalled(`hard cap ${Math.round((stallCeilMs * 2) / 1000)}s exceeded (product present but run never finished)`);
+          }, stallCeilMs);
+          watchdog.unref?.();
+          return;
+        }
+        killStalled(`no ${watchPath} after ${Math.round(stallCeilMs / 1000)}s`);
       }, stallCeilMs);
       watchdog.unref?.();
     }
@@ -374,8 +430,8 @@ async function main() {
   const config = loadConfig({ date });
   const outDir = path.join(config.obsidianDir, date);
   const aiMd = path.join(outDir, config.isWeekly ? "AI-周报.md" : "AI.md");
-  if (fs.existsSync(aiMd) && fs.statSync(aiMd).size > 0) {
-    log(`${stamp} SKIP: ${aiMd} 已存在，跳过本日 run（幂等）`);
+  if (shouldSkipForIdempotency(outDir, config.isWeekly)) {
+    log(`${stamp} SKIP: ${outDir} 产物齐全，跳过本日 run（幂等）`);
     return 0;
   }
 
@@ -425,11 +481,19 @@ async function main() {
     process.env.GROK_MODEL = probe.model;
     log(`${stamp} PROBE-FALLBACK: primary ${config.synthModel} → ${probe.model}`);
   }
-  // Prevent duplicate primary and fallback if probe selected the fallback model
+  // Prevent duplicate primary and fallback if probe selected the fallback model.
+  // The replacement must NOT be the hardcoded pair member — that is the primary
+  // the probe just proved dead, which would leave the child a fallback ladder of
+  // exactly one dead model. Take the next unprobed ladder entry instead; if none
+  // remains, leave the env as-is (the child's own ladder dedup makes that safe).
   if (process.env.GROK_SYNTH_FALLBACK_MODEL === probe.model) {
-    const altFallback = probe.model.startsWith("gemini") ? "deepseek-v4-flash" : "gemini-3.8-flash";
-    process.env.GROK_SYNTH_FALLBACK_MODEL = altFallback;
-    log(`${stamp} PROBE-FALLBACK: reassigned GROK_SYNTH_FALLBACK_MODEL to ${altFallback}`);
+    const nextFallback = nextFallbackCandidate(candidates, probe.model);
+    if (nextFallback) {
+      process.env.GROK_SYNTH_FALLBACK_MODEL = nextFallback;
+      log(`${stamp} PROBE-FALLBACK: reassigned GROK_SYNTH_FALLBACK_MODEL to ${nextFallback}`);
+    } else {
+      log(`${stamp} PROBE-FALLBACK: no ladder entry after ${probe.model}; fallback left as-is`);
+    }
   }
 
   const startMs = Date.now();
