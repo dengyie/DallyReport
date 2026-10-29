@@ -2,6 +2,7 @@ name: DallyReport checks
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -17,7 +18,10 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Node >=21 is required for `node --test` glob expansion (the test
+          # script passes a quoted glob) and for the global WebSocket that
+          # src/linuxdo.mjs uses. 22 = current LTS line, matches production.
+          node-version: 22
           cache: npm
       - name: Install dependencies
         run: npm ci
