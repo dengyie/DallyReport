@@ -77,6 +77,43 @@ test("2026-09-29: a single community complaint is C, not an investigation", () =
   }
 });
 
+// --- gradeOne's stale branch (epoch-vs-date-string bug, 2026-10-30 P2) -----
+
+test("gradeTopics: a same-day EPOCH publishedAt is NOT stale (hard sources carry epoch ms)", () => {
+  // The old `String(publishedAt) < date` compared an epoch like 1795000000000
+  // against "2026-09-29" — "1" < "2" made every dated hard-source topic stale,
+  // zeroing the A/B pool the investigation grades feed on.
+  const shopify = card(
+    30,
+    "Shopify opens checkout to browser-based AI agents",
+    "https://techcrunch.com/2026/09/28/shopify-opens-checkout/",
+    "techcrunch",
+    Date.parse("2026-09-29T10:00:00+08:00"), // report day itself, epoch ms
+  );
+  const topics = gradeTopics(topicize([shopify]), { date: "2026-09-29", mode: "daily" });
+  const t = byTitle(topics, "Shopify");
+  assert.ok(t.grade === "A" || t.grade === "B", `same-day epoch graded ${t.grade}, must not be stale-C`);
+});
+
+test("gradeTopics: a topic published BEFORE the report day is stale (C)", () => {
+  const shopify = card(
+    31,
+    "Shopify opens checkout to browser-based AI agents",
+    "https://techcrunch.com/2026/09/28/shopify-opens-checkout/",
+    "techcrunch",
+    Date.parse("2026-09-27T10:00:00+08:00"),
+  );
+  const topics = gradeTopics(topicize([shopify]), { date: "2026-09-29", mode: "daily" });
+  assert.equal(byTitle(topics, "Shopify").grade, "C", "yesterday's publish is outside the report day");
+});
+
+test("gradeTopics: an unparseable publishedAt stays un-staled (fail-open)", () => {
+  const weird = card(32, "Nvidia launches new platform for reining in rogue AI agents", "https://techcrunch.com/2026/09/28/nvidia/", "techcrunch", "not-a-date");
+  const topics = gradeTopics(topicize([weird]), { date: "2026-09-29", mode: "daily" });
+  const t = byTitle(topics, "Nvidia");
+  assert.ok(t.grade === "A" || t.grade === "B", `garbage timestamp graded ${t.grade}`);
+});
+
 test("2026-09-29: a repo directory, a trailer and a usage poll are D", () => {
   const topics = graded();
   for (const fragment of ["Jeff", "MicroLLM", "trailer", "用的什么模型"]) {

@@ -4,6 +4,7 @@ import {
   computeAiNewsStatus,
   shouldSynthesize,
   formatDailySourceDiagnostics,
+  describeCommunityDegradation,
   resolveFallbackCandidates,
 } from "../src/sections/ai-news.mjs";
 
@@ -281,6 +282,44 @@ test("H1: a healthy run produces no labels at all", () => {
   assert.deepEqual(formatDailySourceDiagnostics(null), []);
   assert.deepEqual(formatDailySourceDiagnostics({}), []);
   assert.deepEqual(formatDailySourceDiagnostics({ openai: { count: 0 } }), []);
+});
+
+// --- describeCommunityDegradation (community label semantics split) ---
+
+test("describeCommunityDegradation: enrichment misses are NOT 采集失败 — they get their own honest line", () => {
+  // 2026-10-30 P2: a week of "linux.do（40 项采集失败）" was the deep-fetch
+  // ENRICHMENT budget failing while the JSON-API path delivered every card.
+  // The cards keep their excerpt by design, so the old label described a data
+  // loss that was not happening.
+  const out = describeCommunityDegradation("linux.do", {
+    deepFetchFailures: Array.from({ length: 40 }, () => ({ url: "https://x" })),
+  });
+  assert.deepEqual(out, ["linux.do（正文补全缺 40 项，卡片保留摘要）"]);
+});
+
+test("describeCommunityDegradation: data-affecting failures keep the 采集失败 label", () => {
+  const out = describeCommunityDegradation("linux.do", {
+    listingFailures: [{ message: "challenge" }],
+    jsonApiFailures: [{ message: "parse-failed" }],
+  });
+  assert.deepEqual(out, ["linux.do（2 项采集失败）"]);
+});
+
+test("describeCommunityDegradation: both kinds coexist as two separate lines", () => {
+  const out = describeCommunityDegradation("linux.do", {
+    jsonApiFailures: [{ message: "parse-failed" }],
+    deepFetchFailures: [{ url: "a" }, { url: "b" }],
+  });
+  assert.deepEqual(out, [
+    "linux.do（1 项采集失败）",
+    "linux.do 正文补全缺 2 项（卡片保留摘要）",
+  ]);
+});
+
+test("describeCommunityDegradation: healthy diagnostics yield no lines", () => {
+  assert.deepEqual(describeCommunityDegradation("linux.do", undefined), []);
+  assert.deepEqual(describeCommunityDegradation("linux.do", {}), []);
+  assert.deepEqual(describeCommunityDegradation("linux.do", { listingFailures: [] }), []);
 });
 
 // --- resolveFallbackCandidates (pure fallback ladder resolution) ---

@@ -184,30 +184,50 @@ export function repairGluedHeadings(markdown) {
  * of mathematical breakthroughs** [12]` twice, verbatim. A reader taking the
  * second list as new items re-reads the same news under a fresh heading.
  *
- * Only the first occurrence survives. The key is the bullet's full text with
- * whitespace collapsed, so two bullets that differ only in line-breaking are
- * caught while two genuinely different stories sharing a title are not (their
- * bodies differ). Lines that are not bullets — including headings and the
- * reference list — are never dropped; the reference list is appended after this
- * runs, so a duplicate citation cannot be removed from under a live `[N]`.
+ * Only the first occurrence survives. The key is the bullet's BLOCK — headline
+ * plus its wrapped continuation lines, whitespace-collapsed — because a
+ * restarted truncation duplicates both, and a line-based key dropped only the
+ * headline while stranding the duplicate's body as a stray paragraph
+ * (runtime-verified 2026-10-30). Two bullets that differ only in line-breaking
+ * are caught while two genuinely different stories sharing a title are not
+ * (their bodies differ). Lines that are not part of a bullet block — headings,
+ * blank lines, stray paragraphs — are never dropped; the reference list is
+ * appended after this runs, so a duplicate citation cannot be removed from
+ * under a live `[N]`.
  */
 export function dedupeBullets(markdown) {
   const seen = new Set();
   const out = [];
+  // A block is a bullet line plus its continuation lines: non-bullet,
+  // non-blank, non-heading lines directly after it. This is deliberately NOT
+  // topic-bullets' bulletBlocks, which folds a following heading into the
+  // block — right for body re-shaping, wrong for a dedupe that must never
+  // swallow headings.
+  const blocks = [];
+  let current = null;
   for (const line of String(markdown || "").split("\n")) {
-    const bullet = line.match(/^\s*(?:[*+-]|\d+\.)\s+(.*)$/);
-    if (!bullet) {
-      out.push(line);
+    const isBullet = /^\s*(?:[*+-]|\d+\.)\s+/.test(line);
+    const isContinuation = current?.bullet && line.trim() !== "" && !/^#/.test(line);
+    if (isBullet || !isContinuation) {
+      current = { bullet: isBullet, text: line };
+      blocks.push(current);
       continue;
     }
-    const key = bullet[1].replace(/\s+/g, " ").trim();
+    current.text += `\n${line}`;
+  }
+  for (const block of blocks) {
+    if (!block.bullet) {
+      out.push(block.text);
+      continue;
+    }
+    const key = block.text.replace(/\s+/g, " ").trim();
     if (!key) {
-      out.push(line);
+      out.push(block.text);
       continue;
     }
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push(line);
+    out.push(block.text);
   }
   return out.join("\n");
 }

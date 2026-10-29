@@ -259,6 +259,32 @@ test("dedupeBullets: non-bullet lines pass through", () => {
   assert.equal(dedupeBullets(input), input);
 });
 
+test("dedupeBullets: a duplicated WRAPPED bullet loses its continuation line too", () => {
+  // 2026-10-30 P2, runtime-verified: the line-based key dropped the duplicate's
+  // headline but left its body line behind as a stray paragraph — partial
+  // duplicates still shipped on truncation days. The key is now the block.
+  const md = [
+    "- **同一事件**：正文内容完全一致 [1]。",
+    "续行内容也是重复块的一部分 [1]。",
+    "- **同一事件**：正文内容完全一致 [1]。",
+    "续行内容也是重复块的一部分 [1]。",
+  ].join("\n");
+  const out = dedupeBullets(md);
+  assert.equal(out.split("\n").filter((l) => l.trim()).length, 2, "the whole duplicate block goes, continuation included");
+  assert.equal((out.match(/续行内容/g) || []).length, 1);
+});
+
+test("dedupeBullets: a heading directly after a bullet survives that bullet's dedupe", () => {
+  // Deliberate divergence from topic-bullets' block model: a following heading
+  // must NOT be folded into the bullet's block, or deduping the bullet would
+  // swallow the heading with it.
+  const md = "- **重复事件**：内容 [1]。\n续行 [1]。\n## 下一节\n- **重复事件**：内容 [1]。\n续行 [1]。";
+  const out = dedupeBullets(md);
+  assert.match(out, /## 下一节/, "a heading after a duplicate bullet is never dropped");
+  assert.equal((out.match(/重复事件/g) || []).length, 1);
+  assert.equal((out.match(/续行/g) || []).length, 1);
+});
+
 // --- multi-source citations [1, 2] / [22, 25] -----------------------------
 
 test("splitOverMergedBullets: splits when a tacked clause carries multi-source citations", () => {

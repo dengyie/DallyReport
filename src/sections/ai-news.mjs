@@ -8,7 +8,7 @@ import { fetchV2exAiSources } from "../v2ex.mjs";
 import { dedupeAndNormalizeSources } from "../news-dedup.mjs";
 import { splitOverMergedBullets, repairGluedHeadings, dedupeBullets } from "../prose-tighten.mjs";
 import { fetchAllDailySources } from "../sources-daily.mjs";
-import { filterByRecency, isInWindowSource } from "../snippet-hygiene.mjs";
+import { filterByRecency, isInWindowSource, sanitizeSnippet } from "../snippet-hygiene.mjs";
 import { materialWindow } from "../report-window.mjs";
 import { topicize, gradeTopics, applyGradeCap } from "../topics.mjs";
 import { investigateTopics, renderInvestigationInput } from "../investigate.mjs";
@@ -161,6 +161,29 @@ export function formatDailySourceDiagnostics(
   return out;
 }
 
+// 2026-10-30 P2: deepFetchFailures were summed into the same "N 项采集失败"
+// number as listing/JSON-API failures. Deep-fetch enrichment is non-fatal BY
+// DESIGN (cards keep their Discourse excerpt) and its budget is exactly the
+// reported number — a week of "linux.do（40 项采集失败）" chased a data loss
+// that was not happening. "采集失败" now means data-affecting failures only
+// (listing / JSON-API / cache-write); enrichment misses get their own honest
+// line. Pure and exported so the operator-facing wording is unit-testable.
+export function describeCommunityDegradation(label, diag) {
+  const fetchFailures =
+    (diag?.listingFailures?.length || 0) +
+    (diag?.cacheWriteFailures?.length || 0) +
+    (diag?.jsonApiFailures?.length || 0);
+  const deepMisses = diag?.deepFetchFailures?.length || 0;
+  const out = [];
+  if (fetchFailures) {
+    out.push(`${label}（${fetchFailures} 项采集失败）`);
+    if (deepMisses) out.push(`${label} 正文补全缺 ${deepMisses} 项（卡片保留摘要）`);
+  } else if (deepMisses) {
+    out.push(`${label}（正文补全缺 ${deepMisses} 项，卡片保留摘要）`);
+  }
+  return out;
+}
+
 // 2026-09-28 weekly: every user-facing noun for the reporting period, in one
 // place. Scattered conditionals through the section meant a weekly shipped
 // "当日素材 N 条" over seven days of evidence — the note then describes its own
@@ -252,10 +275,11 @@ export function buildReferenceLines(
     // 2026-09-26 review P1: this renderer used to emit `s.url` verbatim, so an
     // attacker-authored `javascript:` href from a scraped post became a live
     // clickable link in the user's note. markdown.mjs already owned the correct
-    // defense (sanitizeUrl rejects any non-http(s) scheme) and its own
-    // sourceCard used it — but sourceCard has zero production callers, so the
-    // two tests guarding it protected code that never shipped while this path
-    // ran unvalidated. Degrade to a plain title when the URL is not http(s).
+    // defense (sanitizeUrl rejects any non-http(s) scheme), but the only caller
+    // of that era's sourceCard renderer was test-only, so the two tests guarding
+    // it protected code that never shipped while this path ran unvalidated
+    // (sourceCard/escapeMdText/sourceList were deleted on 2026-10-30).
+    // Degrade to a plain title when the URL is not http(s).
     const url = deps.sanitizeUrl(s.url);
     // 2026-09-28 review G1: the bullets are unnumbered, so the ONLY way a reader
     // resolves a body's `[N]` is by reading the number off the list. B1 stopped
@@ -407,16 +431,11 @@ export async function aiNewsSection(
     // Partial-failure shape: { listingFailures, deepFetchFailures,
     // cacheWriteFailures, jsonApiFailures } — an earlier draft checked a
     // nonexistent `failures` key, which made this branch dead code (2026-09-26
-    // fresh-eyes review).
+    // fresh-eyes review). Label semantics split 2026-10-30: see
+    // describeCommunityDegradation.
     const diag = arr?.communityDiagnostics ?? arr?.linuxdoDiagnostics;
-    const failureCount = diag
-      ? (diag.listingFailures?.length || 0) +
-        (diag.deepFetchFailures?.length || 0) +
-        (diag.cacheWriteFailures?.length || 0) +
-        (diag.jsonApiFailures?.length || 0)
-      : 0;
-    if (failureCount) {
-      degradedSources.push(`${label}（${failureCount} 项采集失败）`);
+    if (diag) {
+      degradedSources.push(...describeCommunityDegradation(label, diag));
       continue;
     }
     // Same-day hard sources, per-provider shape: { hackernews: {count, sample},
@@ -829,12 +848,20 @@ export async function investigateIfEnabled(sources, config, deps = {}) {
   }
   const added = [];
   const seen = new Set(sources.map((s) => s.url).filter(Boolean));
+  // 2026-10-30 P2: addedSources used to append after EVERY gate (recency,
+  // merge caps, dedupe) and were unbounded — worst case topics × searches ×
+  // hits extra cards straight into the synthesis prompt, reference list and
+  // posterSources. A total cap bounds the blast radius while still letting an
+  // investigation widen the funnel; `seen` already collapses duplicates.
+  const ADDED_SOURCES_CAP = 12;
   for (const topic of result.topics) {
     for (const extra of topic.memo?.addedSources || []) {
+      if (added.length >= ADDED_SOURCES_CAP) break;
       if (!extra?.url || seen.has(extra.url)) continue;
       seen.add(extra.url);
       added.push({ url: extra.url, title: extra.title || extra.url, provider: "topic-investigation" });
     }
+    if (added.length >= ADDED_SOURCES_CAP) break;
   }
   const bodyCards = result.topics
     .filter((t) => t.grade !== "D")
@@ -873,18 +900,27 @@ async function retryBullet(bullet, runOneShot) {
   }
 }
 
-function defaultSearch(config) {
+// The investigation search inlet. Exported with an injectable runSearch so the
+// sanitizer contract is unit-testable without touching the network.
+export function defaultSearch(config, { runSearchImpl = runSearch } = {}) {
   return async (query) => {
-    const result = await runSearch(query, config, { days: config.days, extra: config.extra });
+    const result = await runSearchImpl(query, config, { days: config.days, extra: config.extra });
     const cards = result?.sources?.extra?.length ? result.sources.extra : result?.sources?.merged || [];
     if (!Array.isArray(cards)) {
       const err = new Error("topic search returned a non-list");
       err.code = "investigate-invalid-json";
       throw err;
     }
+    // 2026-10-30 P2: these titles flow decideField → renderInvestigationInput →
+    // the synth query, i.e. OUTSIDE the <untrusted-source> wrapper and its
+    // sanitize-at-render pass — the one search inlet that skipped the injection
+    // sanitizer. A SEO-seeded title could land "ignore previous instructions"
+    // in the model's trusted zone. Sanitize at the inlet like every other
+    // search text in the pipeline; injection-only titles drop out entirely.
     return cards
       .filter((c) => c && c.url && c.title)
-      .map((c) => ({ value: c.title, url: c.url, title: c.title }));
+      .map((c) => ({ value: sanitizeSnippet(c.title), url: c.url, title: sanitizeSnippet(c.title) }))
+      .filter((h) => h.value);
   };
 }
 

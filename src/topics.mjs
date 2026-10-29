@@ -141,7 +141,23 @@ function gradeOne(topic, date) {
   const text = [topic.title, ...topic.cards.map((c) => `${c.title || ""}\n${c.snippet || ""}`)].join("\n");
   const eventKind = EVENT_KINDS.find(([, re]) => re.test(text))?.[0] || null;
   const hedged = HEDGED.test(text);
-  const stale = Boolean(topic.publishedAt && date && String(topic.publishedAt) < date);
+  // 2026-10-30 P2: publishedAt is an EPOCH (ms) for hard sources and an ISO
+  // string elsewhere — string-comparing either against a "YYYY-MM-DD" date made
+  // every dated hard-source topic stale ("1" < "2"), which zeroed the A/B
+  // candidate pool and had the investigation preamble tell the model there was
+  // nothing verifiable today. Compare epochs against the report day's Beijing
+  // midnight instead; unparseable values stay un-staled (fail-open), matching
+  // the recency window's own treatment of timestamp-less cards.
+  const publishedMs = typeof topic.publishedAt === "number"
+    ? topic.publishedAt
+    : Date.parse(topic.publishedAt);
+  const dayStartMs = date ? Date.parse(`${date}T00:00:00+08:00`) : NaN;
+  const stale = Boolean(
+    publishedMs &&
+    Number.isFinite(publishedMs) &&
+    Number.isFinite(dayStartMs) &&
+    publishedMs < dayStartMs,
+  );
   if (topic.provenance === "repo" || DIRECTORY.test(text) || NO_FACT.test(text)) {
     return { grade: "D", eventKind };
   }
