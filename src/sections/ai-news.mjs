@@ -289,10 +289,14 @@ async function gemSearch(query, config) {
   return renderSources(cards);
 }
 
-export function resolveFallbackCandidates({ config, model, name = "AI", channel = null, isAlt = false } = {}) {
+// Cross-provider synthesis fallback policy. `isAlt` flips the branch: the alt
+// channel falls back to the primary synthModel then synthFallbackModel; the
+// main channel gets synthFallbackModel → aiAltModel → hardcoded backstops.
+// Branch on the explicit flag only — never the note name (a renamed or custom
+// main channel must keep its backstop ladder).
+export function resolveFallbackCandidates({ config, model, isAlt = false } = {}) {
   const fallbackCandidates = [];
-  const isAltChannel = Boolean(channel || isAlt || name === "ai-alt" || (name !== "AI" && name !== "AI-周报"));
-  if (isAltChannel) {
+  if (isAlt) {
     // Alt channel falls back to primary synthModel, then fallbackModel
     if (config?.synthModel && config.synthModel !== model) {
       fallbackCandidates.push(config.synthModel);
@@ -330,7 +334,6 @@ export async function aiNewsSection(
     title,
     synthTimeoutMs = config.synthTimeoutMs,
     synthMaxTokens = config.synthMaxTokens,
-    channel = null,
     isAlt = false,
   } = {},
 ) {
@@ -575,7 +578,7 @@ export async function aiNewsSection(
 
       // Cross-provider fallback ladder: engage if primary (or retry) failed
       if (!synthesized) {
-        const fallbackCandidates = resolveFallbackCandidates({ config, model, name, channel, isAlt });
+        const fallbackCandidates = resolveFallbackCandidates({ config, model, isAlt });
 
         let lastErr = e;
         for (const fb of fallbackCandidates) {

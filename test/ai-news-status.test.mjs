@@ -285,7 +285,7 @@ test("H1: a healthy run produces no labels at all", () => {
 
 // --- resolveFallbackCandidates (pure fallback ladder resolution) ---
 
-test("resolveFallbackCandidates: main channel prioritizes synthFallbackModel, aiAltModel, and backstops without duplicates", () => {
+test("resolveFallbackCandidates: main channel dedupes synthFallbackModel/aiAltModel and drops the current model", () => {
   const config = {
     synthModel: "gemini-3.8-flash",
     synthFallbackModel: "deepseek-v4-flash",
@@ -294,13 +294,11 @@ test("resolveFallbackCandidates: main channel prioritizes synthFallbackModel, ai
   const candidates = resolveFallbackCandidates({
     config,
     model: "gemini-3.8-flash",
-    name: "AI",
   });
-  // Should include deepseek-v4-flash once and exclude gemini-3.8-flash (current model)
   assert.deepEqual(candidates, ["deepseek-v4-flash"]);
 });
 
-test("resolveFallbackCandidates: main channel includes distinct fallback models and backstops", () => {
+test("resolveFallbackCandidates: main channel ladder is fallback → alt → backstops without duplicates", () => {
   const config = {
     synthModel: "gemini-3.8-flash",
     synthFallbackModel: "gpt-5.6-luna",
@@ -309,25 +307,37 @@ test("resolveFallbackCandidates: main channel includes distinct fallback models 
   const candidates = resolveFallbackCandidates({
     config,
     model: "gemini-3.8-flash",
-    name: "AI",
   });
   assert.deepEqual(candidates, ["gpt-5.6-luna", "claude-4", "deepseek-v4-flash"]);
 });
 
-test("resolveFallbackCandidates: alt channel falls back to synthModel and synthFallbackModel", () => {
+test("resolveFallbackCandidates: isAlt flips to the alt branch (exact production wiring shape)", () => {
+  // 2026-10-30: resolveAltChannel sets isAlt:true and aiNewsSection threads it
+  // straight through — this is the shape the scheduled run actually produces
+  // (alt model deepseek-v4-flash, fallback candidates = the primary writer).
   const config = {
     synthModel: "gemini-3.8-flash",
-    synthFallbackModel: "gpt-5.6-luna",
-    aiAltModel: "deepseek-v4-flash",
+    synthFallbackModel: "deepseek-v4-flash",
   };
   const candidates = resolveFallbackCandidates({
     config,
     model: "deepseek-v4-flash",
-    name: "AI-DeepSeek",
-    channel: "deepseek",
     isAlt: true,
   });
-  assert.deepEqual(candidates, ["gemini-3.8-flash", "gpt-5.6-luna"]);
+  assert.deepEqual(candidates, ["gemini-3.8-flash"]);
+});
+
+test("resolveFallbackCandidates: alt branch has no backstops — empty ladder when config offers nothing new", () => {
+  const config = {
+    synthModel: "deepseek-v4-flash",
+    synthFallbackModel: "deepseek-v4-flash",
+  };
+  const candidates = resolveFallbackCandidates({
+    config,
+    model: "deepseek-v4-flash",
+    isAlt: true,
+  });
+  assert.deepEqual(candidates, []);
 });
 
 test("resolveFallbackCandidates: safe with empty options and undefined config", () => {

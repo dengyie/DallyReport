@@ -595,6 +595,10 @@ export function resolveAltChannel(config) {
   // review).
   return {
     name: altChannelNoteName(config, slug),
+    // Explicit alt marker for the synthesis fallback ladder
+    // (resolveFallbackCandidates). The branch keys off this flag ONLY — never
+    // off the note name, so a custom main-channel name keeps main semantics.
+    isAlt: true,
     model,
     queryTemplate: config.aiAltQueryTemplate || config.aiQueryTemplate,
     // Alt writers are slower than grok-4.5 on /chat/completions, so they get a

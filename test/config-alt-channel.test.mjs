@@ -84,6 +84,17 @@ test("resolveAltChannel: carries the alt synthesis timeout budget", () => {
   assert.equal(ch.synthTimeoutMs, 300000);
 });
 
+test("resolveAltChannel: always marks the channel isAlt for the fallback ladder", () => {
+  // 2026-10-30: the synthesis fallback ladder (resolveFallbackCandidates)
+  // branches on this explicit flag — never on the note name — so
+  // resolveAltChannel must carry it on every shape it returns.
+  assert.equal(resolveAltChannel({ aiAltChannel: true, date: "2026-08-06" }).isAlt, true);
+  assert.equal(
+    resolveAltChannel({ aiAltChannel: true, date: "2026-10-30", aiAltModel: "grok-4.5" }).isAlt,
+    true,
+  );
+});
+
 // 2026-10-07 P2 / revised 2026-10-07 live-test: the alt channel carries its
 // own completion budget via resolveAltChannel, threaded to the synthesis call
 // (ai-news.mjs reads `synthMaxTokens`). The original separate knob (default
