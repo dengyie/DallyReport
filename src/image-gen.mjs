@@ -148,13 +148,16 @@ export function sipsDownscale(
           /* ignore */
         }
       }, graceMs);
-      killTimer.unref?.();
       settled = true;
       clearTimeout(timer);
       cleanup();
       resolve(null);
     }, timeoutMs);
-    timer.unref?.();
+    // Not unref'd: this timer is the timeout's only enforcement when the
+    // (test-injected) child holds no event-loop handle — unref'd, the loop
+    // drains first and the caller's await can never settle (CI's first Linux
+    // run, 2026-10-30). The finally-free timeout path resolves right here, so
+    // holding the loop costs at most timeoutMs.
   });
 }
 

@@ -432,7 +432,13 @@ async function searchWithBudget(searchImpl, query, deadline) {
       reject(err);
     }, remaining);
   });
-  timer.unref?.();
+  // Deliberately NOT unref'd: this timer IS the deadline's enforcement. If the
+  // search hangs with no other event-loop handle (exactly what the hanging
+  // searchImpl test models), an unref'd timer fires into an already-drained
+  // loop — the deadline never lands and the caller's await is stuck on a
+  // promise that can never settle (CI's first Linux run, 2026-10-30). Holding
+  // the loop costs at most `remaining` ms past the last real event, bounded by
+  // the budget; the finally clears it as soon as the race settles.
   try {
     // searchImpl must be invoked INSIDE the try: a synchronously-throwing
     // implementation would otherwise skip the finally, leaving the budget timer
