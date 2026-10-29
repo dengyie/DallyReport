@@ -1,4 +1,4 @@
-// Daily source fetchers: hacker news, 36kr, arXiv — zero-config public APIs/RSS.
+// Daily source fetchers: hacker news, arXiv, vendor/aggregator RSS — zero-config public APIs.
 // These are "same-day hard sources" that provide a stable baseline of ≥10 sources
 // even when linux.do / community forums have a quiet day.
 //
@@ -30,8 +30,8 @@ export function normalizeFeedUrl(value) {
     // Trim ONE trailing slash so `https://x.com/` and `https://x.com` unify (the
     // root path `/` stays, since `a/` → `a` is the dedupe-friendly form).
     const normalized = `${u.origin}${pathname === "/" ? "/" : pathname.replace(/\/$/, "")}`;
-    // Keep query + hash (36kr article URLs carry a `/feed` marker in the path,
-    // and some feeds put the article id in the query).
+    // Keep query + hash: some feeds carry routing markers or the article id in
+    // the query, and collapsing them would merge distinct articles.
     return `${normalized}${u.search}${u.hash}`;
   } catch {
     return raw;
@@ -60,9 +60,9 @@ function attachDailyDiagnostics(sources, provider, failures) {
 // outcome still invisible. A fetcher that reaches the network, parses a
 // well-formed body and ends up with [] returned a bare array, and
 // attachDailyDiagnostics' `!failures.length` early-return then skipped it — so
-// 36kr, arXiv and HN could go completely quiet and the report still printed a
+// arXiv and HN could go completely quiet and the report still printed a
 // clean ✅ over forum chatter. The vendor RSS path already named this case
-// (H1, 2026-09-28); this brings the remaining three onto the same footing.
+// (H1, 2026-09-28); this brings the remaining sources onto the same footing.
 //
 // `parsed` is how many entries the body actually yielded, so the diagnostic can
 // distinguish "the feed is empty" from "the feed had entries and the window

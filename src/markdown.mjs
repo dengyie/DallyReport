@@ -53,10 +53,6 @@ export function sanitizeUrl(value) {
   }
 }
 
-export function escapeUrl(value) {
-  return String(value).replace(/[\\<>]/g, "\\$&");
-}
-
 export function table(headers, rows) {
   const head = `| ${headers.join(" | ")} |`;
   const sep = `| ${headers.map(() => "---").join(" | ")} |`;

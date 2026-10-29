@@ -1,6 +1,6 @@
 import { runSearch, redactSecrets } from "../grok-cli.mjs";
 import { frontMatter, stripMarkdown, sanitizeUrl } from "../markdown.mjs";
-import { assertGrokCreds } from "../config.mjs";
+import { assertGrokCreds, SYNTH_BACKSTOP_MODELS } from "../config.mjs";
 import { synthesizeFromSources, synthesizeWithWebSearch, renderSources } from "../llm-synthesize.mjs";
 import { fetchLinuxDoAiSources, mergeSourcesPreferLinuxDo } from "../linuxdo.mjs";
 import { fetchNodeSeekAiSources } from "../nodeseek.mjs";
@@ -336,7 +336,7 @@ export function resolveFallbackCandidates({ config, model, isAlt = false } = {})
     if (config?.aiAltModel && config.aiAltModel !== model && !fallbackCandidates.includes(config.aiAltModel)) {
       fallbackCandidates.push(config.aiAltModel);
     }
-    for (const backstop of ["deepseek-v4-flash", "gemini-3.8-flash"]) {
+    for (const backstop of SYNTH_BACKSTOP_MODELS) {
       if (backstop !== model && !fallbackCandidates.includes(backstop)) {
         fallbackCandidates.push(backstop);
       }

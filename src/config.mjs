@@ -30,6 +30,12 @@ const DEFAULT_OBSIDIAN_DIR = HOST_DEFAULTS.obsidianDir;
 // /responses, so it is listed in KNOWN_BAD_MODELS below and must be probed out
 // rather than shipped as the default.
 export const DEFAULT_SYNTH_MODEL = "gemini-3.8-flash";
+
+// The cross-provider backstop ladder for synthesis — the single source of
+// truth for the model pair. Consumed by (a) the synthFallbackModel default
+// derivation below and (b) resolveFallbackCandidates' main-channel tail in
+// ai-news.mjs. A gateway model rename is edited HERE and nowhere else.
+export const SYNTH_BACKSTOP_MODELS = ["deepseek-v4-flash", "gemini-3.8-flash"];
 const DEFAULT_SYNTH_MAX_TOKENS = 4000;
 const DEFAULT_SYNTH_TIMEOUT_MS = 90000;
 
@@ -458,7 +464,7 @@ export function loadConfig({ date = null, mode = null } = {}) {
       if (raw && raw !== primary) return raw;
       if (raw && raw === primary) {
         // Fallback cannot be identical to primary - switch to alternate provider
-        return primary.startsWith("gemini") ? "deepseek-v4-flash" : "gemini-3.8-flash";
+        return SYNTH_BACKSTOP_MODELS.find((m) => m !== primary) || SYNTH_BACKSTOP_MODELS[0];
       }
       return raw || (primary.startsWith("gemini") ? "deepseek-v4-flash" : "grok-4.5");
     })(),
