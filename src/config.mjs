@@ -244,7 +244,7 @@ export function loadConfig({ date = null, mode = null } = {}) {
     // Topic investigation sits between recency filtering and synthesis. Off
     // (the default) keeps the one-shot synthesis of every surviving card.
     topicInvestigation: (val("TOPIC_INVESTIGATION") || "off").toLowerCase() === "on",
-    // --- daily hard sources (HN/36kr/arXiv, zero-config public APIs) ---
+    // --- daily hard sources (HN/arXiv/vendor RSS, zero-config public APIs) ---
     // These provide a stable baseline of ≥10 same-day sources so the model never
     // has to hallucinate from memory on quiet days. Each has an independent
     // enable/disable switch and a per-source limit.
@@ -257,8 +257,9 @@ export function loadConfig({ date = null, mode = null } = {}) {
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
     hnDailyLimit: int("HN_DAILY_LIMIT", weekly ? 12 : 10),
-    // 2026-08-11 硬关：36kr 经 Firecrawl 的 URL 被重写为 feed 首页，所有条目 URL
-    // 相同导致去重合并。待稳定 provider 或 raw RSS 绕过 WAF 后再恢复。
+    // (The 2026-08-11 36kr source was removed on 2026-10-30: Firecrawl rewrote
+    // every entry URL to the feed front page so dedup collapsed the day, and the
+    // switch was hardcoded off its whole life. See .env.example for the note.)
     arxivDailyEnabled: (() => {
       const raw = val("ARXIV_DAILY_ENABLED");
       if (raw == null) return true;
@@ -363,7 +364,7 @@ export function loadConfig({ date = null, mode = null } = {}) {
       return raw === "1" || raw.toLowerCase() === "true";
     })(),
     // Max linux.do source cards fed into synthesis (separate from sourceMaxTotal).
-    // Kept bounded (default 4) so forum chatter never crowds out hard news sources (HN/36kr/arXiv).
+    // Kept bounded (default 4) so forum chatter never crowds out hard news sources (HN/arXiv/vendor RSS).
     // Set to 0 to cap linux.do to the same pool as other sources.
     linuxdoMaxSources: int("LINUXDO_MAX_SOURCES", 4),
     // Optional login cookie for linux.do (raw Cookie header value, e.g. `_t=...; _u=...`).
