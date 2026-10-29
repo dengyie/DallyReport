@@ -181,7 +181,18 @@ export async function fetchHackerNewsDaily(config, { limit = 5, fetchImpl = fetc
       const arr = await resp.json();
       if (Array.isArray(arr)) ids.push(...arr);
     }
-    if (ids.length === 0) return [];
+    if (ids.length === 0) {
+      // 2026-10-30 P2: both list endpoints dead (non-ok / non-array) used to
+      // return a bare [], bypassing this module's diagnostics contract — a full
+      // HN outage printed a clean ✅ over forum chatter, the exact shape the
+      // 2026-09-26 P2 fix was built to prevent. reportEmpty will not overwrite
+      // this diagnostics entry, so it is the one the summary shows.
+      return reportEmpty(
+        attachDailyDiagnostics([], "hackernews", [{ reason: "list-endpoints-empty" }]),
+        "hackernews",
+        0,
+      );
+    }
     // Dedup by id while preserving rank (top first, then best's unique ones).
     const seen = new Set();
     const unique = [];
@@ -197,21 +208,34 @@ export async function fetchHackerNewsDaily(config, { limit = 5, fetchImpl = fetc
     // window's own lower bound.
     const win = materialWindow(config);
 
-    // Fetch item details with bounded concurrency, cap at HN_BATCH.
+    // Fetch item details with bounded concurrency, cap at HN_BATCH. One jittered
+    // retry per item: the weekly window fans this out to window-days × HN_BATCH
+    // requests against a single host with no backoff, and firebase throttling
+    // under that load showed up as 1–25 intermittent failures a day, each
+    // silently shrinking the candidate pool before the AI filter. A bounded
+    // second attempt keeps the pool whole; the second failure is still recorded.
+    // Non-ok responses record too — they used to vanish without a trace.
     const batch = unique.slice(0, Math.max(HN_BATCH, win.days * HN_BATCH));
-    const items = await mapWithConcurrency(batch, HN_ITEM_CONCURRENCY, async (id) => {
-      try {
-        const r = await fetchImpl(HN_ITEM(id), {
-          signal: AbortSignal.timeout(HN_FETCH_TIMEOUT_MS),
-        });
-        return r.ok ? r.json() : null;
-      } catch (err) {
-        // A timed-out / throttled item is expected under load; record it so a
-        // fully-degraded HN run is still visible instead of looking like a quiet day.
-        failures.push({ id, reason: err?.code || err?.name || "error" });
-        return null;
+    const fetchItem = async (id) => {
+      let lastReason = "error";
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const r = await fetchImpl(HN_ITEM(id), {
+            signal: AbortSignal.timeout(HN_FETCH_TIMEOUT_MS),
+          });
+          if (r.ok) return await r.json();
+          lastReason = `HTTP ${r.status}`;
+        } catch (err) {
+          lastReason = err?.code || err?.name || "error";
+        }
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 200 + Math.floor(Math.random() * 200)));
+        }
       }
-    });
+      failures.push({ id, reason: lastReason });
+      return null;
+    };
+    const items = await mapWithConcurrency(batch, HN_ITEM_CONCURRENCY, fetchItem);
 
     const sources = [];
     for (const result of items) {
@@ -304,92 +328,14 @@ function isAiRelevant(title, url) {
   return AI_RELEVANT_RE.test(text);
 }
 
-// --- 36kr RSS (zero-config, Chinese tech news) ---
-
-const KR_36_FEED = "https://36kr.com/feed";
-
 // --- Official vendor blogs (RSS, zero-config) ---
 // OpenAI News + Hugging Face Blog are first-party, same-day sources with proper
-// URLs and pubDates (unlike 36kr through Firecrawl). High signal, no WAF issues.
+// URLs and pubDates. High signal, no WAF issues.
 
 const OPENAI_FEED = "https://openai.com/news/rss.xml";
 const HF_FEED = "https://huggingface.co/blog/feed.xml";
 const GOOGLE_AI_FEED = "https://blog.google/technology/ai/rss";
 const GOOGLE_RESEARCH_FEED = "https://research.google/blog/rss";
-
-/**
- * Fetch today's 36kr feed, filter by AI relevance, return same-day sources.
- * 36kr's bare URL is WAF-protected (火山引擎 challenge) for direct fetches, so we
- * go through the provider stack (Tavily/Firecrawl) which returns a markdown-style
- * listing of `### [Title](url)` lines, parsed below. Falls back to RSS XML parsing
- * if a provider returns raw XML instead.
- */
-export async function fetch36krDaily(config, { limit = 5, runFetch: doFetch } = {}) {
-  try {
-    const fetch = doFetch || runFetch;
-    // Note: Firecrawl/Tavily render pages as markdown with `### [Title](url)` rows.
-    const res = await fetch(KR_36_FEED, config, {
-      maxChars: 20000,
-      provider: "auto",
-      cacheFile: config.cacheDir
-        ? `${config.cacheDir}/${cacheKeyFor(config)}-36kr-feed.txt`
-        : undefined,
-    });
-    const text = res?.text || "";
-    if (!text) return [];
-
-    const win = materialWindow(config);
-
-    // 1) Firecrawl/Tavily markdown style: `### [Title](url)` lines
-    const items = [];
-    const mdRe = /###\s*\[([^\]]+)\]\(([^)]+)\)/g;
-    let m;
-    while ((m = mdRe.exec(text)) !== null) {
-      items.push({ title: m[1].trim(), url: m[2].trim() });
-    }
-
-    // 2) RFC-822 RSS XML fallback (only when markdown parse found nothing).
-    if (items.length === 0) {
-      const rssItemRegex = /<item>([\s\S]*?)<\/item>/gi;
-      while ((m = rssItemRegex.exec(text)) !== null) {
-        items.push({
-          title: extractTag(m[1], "title"),
-          url: extractTag(m[1], "link"),
-          pubDate: extractTag(m[1], "pubDate") || "",
-          summary: feedExcerpt(m[1]),
-        });
-      }
-    }
-
-    const sources = [];
-    for (const item of items) {
-      const title = (item.title || "").trim();
-      const url = normalizeFeedUrl((item.url || "").trim());
-      if (!title || !url) continue;
-      if (!isAiRelevant(title, url)) continue;
-
-      // Markdown rows carry no pubDate — treat as same-day (fetched live now).
-      const publishedAt =
-        item.pubDate && new Date(item.pubDate).getTime()
-          ? new Date(item.pubDate).getTime()
-          : Date.now();
-      if (item.pubDate && (publishedAt < win.startMs || publishedAt >= win.endMs)) continue;
-
-      sources.push({
-        url,
-        title: title.slice(0, 300),
-        snippet: excerptSnippet(item.summary, title) || title.slice(0, 500),
-        provider: "36kr",
-        score: 0,
-        publishedAt,
-      });
-      if (sources.length >= limit) break;
-    }
-    return reportEmpty(sources, "36kr", items.length);
-  } catch (err) {
-    return attachDailyDiagnostics([], "36kr", [{ reason: err?.code || err?.name || "error" }]);
-  }
-}
 
 function extractTag(xml, tag) {
   const re = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i");
@@ -823,17 +769,6 @@ export function interleaveAndCap(parts, cap) {
 }
 
 /**
- * Compute the epoch ms of midnight (Beijing time) for a given date string.
- * Used to filter sources by "today's content".
- */
-export function beijingMidnightMs(dateStr) {
-  // dateStr is "YYYY-MM-DD" in Beijing calendar
-  const [y, m, d] = dateStr.split("-").map(Number);
-  // Beijing midnight = UTC 16:00 of previous day (UTC+8)
-  return Date.UTC(y, m - 1, d, 0, 0, 0, 0) - 8 * 60 * 60 * 1000;
-}
-
-/**
  * Fetch all daily sources in parallel, each with catch-fallback returning [].
  * Merged into ai-news-section's community sources slot.
  */
@@ -844,14 +779,11 @@ export async function fetchAllDailySources(config) {
   // .env saw no effect and no warning. `aggregateDailySourceLimit` had no
   // consumer at all, leaving the merged pool unbounded.
   const [
-    hn, kr36, arxiv, openai, hf, googleAi, googleResearch,
+    hn, arxiv, openai, hf, googleAi, googleResearch,
     techcrunch, verge, qbitai, infoqCn,
   ] = await Promise.all([
     config.hnDailyEnabled !== false
       ? fetchHackerNewsDaily(config, { limit: config.hnDailyLimit }).catch(() => [])
-      : Promise.resolve([]),
-    config.kr36DailyEnabled !== false
-      ? fetch36krDaily(config, { limit: config.kr36DailyLimit }).catch(() => [])
       : Promise.resolve([]),
     config.arxivDailyEnabled !== false
       ? fetchArxivDaily(config, { limit: config.arxivDailyLimit }).catch(() => [])
@@ -888,7 +820,7 @@ export async function fetchAllDailySources(config) {
       : Promise.resolve([]),
   ]);
   const parts = [
-    hn, kr36, arxiv, openai, hf, googleAi, googleResearch,
+    hn, arxiv, openai, hf, googleAi, googleResearch,
     techcrunch, verge, qbitai, infoqCn,
   ];
   const merged = parts.flat();

@@ -1,11 +1,9 @@
-// Daily hard-source fetchers (HN / 36kr / arXiv) — parse & filter logic.
+// Daily hard-source fetchers (HN / arXiv) — parse & filter logic.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   fetchHackerNewsDaily,
-  fetch36krDaily,
   fetchArxivDaily,
-  beijingMidnightMs,
   fetchAllDailySources,
   fetchOfficialBlogRss,
   fetchOpenaiDaily,
@@ -40,11 +38,6 @@ const FEED_XML = `<?xml version="1.0"?><rss version="2.0"><channel>
     <pubDate>Mon, 10 Aug 2026 08:00:00 GMT</pubDate>
   </item>
 </channel></rss>`;
-
-test("beijingMidnightMs: 08-10 Beijing midnight = 08-09T16:00Z", () => {
-  assert.equal(beijingMidnightMs(TODAY), Date.UTC(2026, 7, 9, 16, 0, 0));
-  assert.equal(beijingMidnightMs("2026-01-01"), Date.UTC(2025, 11, 31, 16, 0, 0));
-});
 
 // --- HN ---
 
@@ -98,6 +91,76 @@ test("HN: API failure -> [] (never throws)", async () => {
   }
 });
 
+test("HN: both list endpoints dead is reported, not a silent quiet day", async () => {
+  // 2026-10-30 P2: topstories + beststories both responding non-ok used to
+  // return a bare [] with NO diagnostics — a full HN outage printed a clean ✅.
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: false, status: 503 });
+  try {
+    const out = await fetchHackerNewsDaily({ date: TODAY });
+    assert.deepEqual(out, []);
+    const diag = out.dailyDiagnostics;
+    assert.ok(diag, "the outage must ride diagnostics on the returned array");
+    assert.equal(diag.provider, "hackernews");
+    assert.equal(diag.failureCount, 1);
+    assert.equal(diag.failures[0].reason, "list-endpoints-empty");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("HN: a throttled item recovers on the jittered retry", async () => {
+  // 2026-10-30 P2: single-shot item fetches under the weekly fan-out lost 1–25
+  // items a day to firebase throttling, silently shrinking the candidate pool.
+  // One bounded retry keeps the item; a persistent failure is still recorded.
+  const todaySec = Math.floor(Date.UTC(2026, 7, 9, 20, 0, 0) / 1000);
+  const items = [
+    { title: "AI story flaky", url: "https://flaky.example", type: "story", time: todaySec },
+    { title: "AI story solid", url: "https://solid.example", type: "story", time: todaySec },
+  ];
+  const original = globalThis.fetch;
+  const itemCalls = new Map();
+  globalThis.fetch = async (url) => {
+    if (url.includes("topstories") || url.includes("beststories")) {
+      return { ok: true, json: async () => items.map((_, i) => i + 1) };
+    }
+    const id = Number(url.match(/item\/(\d+)\.json/)?.[1] || 0);
+    itemCalls.set(id, (itemCalls.get(id) || 0) + 1);
+    // Item 1 throttles on the FIRST attempt only; item 2 always answers.
+    if (id === 1 && itemCalls.get(id) === 1) {
+      return { ok: false, status: 503, json: async () => null };
+    }
+    const item = items[id - 1];
+    return { ok: true, json: async () => item ?? null };
+  };
+  try {
+    const out = await fetchHackerNewsDaily({ date: TODAY }, { limit: 5 });
+    assert.equal(out.filter((s) => s.url?.includes("flaky")).length, 1, "the retried item must survive");
+    assert.equal(itemCalls.get(1), 2, "exactly one retry, not an unbounded loop");
+    assert.equal(out.dailyDiagnostics?.failureCount ?? 0, 0, "a recovered item is not a failure");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("HN: an item that fails twice is recorded once with the last reason", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (url.includes("topstories") || url.includes("beststories")) {
+      return { ok: true, json: async () => [1] };
+    }
+    return { ok: false, status: 429, json: async () => null };
+  };
+  try {
+    const out = await fetchHackerNewsDaily({ date: TODAY }, { limit: 5 });
+    assert.deepEqual(out, []);
+    assert.equal(out.dailyDiagnostics?.failureCount, 1);
+    assert.equal(out.dailyDiagnostics.failures[0].reason, "HTTP 429", "non-ok responses are no longer invisible");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("HN: limit caps output", async () => {
   const todaySec = Math.floor(Date.UTC(2026, 7, 9, 20, 0, 0) / 1000);
   const items = [
@@ -107,56 +170,6 @@ test("HN: limit caps output", async () => {
   ];
   const sources = await hnHarness(items, { limit: 2 });
   assert.equal(sources.length, 2);
-});
-
-// --- 36kr ---
-
-const KR36_SAMPLE = `<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0"><channel><title>36氪</title>
-<item>
-<title><![CDATA[OpenAI 发布新一代推理模型]]></title>
-<link>https://36kr.com/p/123</link>
-<description><![CDATA[<p>今日 OpenAI 发布新模型，推理能力大幅提升。</p>]]></description>
-<pubDate>Mon, 10 Aug 2026 01:00:00 +0800</pubDate>
-</item>
-<item>
-<title><![CDATA[某公司融资 5000 万]]></title>
-<link>https://36kr.com/p/456</link>
-<description><![CDATA[非 AI 内容。]]></description>
-<pubDate>Mon, 10 Aug 2026 02:00:00 +0800</pubDate>
-</item>
-<item>
-<title><![CDATA[大模型落地制造业案例]]></title>
-<link>https://36kr.com/p/789</link>
-<description><![CDATA[AI 相关。]]></description>
-<pubDate>Thu, 06 Aug 2026 10:00:00 +0800</pubDate>
-</item>
-</channel></rss>`;
-
-test("36kr: parses same-day AI items, strips CDATA/HTML, drops stale", async () => {
-  const config = { date: TODAY, cacheDir: "/tmp/nonexistent-cache-dir-xyz" };
-  const sources = await fetch36krDaily(config, {
-    runFetch: async () => ({ text: KR36_SAMPLE }),
-    limit: 5,
-  });
-  assert.ok(sources.length >= 1);
-  const openai = sources.find((s) => s.title.includes("OpenAI"));
-  assert.ok(openai, "OpenAI item should pass AI filter");
-  assert.equal(openai.provider, "36kr");
-  assert.equal(openai.snippet.includes("<p>"), false, "HTML stripped");
-  // The 大模型 item (08-06 10:00 +0800 = 08-06) is before 08-08 midnight (outside 3-day window) → should
-  // be excluded by the fetcher's window gate.
-  assert.ok(!sources.some((s) => s.title.includes("大模型")), "stale item dropped");
-});
-
-test("36kr: fetch failure -> [] (never throws)", async () => {
-  const config = { date: TODAY };
-  const out = await fetch36krDaily(config, {
-    runFetch: async () => {
-      throw new Error("boom");
-    },
-  });
-  assert.deepEqual(out, []);
 });
 
 // --- arXiv ---
@@ -848,14 +861,6 @@ test("H2: an old story on these feeds is filtered out by the window", async () =
 // defect in the other direction.
 // ---------------------------------------------------------------------------
 
-const STALE_ONLY_FEED = `<?xml version="1.0"?><rss version="2.0"><channel>
-  <item>
-    <title>三月的老新闻</title>
-    <link>https://36kr.com/p/1</link>
-    <pubDate>Mon, 02 Mar 2026 08:00:00 GMT</pubDate>
-    <description><![CDATA[OpenAI 发布新模型。]]></description>
-  </item></channel></rss>`;
-
 const STALE_ONLY_ARXIV = `<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
 <entry>
@@ -864,27 +869,6 @@ const STALE_ONLY_ARXIV = `<?xml version="1.0" encoding="UTF-8"?>
 <summary>Old.</summary>
 <published>2026-03-02T02:00:00Z</published>
 </entry></feed>`;
-
-test("36kr: an empty result is reported, not silent", async () => {
-  const out = await fetch36krDaily(
-    { date: TODAY, cacheDir: "/tmp/nonexistent-cache-dir-xyz" },
-    { runFetch: async () => ({ text: STALE_ONLY_FEED }) },
-  );
-  assert.equal(out.length, 0);
-  // attachDailyDiagnostics' shape on a SINGLE fetcher is flat
-  // {provider, failures, failureCount}; collectDailyDiagnostics is what nests it
-  // by provider for fetchAllDailySources.
-  const diag = out.dailyDiagnostics;
-  assert.ok(diag, "an empty 36kr result must carry diagnostics");
-  assert.equal(diag.provider, "36kr");
-  assert.equal(diag.failureCount, 1);
-  assert.equal(
-    diag.failures[0].reason,
-    "no-fresh-items-in-window",
-    "the cause is the window, not the network",
-  );
-  assert.equal(diag.failures[0].parsed, 1, "the feed did yield an entry — the window dropped it");
-});
 
 test("arXiv: an empty result is reported, not silent", async () => {
   const out = await fetchArxivDaily(
@@ -923,12 +907,13 @@ test("HN: an empty result is reported, not silent", async () => {
 });
 
 test("a healthy fetcher stays silent: no diagnostics on a populated result", async () => {
-  // Contrast with the three above. Attaching "no-fresh-items-in-window" to a
-  // successful collection would print a starvation warning over a good day.
-  const out = await fetch36krDaily(
-    { date: TODAY, cacheDir: "/tmp/nonexistent-cache-dir-xyz" },
-    { runFetch: async () => ({ text: KR36_SAMPLE }) },
-  );
+  // Contrast with the empty/failed cases above. Attaching
+  // "no-fresh-items-in-window" to a successful collection would print a
+  // starvation warning over a good day. (36kr, the original vehicle, is gone —
+  // see the fetch36krDaily removal.)
+  const out = await hnHarness([
+    { title: "GPT-5.6 arrives", url: "https://openai.com", type: "story", time: Math.floor(Date.UTC(2026, 7, 9, 20, 0, 0) / 1000) },
+  ]);
   assert.ok(out.length > 0, "fixture must actually produce sources");
   assert.equal(out.dailyDiagnostics, undefined, "a populated result carries no diagnostics");
 });
