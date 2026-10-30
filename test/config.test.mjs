@@ -17,6 +17,7 @@ const ENV_KEYS = [
   "IMAGE_SIPS_TIMEOUT_MS",
   "GROK_DAYS",
   "GROK_MODEL",
+  "LINUXDO_DEEP_FETCH_BUDGET_MS",
 ];
 
 async function withEnv(values, fn) {
@@ -57,6 +58,24 @@ test("loadConfig: derives portable defaults from the current host", async () => 
     assert.match(config.imageRefImage, /Pasted image 20260804185819\.png$/);
     assert.equal(config.imageEnabled, true);
     assert.equal(config.aiImageEnabled, config.imageEnabled);
+  });
+});
+
+test("loadConfig: LINUXDO_DEEP_FETCH_BUDGET_MS unset -> null (window-scaled default wins)", async () => {
+  // 2026-10-30: the module default scales with the report window (daily 300s /
+  // weekly 600s). A numeric fallback here would pin 300000 into every config and
+  // silently disable the weekly scaling -- lock the nullable contract.
+  await withEnv({ LINUXDO_DEEP_FETCH_BUDGET_MS: null }, async () => {
+    const config = loadConfig({ date: "2026-08-01" });
+    assert.equal(config.linuxdoDeepFetchBudgetMs, null);
+  });
+  await withEnv({ LINUXDO_DEEP_FETCH_BUDGET_MS: "120000" }, async () => {
+    const config = loadConfig({ date: "2026-08-01" });
+    assert.equal(config.linuxdoDeepFetchBudgetMs, 120000);
+  });
+  await withEnv({ LINUXDO_DEEP_FETCH_BUDGET_MS: "0" }, async () => {
+    const config = loadConfig({ date: "2026-08-01" });
+    assert.equal(config.linuxdoDeepFetchBudgetMs, 0);
   });
 });
 

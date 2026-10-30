@@ -392,7 +392,13 @@ export function loadConfig({ date = null, mode = null } = {}) {
     // partial-return contract enrichLinuxdoPosts uses for its own budget, so a
     // slow upstream costs enrichment depth, not the whole report.
     // 0 = no ceiling.
-    linuxdoDeepFetchBudgetMs: int("LINUXDO_DEEP_FETCH_BUDGET_MS", 300000),
+    // null (env unset) = use the module default, which scales with the report
+    // window (daily 300s / weekly 600s — see deepFetchBudgetMs in linuxdo.mjs).
+    // A numeric fallback here would pin the default in config and silently
+    // disable the weekly scaling (2026-10-30).
+    linuxdoDeepFetchBudgetMs: val("LINUXDO_DEEP_FETCH_BUDGET_MS") == null
+      ? null
+      : int("LINUXDO_DEEP_FETCH_BUDGET_MS", 300000),
     // Post-report enrichment: crawl COMPLETE post bodies (OP + replies) via the
     // Discourse topic JSON API and download attachments into the vault. Disable to
     // keep the run light (scheduled/headless without the 9222 browser).

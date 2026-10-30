@@ -559,10 +559,15 @@ export async function fetchNews34ViaJsonApi(config, deps = {}) {
  */
 // Deep-fetch wall-clock budget (see the call site for the 2026-10-30 weekly
 // reasoning). Daily 5 min, weekly 10 min; an explicit linuxdoDeepFetchBudgetMs
-// in config/.env always wins, and 0 keeps the "no budget" behavior.
+// in config/.env always wins (config maps it to null when the env is unset —
+// a numeric fallback there would pin the daily value and kill the scaling),
+// and 0 keeps the "no budget" behavior.
 export function deepFetchBudgetMs(config = {}) {
-  const explicit = Number(config?.linuxdoDeepFetchBudgetMs);
-  if (Number.isFinite(explicit) && explicit >= 0) return explicit;
+  const raw = config?.linuxdoDeepFetchBudgetMs;
+  if (raw != null) {
+    const explicit = Number(raw);
+    if (Number.isFinite(explicit) && explicit >= 0) return explicit;
+  }
   return config?.reportMode === "weekly" ? 600000 : 300000;
 }
 

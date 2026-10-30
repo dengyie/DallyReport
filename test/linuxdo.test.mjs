@@ -1338,4 +1338,8 @@ test("deepFetchBudgetMs: daily default 5 min, weekly 10 min, explicit config win
   assert.equal(deepFetchBudgetMs({}), 300000);
   assert.equal(deepFetchBudgetMs({ reportMode: "weekly", linuxdoDeepFetchBudgetMs: 120000 }), 120000);
   assert.equal(deepFetchBudgetMs({ reportMode: "daily", linuxdoDeepFetchBudgetMs: 0 }), 0);
+  // config maps the env to null when unset — null must fall through to the
+  // window-scaled default, not be read as a number.
+  assert.equal(deepFetchBudgetMs({ reportMode: "weekly", linuxdoDeepFetchBudgetMs: null }), 600000);
+  assert.equal(deepFetchBudgetMs({ linuxdoDeepFetchBudgetMs: null }), 300000);
 });
