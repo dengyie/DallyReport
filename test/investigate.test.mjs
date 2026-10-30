@@ -11,7 +11,7 @@ import {
   saveTopicCache,
 } from "../src/investigate.mjs";
 import { investigateIfEnabled, assembleInvestigatedBody, defaultSearch } from "../src/sections/ai-news.mjs";
-import { enforceOneTopicPerBullet, fillBareBullets, localizeEnglishBullets, driftsFromTitle, pruneOrphanHeadings } from "../src/topic-bullets.mjs";
+import { enforceOneTopicPerBullet, fillBareBullets, fillThinBullets, localizeEnglishBullets, driftsFromTitle, pruneOrphanHeadings } from "../src/topic-bullets.mjs";
 import { MAX_INPUT_CHARS } from "../src/poster/translate.mjs";
 import { tmpDirSync } from "./helpers/tmp.mjs";
 
@@ -823,6 +823,68 @@ test("fillBareBullets: a glued multi-line bullet is not treated as bare", async 
   const sources = [{ url: "https://example.com/a", title: "A 标题", snippet: "A 的来源摘要，长度足够支撑正文。" }];
   const markdown = "* **A 标题**\n**B 标题**：这是 B 的正文 [1]";
   const out = await fillBareBullets(markdown, { sources });
+  assert.equal(out, markdown);
+});
+
+// 2026-10-30 §9.5.5: the thin-body counterpart. 10-27~29 alt-channel runs wrote
+// bodies that hug the old 60-char prompt floor (mean 103/91/58) — not bare, so
+// fillBareBullets passed them through. fillThinBullets swaps such bodies for the
+// cited source's own materially longer excerpt, and never drops.
+test("fillThinBullets: a floor-hugging body is replaced by the cited source's longer excerpt", async () => {
+  const sources = [
+    { url: "https://example.com/a", title: "Qwen 发布新一代开源模型", snippet: "阿里巴巴通义千问团队发布了新一代开源模型，上下文窗口扩展至 100 万 token，并首次支持原生多模态输入，推理成本较上一代下降约四成。该模型已在 Hugging Face 上开放权重下载，社区评测显示其在代码与数学任务上进步明显。" },
+  ];
+  const markdown = "* **Qwen 发布新一代开源模型**：模型已发布并开放下载 [1]";
+  const out = await fillThinBullets(markdown, { sources });
+  assert.match(out, /推理成本较上一代下降约四成/);
+  assert.match(out, /\[1\]$/);
+  // The thin model body is gone — replaced, not appended to.
+  assert.doesNotMatch(out, /模型已发布并开放下载/);
+});
+
+test("fillThinBullets: a body at or above the floor is untouched", async () => {
+  const sources = [
+    { url: "https://example.com/a", title: "某发布", snippet: "很短的摘要。" },
+  ];
+  const body = "这条要点拥有足够长的正文，超过六十个字的门槛，因此即使来源摘要更短也不应当被任何兜底逻辑改写或替换掉，保持逐字不变。";
+  const markdown = `* **某发布**：${body} [1]`;
+  const out = await fillThinBullets(markdown, { sources });
+  assert.equal(out, markdown);
+});
+
+test("fillThinBullets: no richer excerpt means no rewrite and no drop", async () => {
+  // A thin bullet whose source snippet is equally thin keeps its body — rule 3
+  // forbids EMPTY padding, not short facts; dropping would lose the only summary.
+  const sources = [
+    { url: "https://example.com/a", title: "某发布", snippet: "某发布。" },
+  ];
+  const markdown = "* **某发布**：模型已发布 [1]";
+  const out = await fillThinBullets(markdown, { sources });
+  assert.equal(out, markdown);
+});
+
+test("fillThinBullets: an English excerpt is translated before it becomes the body", async () => {
+  const sources = [
+    { url: "https://example.com/a", title: "Anthropic ships a new agent tool", snippet: "Anthropic released a new agent tool that can run multi-step tasks without supervision, and it shipped today for every paid plan, with audit logs enabled by default for enterprise workspaces." },
+  ];
+  const markdown = "* **Anthropic 发布智能体工具**：工具已发布 [1]";
+  const seen = [];
+  const mockTranslate = async (texts) => {
+    seen.push(...texts);
+    return texts.map(() => "Anthropic 发布了可自主执行多步任务的智能体工具，现已向所有付费方案开放，企业工作区默认开启审计日志。");
+  };
+  const out = await fillThinBullets(markdown, { sources, translate: mockTranslate });
+  assert.match(out, /企业工作区默认开启审计日志/);
+  assert.doesNotMatch(out, /released a new agent tool/);
+  assert.equal(seen.length, 1);
+});
+
+test("fillThinBullets: a glued multi-line bullet is skipped entirely", async () => {
+  const sources = [
+    { url: "https://example.com/a", title: "A 标题", snippet: "A 的来源摘要，长度足够支撑正文，比下面的短正文长得多，可以被选中作为替换候选。" },
+  ];
+  const markdown = "* **A 标题**：短 [1]\n**B 标题**：这是 B 的胶连正文 [1]";
+  const out = await fillThinBullets(markdown, { sources });
   assert.equal(out, markdown);
 });
 

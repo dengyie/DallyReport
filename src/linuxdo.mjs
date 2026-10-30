@@ -557,6 +557,15 @@ export async function fetchNews34ViaJsonApi(config, deps = {}) {
  * @param {typeof runFetch} [deps.runFetch] inject for tests
  * @returns {Promise<Array<{url:string,title:string,snippet:string,provider:string,score?:number}>>}
  */
+// Deep-fetch wall-clock budget (see the call site for the 2026-10-30 weekly
+// reasoning). Daily 5 min, weekly 10 min; an explicit linuxdoDeepFetchBudgetMs
+// in config/.env always wins, and 0 keeps the "no budget" behavior.
+export function deepFetchBudgetMs(config = {}) {
+  const explicit = Number(config?.linuxdoDeepFetchBudgetMs);
+  if (Number.isFinite(explicit) && explicit >= 0) return explicit;
+  return config?.reportMode === "weekly" ? 600000 : 300000;
+}
+
 export async function fetchLinuxDoAiSources(config, deps = {}) {
   if (config.linuxdoEnabled === false) return [];
 
@@ -709,7 +718,15 @@ export async function fetchLinuxDoAiSources(config, deps = {}) {
     // partial-return contract as enrichLinuxdoPosts: past the deadline the loop
     // stops scheduling NEW targets and the cards that were not enriched fall back
     // to their excerpt/title, which is a normal, already-handled outcome.
-    const deepBudgetMs = Number(config.linuxdoDeepFetchBudgetMs ?? 300000);
+    //
+    // 2026-10-30: the fixed 5-minute default was sized for one day of news/34
+    // cards. A weekly window covers 7x the material against the same 40-target
+    // cap, and the 2026-10-30 weekly shipped 30/40 cards as summary-only — the
+    // budget, not the network, was the binding constraint on slow-target days.
+    // The budget now scales with the window (still far below the runner's 1h
+    // stall ceiling, resilient-run LAUNCH_STALL_CEIL_S=3600s + 2x hard cap); an
+    // explicit config value always wins.
+    const deepBudgetMs = deepFetchBudgetMs(config);
     const deepDeadline = deepBudgetMs > 0 ? Date.now() + deepBudgetMs : 0;
     await mapLimit(
       deepTargets,

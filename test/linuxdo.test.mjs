@@ -18,6 +18,7 @@ import {
   extractAttachments,
   enrichLinuxdoPosts,
   selectDeepFetchTargets,
+  deepFetchBudgetMs,
   mapLimit,
 } from "../src/linuxdo.mjs";
 import { tmpDir, tmpDirSync } from "./helpers/tmp.mjs";
@@ -1325,4 +1326,16 @@ test("beijingDayRange: a post from every day of the window is inside the interva
   }
   const before = Date.parse("2026-09-25T12:00:00+08:00");
   assert.ok(before < startLocal, "the day before the window is outside it");
+});
+
+test("deepFetchBudgetMs: daily default 5 min, weekly 10 min, explicit config wins", () => {
+  // 2026-10-30: the 2026-10-30 weekly shipped 30/40 linux.do cards as
+  // summary-only — the fixed 5-minute budget (sized for a daily) was the binding
+  // constraint on a slow-target morning. The budget now scales with the window;
+  // this pins all three branches so neither direction can silently regress.
+  assert.equal(deepFetchBudgetMs({ reportMode: "daily" }), 300000);
+  assert.equal(deepFetchBudgetMs({ reportMode: "weekly" }), 600000);
+  assert.equal(deepFetchBudgetMs({}), 300000);
+  assert.equal(deepFetchBudgetMs({ reportMode: "weekly", linuxdoDeepFetchBudgetMs: 120000 }), 120000);
+  assert.equal(deepFetchBudgetMs({ reportMode: "daily", linuxdoDeepFetchBudgetMs: 0 }), 0);
 });

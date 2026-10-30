@@ -224,7 +224,12 @@ test("SYSTEM_PROMPT: forbids title-only bullets and resolves the empty-body tens
   // opposite ways. Lock both the concrete minimum and the resolution ("略去"
   // means drop the item, not print a bare title) so a regression that re-opens
   // the tension fails loudly.
-  assert.match(SYSTEM_PROMPT, /正文不少于 2 句/);
+  // 2026-10-30 §9.5.5: the floor moved from "2 句（约 60 字）" to "3 句（不少于
+  // 120 字）" — 10-27~29 alt-channel runs sat exactly on the old floor (mean
+  // 103/91/58 chars vs the 120 acceptance bar). The floor and the bar must move
+  // together; this pins the floor to the bar's magnitude.
+  assert.match(SYSTEM_PROMPT, /正文不少于 3 句/);
+  assert.match(SYSTEM_PROMPT, /不少于 120 字/);
   assert.match(SYSTEM_PROMPT, /不要留一个光秃秃的标题/);
   assert.match(SYSTEM_PROMPT, /整条略去/);
 });

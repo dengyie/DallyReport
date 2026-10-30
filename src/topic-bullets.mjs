@@ -191,6 +191,82 @@ export async function fillBareBullets(markdown, { sources = [], translate } = {}
 
 const HEADING = /^(#{1,6})\s+\S/;
 
+// 2026-10-30 §9.5.5: deterministic backstop for THIN bodies — the completion of
+// the trade-off fillBareBullets implements for BARE ones. The synthesis prompt's
+// floor is 3 sentences / ~120 chars (aligned with the report-thinness bar), but a
+// model sitting at its floor ships exactly-floor bodies: 2026-10-27~29 real runs
+// had the alt channel at mean 103/91/58 chars, each hugging that day's prompt
+// floor. A bullet that DID write a body under THIN_BODY_MIN gets the same
+// non-generative treatment as a bare one: if the cited source carries a
+// materially longer excerpt, the body is replaced by it (primary source text the
+// model was already shown — nothing fabricated, same clarifySnippet hygiene);
+// otherwise the bullet is left alone. Deliberately NO drop here: the bullet has
+// content, and rule 3 forbids EMPTY padding, not short facts — dropping would
+// lose the only summary that exists. English excerpts are translated like the
+// bare path. Multi-line (glued) blocks are skipped: their tail belongs to
+// splitOverMergedBullets, and rewriting here would eat the glued half.
+const THIN_BODY_MIN = 60; // the old prompt floor (2 sentences ≈ 60 chars)
+const THIN_GAIN_MIN = 40; // replace only when the excerpt adds real length
+
+export async function fillThinBullets(markdown, { sources = [], translate, minBodyChars = THIN_BODY_MIN } = {}) {
+  const blocks = bulletBlocks(markdown);
+  const list = Array.isArray(sources) ? sources : [];
+  const replaced = [];
+  const english = [];
+
+  for (const block of blocks) {
+    if (!block.bullet) continue;
+    if (block.text.includes("\n")) continue;
+    const parsed = parseBulletHeadline(block.text);
+    if (!parsed) continue;
+    const body = parsed.rest.replace(CITE_GROUP, " ").trim();
+    if (echoKey(body).length >= minBodyChars) continue;
+
+    const cites = [...block.text.matchAll(CITE_GROUP)].map((m) => m[1]).join(",");
+    const n = Number.parseInt(String(cites).split(",")[0], 10);
+    const src = Number.isInteger(n) && n >= 1 ? list[n - 1] : null;
+    const title = src?.title ? String(src.title).trim() : "";
+    let excerpt = src ? clarifySnippet(src.snippet || "", title, { maxChars: EXCERPT_MAX }) : "";
+    // Same lead-in strip as the bare path: clarifySnippet rebuilds an "obscure"
+    // excerpt as "<title>。<clean>", and the body must not restate its headline.
+    const leadTitle = title ? sanitizeSnippet(title, { maxChars: 200 }) : "";
+    const lead = leadTitle ? `${leadTitle}。` : "";
+    if (lead && excerpt.startsWith(lead)) excerpt = excerpt.slice(lead.length);
+    excerpt = clipExcerpt(excerpt);
+    const englishExcerpt = !/[\u4e00-\u9fff]/.test(excerpt);
+    if (englishExcerpt) excerpt = clipExcerpt(excerpt, TRANSLATE_MAX);
+
+    const excerptLen = echoKey(excerpt).length;
+    const titleKey = echoKey(title);
+    // The excerpt must clear the floor itself (never swap a thin body for a
+    // thinner one), add real length over what the model wrote, and not merely
+    // echo the title.
+    const usable = excerptLen >= minBodyChars
+      && excerptLen > echoKey(body).length + THIN_GAIN_MIN
+      && !(titleKey && titleKey.includes(echoKey(excerpt)));
+    if (!usable) continue;
+
+    const entry = { block, indent: parsed.indent, headline: parsed.headline.replace(/[：:]\s*$/, ""), cites, body: excerpt };
+    replaced.push(entry);
+    if (englishExcerpt) english.push(entry);
+  }
+
+  if (!replaced.length) return markdown;
+
+  if (english.length && typeof translate === "function") {
+    const out = await translate(english.map((e) => e.body));
+    english.forEach((e, i) => {
+      const t = out && out[i];
+      if (t && String(t).trim()) e.body = String(t).trim();
+    });
+  }
+
+  for (const e of replaced) {
+    e.block.text = `${e.indent}* **${e.headline}**：${e.body}${e.cites ? ` [${e.cites}]` : ""}`;
+  }
+  return blocks.map((b) => b.text).join("\n");
+}
+
 function headingDepth(line) {
   const m = String(line || "").match(HEADING);
   return m ? m[1].length : 0;

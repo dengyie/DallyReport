@@ -12,7 +12,7 @@ import { filterByRecency, isInWindowSource, sanitizeSnippet } from "../snippet-h
 import { materialWindow } from "../report-window.mjs";
 import { topicize, gradeTopics, applyGradeCap } from "../topics.mjs";
 import { investigateTopics, renderInvestigationInput } from "../investigate.mjs";
-import { enforceOneTopicPerBullet, fillBareBullets, localizeEnglishBullets } from "../topic-bullets.mjs";
+import { enforceOneTopicPerBullet, fillBareBullets, fillThinBullets, localizeEnglishBullets } from "../topic-bullets.mjs";
 import { translateToChinese } from "../poster/translate.mjs";
 
 export function computeAiNewsStatus({
@@ -697,7 +697,17 @@ export async function aiNewsSection(
     sources: shownSources,
     translate: (lines) => translateToChinese(lines, { model: effectiveModel }),
   });
-  const bodyTextLocalized = await localizeEnglishBullets(bodyTextFilled, {
+  // 2026-10-30 §9.5.5: a body the model DID write but left at the old 60-char
+  // floor is not bare, so fillBareBullets passes it through untouched — the
+  // alt channel shipped means of 103/91/58 chars on 10-27~29 that way. This
+  // second deterministic pass swaps such bodies for the cited source's own
+  // (materially longer) excerpt. It never drops, so the emptyBodyNote invariant
+  // above (filled empties only via fillBareBullets) is untouched.
+  const bodyTextThickened = await fillThinBullets(bodyTextFilled, {
+    sources: shownSources,
+    translate: (lines) => translateToChinese(lines, { model: effectiveModel }),
+  });
+  const bodyTextLocalized = await localizeEnglishBullets(bodyTextThickened, {
     translate: (lines) => translateToChinese(lines, { model: effectiveModel }),
   });
   // 2026-10-07 P2 sanitizers (safety net for reasoning-model truncation):
