@@ -549,14 +549,6 @@ export async function fetchNews34ViaJsonApi(config, deps = {}) {
   return cards;
 }
 
-/**
- * Fetch linux.do AI sources for the daily report.
- *
- * @param {object} config loadConfig() output
- * @param {object} [deps]
- * @param {typeof runFetch} [deps.runFetch] inject for tests
- * @returns {Promise<Array<{url:string,title:string,snippet:string,provider:string,score?:number}>>}
- */
 // Deep-fetch wall-clock budget (see the call site for the 2026-10-30 weekly
 // reasoning). Daily 5 min, weekly 10 min; an explicit linuxdoDeepFetchBudgetMs
 // in config/.env always wins (config maps it to null when the env is unset —
@@ -571,6 +563,14 @@ export function deepFetchBudgetMs(config = {}) {
   return config?.reportMode === "weekly" ? 600000 : 300000;
 }
 
+/**
+ * Fetch linux.do AI sources for the daily report.
+ *
+ * @param {object} config loadConfig() output
+ * @param {object} [deps]
+ * @param {typeof runFetch} [deps.runFetch] inject for tests
+ * @returns {Promise<Array<{url:string,title:string,snippet:string,provider:string,score?:number}>>}
+ */
 export async function fetchLinuxDoAiSources(config, deps = {}) {
   if (config.linuxdoEnabled === false) return [];
 

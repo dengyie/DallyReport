@@ -101,12 +101,22 @@ if (isMain) {
   console.log(`bar: bare-title ratio < ${pct(BARE_BAR)}, mean body ≥ ${BODY_BAR} chars\n`);
   console.log("file                          bullets  bare   ratio   meanBody  verdict");
   let worst = "PASS";
+  let unreadable = 0;
   for (const f of files.sort()) {
     let r;
     try {
       r = measure(fs.readFileSync(f, "utf8"));
     } catch (err) {
-      console.log(`${path.basename(f).padEnd(29)} (unreadable: ${err?.code || err?.message})`);
+      // An unreadable file must fail the run (rc 1), never pass silently: this
+      // tool is the §9.5 acceptance gate, and a mistyped path "passing" with
+      // rc 0 is how a broken check survives. A date-shaped argument gets a hint
+      // pointing at the --dir form that was actually meant (2026-10-30: passing
+      // a bare date here read as ENOENT and exited 0).
+      unreadable += 1;
+      const hint = /^\d{4}-\d{2}-\d{2}$/.test(path.basename(f))
+        ? "（日期参数请用 --dir \"<vault>/Note/AI/DallyReport/<date>\"）"
+        : "";
+      console.log(`${path.basename(f).padEnd(29)} (unreadable: ${err?.code || err?.message})${hint}`);
       continue;
     }
     const v = verdict(r);
@@ -116,5 +126,5 @@ if (isMain) {
         `${pct(r.ratio).padStart(7)} ${r.meanBody.toFixed(0).padStart(9)}  ${v}`,
     );
   }
-  process.exit(worst === "PASS" ? 0 : 1);
+  process.exit(worst === "PASS" && !unreadable ? 0 : 1);
 }
