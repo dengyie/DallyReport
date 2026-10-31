@@ -127,7 +127,7 @@ node scripts/ai-daily/build.mjs [--out <path>] [--check-only] [--sync-vault [vau
 
 ### 6.2 模型阶梯（两个层面，勿混淆）
 - **realm 内 ladder**（ladder.mjs，作用于 report/verify 代理）：`DEFAULT_LADDER = [deepseek-v4-flash, grok-4.6, claude-opus-4-8, gemini-3.7-flash-high]`，args.modelLadder 可覆盖。仅 TRANSIENT（524/5xx/429/timeout/gateway）换级，null（超时）也换级（safeAgent 的唯一偏离），schema/end_turn 同级消化；LADDER_BUDGET_MS 900s 全程共享（verify 多票共享 t0）；中间失败不计入断路器。**重排决策待数据（10-03 §12-①）**：是否按网关实证把 opus 置首，等 10-04 run 的 `meta.ladder` 字段（report 实际尝试序 / verify 各档计数 / exhausted）确认 realm 内 deepseek 同病后再动——不盲改（verify 票全走首级，重排会把全部核查票抬到 opus 计价）。
-- **宿主编排器阶梯**（run-daily-win.sh `ORCH_LADDER`，作用于整个 claude -p launch）：`[claude-opus-4-8, gemini-3.6-flash, deepseek-v4-flash, grok-4.6]`——10/02 网关实证后 opus 置首（deepseek 经 CLI 静默空回、gemini 把 launch 指令当闲聊不跑 skill）。每档先文件读 sentinel 探针（GATEWAY-TOOL-PROBE-SENTINEL，防短问答 200/tools 400 假阳性），快死 <600s 才重拉，≥600s 无产物 = workflow 深处失败不盲目重拉（SLOW_DEATH）。
+- **宿主编排器阶梯**（run-daily-win.sh `ORCH_LADDER`，作用于整个 claude -p launch）：`[claude-opus-4-8, gemini-3.8-flash, deepseek-v4-flash, grok-4.6]`（2026-10-31 起 gemini 档由过时的 3.6-flash 对齐为 3.8-flash）——10/02 网关实证后 opus 置首（deepseek 经 CLI 静默空回、gemini 把 launch 指令当闲聊不跑 skill）。每档先文件读 sentinel 探针（GATEWAY-TOOL-PROBE-SENTINEL，防短问答 200/tools 400 假阳性），快死 <600s 才重拉，≥600s 无产物 = workflow 深处失败不盲目重拉（SLOW_DEATH）。
 
 ### 6.3 跨天账本（ledger.mjs）
 - 路径 `C:/Users/mango/.ai-daily/published-ledger.json`（HOME 而非 vault——无头上下文读 vault 会被拒，8/31 P4 实证）。

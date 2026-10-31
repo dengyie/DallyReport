@@ -54,10 +54,12 @@ DEEPSEEK_TRIES=3
 FALLBACK_TRIES=2
 CHANNEL_FAIL_MAX=2
 LAUNCH_FAST_DEATH_S=600
-# 10/02 网关实证：deepseek-v4-flash 经 claude CLI 静默空回；gemini-3.6-flash 探针可过但
-# launch 把指令当闲聊不跑 skill；deepseek 长 40min 回合被网关 Cloudflare 120s（524）打死；
+# 10/02 网关实证：deepseek-v4-flash 经 claude CLI 静默空回；gemini 档探针可过但
+# launch 可能把指令当闲聊不跑 skill；deepseek 长 40min 回合被网关 Cloudflare 120s（524）打死；
 # claude-opus-4-8 手动单发即成稿 → 置首。探针失败档会自动跳过，不空拉。
-ORCH_LADDER=(claude-opus-4-8 gemini-3.6-flash deepseek-v4-flash grok-4.6)
+# 2026-10-31：gemini 档 3.6-flash → 3.8-flash（用户指令；3.6 已过时，主系统默认早已全数对齐
+# 3.8-flash 且为其生产写手，网关可用性有日常实证）。gemini 档「可能不跑 skill」的行为注意不变。
+ORCH_LADDER=(claude-opus-4-8 gemini-3.8-flash deepseek-v4-flash grok-4.6)
 
 # Windows 通知（10-03 §12-④）：PowerShell WinRT toast（任务计划程序上下文可用，无需 BurntToast 模块），
 # 失败回落纯日志——通知绝不能影响 run 本体。AppId 用 PowerShell 的已注册 AUMID 免自注册。
