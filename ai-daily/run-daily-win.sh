@@ -59,7 +59,9 @@ LAUNCH_FAST_DEATH_S=600
 # claude-opus-4-8 手动单发即成稿 → 置首。探针失败档会自动跳过，不空拉。
 # 2026-10-31：gemini 档 3.6-flash → 3.8-flash（用户指令；3.6 已过时，主系统默认早已全数对齐
 # 3.8-flash 且为其生产写手，网关可用性有日常实证）。gemini 档「可能不跑 skill」的行为注意不变。
-ORCH_LADDER=(claude-opus-4-8 gemini-3.8-flash deepseek-v4-flash grok-4.6)
+# 2026-10-31 夜：行为实测——Workflow 工具按模型可用（gemini-3.8=YES / opus=NO，直接问询复现两遍），
+# 而 opus 探针的垃圾回复（串会话）当晚无解 → gemini-3.8 置首保出刊，opus 退居第二等上游恢复。
+ORCH_LADDER=(gemini-3.8-flash claude-opus-4-8 deepseek-v4-flash grok-4.6)
 # 2026-10-31 TDZ 根因配套：window 必须由宿主算好字面量塞进 prompt——模型自己算/漏传时，
 # workflow 的 args 缺 window → defaultWindowFrom TDZ 秒死（模板已修，双保险仍保留）。
 WFROM=$(date -d '-2 days' +%F)
