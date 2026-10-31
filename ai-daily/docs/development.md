@@ -5,6 +5,7 @@
 - **取代**: `docs/` 下 4 篇 dated 设计文档（见 §13 历史索引）+ README 旧架构描述
 
 ## 速读（当前有效 · 维护于 2026-10-03）
+- **2026-10-31 ai-daily 全天颗粒无收的双层根因（TDZ + 上游劣化）**：① **workflow 模板 TDZ**——`ai-daily.template.js` 在 args/window 块（78 行）引用 `defaultWindowFrom`，而 date-utils 占位符块在其后（128 行区）：args 缺 window 的 launch 模块求值即 `ReferenceError` 秒死（失败 json 实证 args=[]）；传了 window 的 launch 三元短路从不触雷，故 10-06～10-30 一直存活。修复=占位符上提到 args 块前（占位符位置即求值顺序，声明 154 < 使用 196）+ 宿主把 `window:{from,to}` 字面量算好注入 launch prompt（双保险）。② **上游渠道劣化**：#161 justwoker（opus）全天 500/403 已禁用（恢复 SQL 存档 `/data/new-api/backups/channel161-disable-*`）；#162 hyb-claude **串会话**（探针返回其他用户的 Understood/Entendido 确认语，`--debug` 抓包实证；裸 API 全形状复测 200——只有 CLI agentic 形状中招）；晚间 gemini/deepseek 档 524 + 19:20 四档探针全灭 rc=2。阶梯 gemini 档 3.6→3.8（3.6 是 CLI 模型目录不存在的死档）+ launch prompt 强制真实工具调用（opus 曾 42s 叙事假执行）。网关本体健康（tebi new-api v29.71，单发/8 并发/大输入/工具调用全形状复测 200）。上游恢复后 `schtasks /Run /TN ai-daily` 即补产。
 
 - 生产 Windows 唯一：任务计划程序 `ai-daily`（每日 08:40）→ `run-daily-task.cmd` → `run-daily-win.sh` → `claude -p`（skill 编排）→ Workflow 产物 → `finalize.mjs` 落盘 vault `Note/AI/DallyReport/<date>/`（10-06 迁入 Note/，与 DallyReport 主系统同根）。Mac launchd 与 `~/.ai-daily` 已于 10-03 清流。
 - 逻辑真源 = `scripts/ai-daily/*.mjs`（15 个 inline 逻辑模块 + 11 个宿主 CLI）+ `ai-daily.template.js`（编排骨架）；`build.mjs` inline 生成 3366 行自包含产物 `.claude/workflows/ai-daily.js`（repo 内），`--sync-vault` 一步同步产物 + SKILL.md 到 vault `.claude/`。
