@@ -71,6 +71,13 @@ const VERIFY_BUDGET_MS  = typeof args.verifyBudgetMs  === 'number' && args.verif
 // 累计死线仍从 Verify 切片预留 VERIFY_INFLIGHT_BUFFER_MS 缓冲（为末批留空间），但不再对在飞票超时做钳制。
 const VERIFY_INFLIGHT_BUFFER_MS = typeof args.verifyInflightBufferMs === 'number' && args.verifyInflightBufferMs > 0 ? args.verifyInflightBufferMs : 60000
 
+// 2026-10-31 TDZ 根因修复：date-utils 必须先于 args/window 块 inline——args 缺 window 时
+// 第 78 行会走到 defaultWindowFrom，而其 const 定义在占位符块（原 128 行区）之后，
+// 模块求值即 ReferenceError 秒杀整个 workflow（10-31 全天 ai-daily 颗粒无收的根因：
+// 模型没传 window 的 launch 一律秒死）。占位符位置=求值顺序，故上提到此。
+/* @inline: url-polyfill */
+/* @inline: date-utils */
+
 const DATE = typeof args.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(args.date) ? args.date : null
 // 日报默认抓取 3 天内素材（T-2 ~ T），如 args.window 明确指定则遵从实参
 const WFROM = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.from))
@@ -125,8 +132,6 @@ const WEB_BUDGET_PER = 2  // 9/19 F4：WebSearch 预算改为组内独立计数�
 // 依赖序与 build.mjs MODULES 一致：url-polyfill 最先（注入 globalThis.URL，workflow realm 无 URL 全局，
 // 否则 dedup._hostnameOf / render-md.buildCitationMap 的 new URL() 抛错被 catch 吞 → 完整版 0 角标）；
 // date-utils(normURL) 必须在 boards(GROUPS_RAW.test 闭包) 与 dedup 前。
-/* @inline: url-polyfill */
-/* @inline: date-utils */
 /* @inline: schemas */
 /* @inline: boards */
 /* @inline: dedup */

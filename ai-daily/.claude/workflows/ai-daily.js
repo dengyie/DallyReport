@@ -71,60 +71,10 @@ const VERIFY_BUDGET_MS  = typeof args.verifyBudgetMs  === 'number' && args.verif
 // 累计死线仍从 Verify 切片预留 VERIFY_INFLIGHT_BUFFER_MS 缓冲（为末批留空间），但不再对在飞票超时做钳制。
 const VERIFY_INFLIGHT_BUFFER_MS = typeof args.verifyInflightBufferMs === 'number' && args.verifyInflightBufferMs > 0 ? args.verifyInflightBufferMs : 60000
 
-const DATE = typeof args.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(args.date) ? args.date : null
-// 日报默认抓取 3 天内素材（T-2 ~ T），如 args.window 明确指定则遵从实参
-const WFROM = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.from))
-  ? String(args.window.from)
-  : defaultWindowFrom(DATE, 3)
-const WTO = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.to)) ? String(args.window.to) : DATE
-const OUT = typeof args.outDir === 'string' && args.outDir ? args.outDir : null
-const BOARDS_SELECTED = Array.isArray(args.boards) ? new Set(args.boards) : null
-// P0（10-03 review 实证）：以下两个宿主路径旧版硬编码 Mac（/Users/mango/...），Windows 生产下
-// grok-search skill 与 cdp-fetch CLI 全部指向不存在的文件（fetch 代理静默回落 WebFetch、9222 通道哑火）。
-// 改 args 可覆盖 + Windows 生产默认（生产 Windows 唯一；Mac 已 10-03 清退）。
-const GROK_DIR = (typeof args.grokDir === 'string' && args.grokDir) || 'C:/Users/mango/.agents/skills/grok-search'
-// 9/13 fetch 走 9222：宿主 CDP 抓取 CLI（fetch 子代理经 Bash 调用；realm 本身不碰 CDP，护栏不变）。
-const CDP_FETCH_CLI = (typeof args.cdpFetchCli === 'string' && args.cdpFetchCli) || 'E:/code/DallyReport/ai-daily/scripts/ai-daily/cdp-fetch.mjs'
-// 8/23 第二十一项：linuxdo 接入（登录态 CDP 独立发现组）。linuxdoCdpHost 默认 null → 组保留在
-// DISCOVER_GROUPS（板不崩）但 LINUXDO-SKIP no_cdp_host → urls:[] 不降级（命令行/手动补跑默认不启用）；
-// linuxdoMaxSources 配额默认 8→12（10/03 对齐参考日报：mint 直铸不占 MAX_FETCH，扩配额成本极低；
-// 参考报社区一手内容占比高，12 席供「社区热度」叙事仍有得选，不挤占官方/一手源配额）。
-const LINUXDO_CDP_HOST = typeof args.linuxdoCdpHost === 'string' && args.linuxdoCdpHost ? args.linuxdoCdpHost : null
-const LINUXDO_MAX_SOURCES = typeof args.linuxdoMaxSources === 'number' && args.linuxdoMaxSources > 0 ? args.linuxdoMaxSources : 12
-// 8/27 Task 2：linux.do 预抓隔离——CDP 抓取从 Workflow realm 前移到宿主 Node（linuxdo-prefetch.mjs，
-// run-daily.sh 在调 Workflow 前预抓并把成功 JSON 注入 args.linuxdoPrefetched）。这里严格校验其成功形状：
-// ok===true 且 posts 是含 非空 url/title 的数组，才视为有效可消费；否则视同「无有效预抓数据」。
-// realm 内不再调用裸 fetchLinuxDoNews34（workflow realm 无 fetch/WebSocket 全局），无有效数据即走 no_fetch_realm 降级。
-const LINUXDO_PREFETCHED = (() => {
-  const raw = args.linuxdoPrefetched
-  if (!raw || typeof raw !== 'object') return null
-  if (raw.ok !== true || !Array.isArray(raw.posts)) return null
-  const posts = (raw.posts || []).filter(x => x && typeof x.url === 'string' && x.url && typeof x.title === 'string' && x.title)
-  if (!posts.length) return null
-  return { ok: true, host: raw.host || '', topics: Number(raw.topics) || posts.length, posts }
-	})()
-	// 9/13 fetch 通道门控：headless 显式传 webFetchViaCdp:true → fetch 代理先走 9222 CDP（宿主 cdp-fetch.mjs，
-// 复用登录态/临时标签），失败回落 WebFetch。手动 /ai-daily 默认 false 维持纯 WebFetch（既有纪律：
-// 离开 9222 环境不裸抓；realm 本身仍不碰 CDP——抓取发生在 fetch 子代理的 Bash 里）。
-const WEB_FETCH_VIA_CDP = args.webFetchViaCdp === true
-
-if (!DATE || !OUT) {
-  return { error: 'Args must include date (YYYY-MM-DD) and outDir (absolute path). window optional. got: ' + JSON.stringify(args) }
-}
-const WINDOW_LABEL = WFROM && WTO ? WFROM + ' ~ ' + WTO : WTO || DATE
-
-// ─── 常量区（供 prompt ctx 与编排使用）───
-// 8/15：稠密源（arXiv/HF papers）与普通源统一 12000 字符——稠密源曾是输入大户，降到与普通源同档。
-// 8/21 学术板修复：arXiv 官方 API 返回 Atom XML（50 entries ≈ 42KB/URL），普通上限 12000 字符会截到 header →
-// 条目被截只剩 1-2 条、digest 空洞。给 arXiv API 源单独放宽：窗口内最近 50 篇的标题/摘要即为此域全部正文，
-// 无 `--full-path` 泄露、无多 feed 依赖。其余普通源仍 12000。
-const feedMaxChars = f => /export\.arxiv\.org\/api\/query/i.test(f.url || f) ? 40000 : 12000
-const WEB_BUDGET_PER = 2  // 9/19 F4：WebSearch 预算改为组内独立计数，无全流水共享上限（WEB_BUDGET_TOTAL 死常量已删）
-
-// ═══ 模块内联区（build.mjs 替换；逻辑真源见 scripts/ai-daily/*.mjs）═══
-// 依赖序与 build.mjs MODULES 一致：url-polyfill 最先（注入 globalThis.URL，workflow realm 无 URL 全局，
-// 否则 dedup._hostnameOf / render-md.buildCitationMap 的 new URL() 抛错被 catch 吞 → 完整版 0 角标）；
-// date-utils(normURL) 必须在 boards(GROUPS_RAW.test 闭包) 与 dedup 前。
+// 2026-10-31 TDZ 根因修复：date-utils 必须先于 args/window 块 inline——args 缺 window 时
+// 第 78 行会走到 defaultWindowFrom，而其 const 定义在占位符块（原 128 行区）之后，
+// 模块求值即 ReferenceError 秒杀整个 workflow（10-31 全天 ai-daily 颗粒无收的根因：
+// 模型没传 window 的 launch 一律秒死）。占位符位置=求值顺序，故上提到此。
 // ─── inline: url-polyfill ───
 // workflow realm 缺失 URL 全局的最小 WHATWG URL polyfill（2026-08-22 实证根因）。
 // Workflow 脚本 realm 无 URL（typeof URL==='undefined'），dedup._hostnameOf / render-md.buildCitationMap /
@@ -238,6 +188,61 @@ const filterSeedsByAge = (seeds, reportDayNum, maxAgeDays) => {
 }
 
 const chunkArr = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out }
+
+const DATE = typeof args.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(args.date) ? args.date : null
+// 日报默认抓取 3 天内素材（T-2 ~ T），如 args.window 明确指定则遵从实参
+const WFROM = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.from))
+  ? String(args.window.from)
+  : defaultWindowFrom(DATE, 3)
+const WTO = args.window && /^\d{4}-\d{2}-\d{2}$/.test(String(args.window.to)) ? String(args.window.to) : DATE
+const OUT = typeof args.outDir === 'string' && args.outDir ? args.outDir : null
+const BOARDS_SELECTED = Array.isArray(args.boards) ? new Set(args.boards) : null
+// P0（10-03 review 实证）：以下两个宿主路径旧版硬编码 Mac（/Users/mango/...），Windows 生产下
+// grok-search skill 与 cdp-fetch CLI 全部指向不存在的文件（fetch 代理静默回落 WebFetch、9222 通道哑火）。
+// 改 args 可覆盖 + Windows 生产默认（生产 Windows 唯一；Mac 已 10-03 清退）。
+const GROK_DIR = (typeof args.grokDir === 'string' && args.grokDir) || 'C:/Users/mango/.agents/skills/grok-search'
+// 9/13 fetch 走 9222：宿主 CDP 抓取 CLI（fetch 子代理经 Bash 调用；realm 本身不碰 CDP，护栏不变）。
+const CDP_FETCH_CLI = (typeof args.cdpFetchCli === 'string' && args.cdpFetchCli) || 'E:/code/DallyReport/ai-daily/scripts/ai-daily/cdp-fetch.mjs'
+// 8/23 第二十一项：linuxdo 接入（登录态 CDP 独立发现组）。linuxdoCdpHost 默认 null → 组保留在
+// DISCOVER_GROUPS（板不崩）但 LINUXDO-SKIP no_cdp_host → urls:[] 不降级（命令行/手动补跑默认不启用）；
+// linuxdoMaxSources 配额默认 8→12（10/03 对齐参考日报：mint 直铸不占 MAX_FETCH，扩配额成本极低；
+// 参考报社区一手内容占比高，12 席供「社区热度」叙事仍有得选，不挤占官方/一手源配额）。
+const LINUXDO_CDP_HOST = typeof args.linuxdoCdpHost === 'string' && args.linuxdoCdpHost ? args.linuxdoCdpHost : null
+const LINUXDO_MAX_SOURCES = typeof args.linuxdoMaxSources === 'number' && args.linuxdoMaxSources > 0 ? args.linuxdoMaxSources : 12
+// 8/27 Task 2：linux.do 预抓隔离——CDP 抓取从 Workflow realm 前移到宿主 Node（linuxdo-prefetch.mjs，
+// run-daily.sh 在调 Workflow 前预抓并把成功 JSON 注入 args.linuxdoPrefetched）。这里严格校验其成功形状：
+// ok===true 且 posts 是含 非空 url/title 的数组，才视为有效可消费；否则视同「无有效预抓数据」。
+// realm 内不再调用裸 fetchLinuxDoNews34（workflow realm 无 fetch/WebSocket 全局），无有效数据即走 no_fetch_realm 降级。
+const LINUXDO_PREFETCHED = (() => {
+  const raw = args.linuxdoPrefetched
+  if (!raw || typeof raw !== 'object') return null
+  if (raw.ok !== true || !Array.isArray(raw.posts)) return null
+  const posts = (raw.posts || []).filter(x => x && typeof x.url === 'string' && x.url && typeof x.title === 'string' && x.title)
+  if (!posts.length) return null
+  return { ok: true, host: raw.host || '', topics: Number(raw.topics) || posts.length, posts }
+	})()
+	// 9/13 fetch 通道门控：headless 显式传 webFetchViaCdp:true → fetch 代理先走 9222 CDP（宿主 cdp-fetch.mjs，
+// 复用登录态/临时标签），失败回落 WebFetch。手动 /ai-daily 默认 false 维持纯 WebFetch（既有纪律：
+// 离开 9222 环境不裸抓；realm 本身仍不碰 CDP——抓取发生在 fetch 子代理的 Bash 里）。
+const WEB_FETCH_VIA_CDP = args.webFetchViaCdp === true
+
+if (!DATE || !OUT) {
+  return { error: 'Args must include date (YYYY-MM-DD) and outDir (absolute path). window optional. got: ' + JSON.stringify(args) }
+}
+const WINDOW_LABEL = WFROM && WTO ? WFROM + ' ~ ' + WTO : WTO || DATE
+
+// ─── 常量区（供 prompt ctx 与编排使用）───
+// 8/15：稠密源（arXiv/HF papers）与普通源统一 12000 字符——稠密源曾是输入大户，降到与普通源同档。
+// 8/21 学术板修复：arXiv 官方 API 返回 Atom XML（50 entries ≈ 42KB/URL），普通上限 12000 字符会截到 header →
+// 条目被截只剩 1-2 条、digest 空洞。给 arXiv API 源单独放宽：窗口内最近 50 篇的标题/摘要即为此域全部正文，
+// 无 `--full-path` 泄露、无多 feed 依赖。其余普通源仍 12000。
+const feedMaxChars = f => /export\.arxiv\.org\/api\/query/i.test(f.url || f) ? 40000 : 12000
+const WEB_BUDGET_PER = 2  // 9/19 F4：WebSearch 预算改为组内独立计数，无全流水共享上限（WEB_BUDGET_TOTAL 死常量已删）
+
+// ═══ 模块内联区（build.mjs 替换；逻辑真源见 scripts/ai-daily/*.mjs）═══
+// 依赖序与 build.mjs MODULES 一致：url-polyfill 最先（注入 globalThis.URL，workflow realm 无 URL 全局，
+// 否则 dedup._hostnameOf / render-md.buildCitationMap 的 new URL() 抛错被 catch 吞 → 完整版 0 角标）；
+// date-utils(normURL) 必须在 boards(GROUPS_RAW.test 闭包) 与 dedup 前。
 // ─── inline: schemas ───
 // ai-daily schemas — 与 workflow 内逐字节一致（WRITE_RESULT_SCHEMA 已随 mdWriter 代理删除）。
 // 真源；build.mjs 剥 export inline 进 workflow。
