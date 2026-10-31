@@ -170,7 +170,7 @@ fi
     for TRY in $(seq 1 "$TRIES"); do
       ATTEMPT=$((ATTEMPT + 1))
       LAUNCH_T0="$(date '+%s')"
-      LAUNCH_OUT="$(claude -p "运行 ai-daily skill，生成今天的 AI 日报。调用 Workflow 时 args 请带上 {\"linuxdoCdpHost\":\"127.0.0.1:9222\",\"linuxdoMaxSources\":12,\"webFetchViaCdp\":true}（复用 9222 登录态 Chrome 抓 linux.do 与 fetch 正文；论坛配额 12 与模板默认一致——mint 直铸不占 fetch 配额，供「社区热度」叙事仍有得选）。linuxdoPrefetched 已预抓到文件 $PREFETCH_JSON：请 Read 该文件，把解析后的 JSON 对象作为 args.linuxdoPrefetched 传入（成功为 ok:true + posts；失败为 ok:false + reason）。跨天去重账本 $LEDGER：若该文件存在，请 Read 并把解析后的 JSON 数组作为 args.reportedLedger 传入（不存在则不传该参数，不要视为错误）。不要把任何文件内容贴进本指令或 shell。最后简述头条与覆盖结果。" --model "$MODEL" --dangerously-skip-permissions 2>&1)"
+      LAUNCH_OUT="$(claude -p "【执行纪律，优先级最高】收到指令后第一步就必须真实调用 Workflow 工具运行 ai-daily；严禁用文字叙述、想象或假装执行来代替真实工具调用；Workflow 返回 payloads 之前不得声称「生成成功」或「已写入」；Workflow 调用若报错，原样输出错误文本并立即结束。以下是任务：运行 ai-daily skill，生成今天的 AI 日报。调用 Workflow 时 args 请带上 {\"linuxdoCdpHost\":\"127.0.0.1:9222\",\"linuxdoMaxSources\":12,\"webFetchViaCdp\":true}（复用 9222 登录态 Chrome 抓 linux.do 与 fetch 正文；论坛配额 12 与模板默认一致——mint 直铸不占 fetch 配额，供「社区热度」叙事仍有得选）。linuxdoPrefetched 已预抓到文件 $PREFETCH_JSON：请 Read 该文件，把解析后的 JSON 对象作为 args.linuxdoPrefetched 传入（成功为 ok:true + posts；失败为 ok:false + reason）。跨天去重账本 $LEDGER：若该文件存在，请 Read 并把解析后的 JSON 数组作为 args.reportedLedger 传入（不存在则不传该参数，不要视为错误）。不要把任何文件内容贴进本指令或 shell。最后简述头条与覆盖结果。" --model "$MODEL" --dangerously-skip-permissions 2>&1)"
       RC=$?
       printf '%s\n' "$LAUNCH_OUT"
       LAUNCH_SECS=$(( $(date '+%s') - LAUNCH_T0 ))
