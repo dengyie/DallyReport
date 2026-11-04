@@ -24,6 +24,15 @@ LOG="$LOGDIR/run-daily.log"
 # 纪律（review P3 根因收口）：PATH 导出点之前不得出现任何外部命令——mkdir 也在 /usr/bin，
 # 留在前面则 LOGDIR 缺失场景下 mkdir 失败 → 全 run 静默失日志。STAMP 同理必须在导出后取。
 export PATH="/e/code/Git/usr/bin:/c/Program Files/nodejs:/c/Users/mango/AppData/Roaming/npm:$PATH"
+
+# 代理配置：Windows 端本地 Clash Verge (7897) 保活跨境长连接，避免直连 Cloudflare 遭遇 ECONNRESET
+if curl -s --max-time 1 http://127.0.0.1:7897 >/dev/null 2>&1; then
+  export http_proxy="http://127.0.0.1:7897"
+  export https_proxy="http://127.0.0.1:7897"
+  export all_proxy="socks5://127.0.0.1:7897"
+  export no_proxy="localhost,127.0.0.1,::1"
+fi
+
 mkdir -p "$LOGDIR"
 # P3（10-03 review）：STAMP 兜底——若 date 仍不可达（PATH 修复失效/异常），不得让所有早退日志
 # 变成「 FAIL ...」空时间戳（事后无法定位）。非空兜底至少标明「时间未知」，日志行始终可辨识。
@@ -189,9 +198,13 @@ fi
         break 2
       fi
       if [ "$LAUNCH_SECS" -ge "$LAUNCH_FAST_DEATH_S" ]; then
-        echo "RELAUNCH-SKIP 该次 launch 跑满 ${LAUNCH_SECS}s（≥${LAUNCH_FAST_DEATH_S}s）仍无产物 → workflow 深处失败，不盲目重拉"
+        echo "RELAUNCH-SKIP 该次 launch 跑满 ${LAUNCH_SECS}s（≥${LAUNCH_FAST_DEATH_S}s）仍无产物 → 本档慢死，跳过本档剩余重试，阶梯换档"
         SLOW_DEATH=1
-        break 2
+        if [ "$(( $(date '+%s') - WALL_START ))" -ge 3600 ]; then
+          echo "WALLCLOCK-HARD-LIMIT 宿主总用时已满 60 分钟，强制停止阶梯换档"
+          break 2
+        fi
+        break
       fi
       if [[ "$LAUNCH_OUT" == *"API Error"* || "$LAUNCH_OUT" == *"unapproved channel"* || "$LAUNCH_OUT" == *"11128"* ]] && [ "$LAUNCH_SECS" -lt 60 ]; then
         CHANNEL_FAIL=$((CHANNEL_FAIL + 1))
