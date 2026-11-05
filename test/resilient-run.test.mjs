@@ -12,6 +12,7 @@ import {
   probeNetworkConnectivity,
   nextFallbackCandidate,
   shouldSkipForIdempotency,
+  qualityFailures,
   spawnRunner,
   PROBE_TIMEOUT_MS,
 } from "../src/resilient-run.mjs";
@@ -460,4 +461,31 @@ test("probeNetworkConnectivity: detects total network down", async () => {
   assert.equal(result.ok, false);
   assert.equal(result.status, "network_down");
   assert.match(result.warning, /完全不可达/);
+});
+// ── qualityFailures (content quality gate, 2026-11-04 事故) ───────────────
+test("qualityFailures: the 11-04 empty-shell shape (415B AI.md) is flagged, degraded raw-dump days pass", () => {
+  const products = [
+    { name: "AI.md", ok: true, size: 415 },
+    { name: "GitHub.md", ok: true, size: 2881 },
+  ];
+  assert.deepEqual(qualityFailures(products, false), ["AI.md:415B"]);
+  // 降级转储日（9–18KB，带 ⚠️ 综合失败标注）是有真实内容的，必须放行
+  const degraded = [
+    { name: "AI.md", ok: true, size: 9500 },
+    { name: "GitHub.md", ok: true, size: 2881 },
+  ];
+  assert.deepEqual(qualityFailures(degraded, false), []);
+});
+
+test("qualityFailures: healthy days pass, weekly naming and missing products are not its job", () => {
+  assert.deepEqual(qualityFailures([
+    { name: "AI.md", ok: true, size: 17340 },
+    { name: "GitHub.md", ok: true, size: 3476 },
+  ], false), []);
+  assert.deepEqual(qualityFailures([
+    { name: "AI-周报.md", ok: true, size: 3000 },
+    { name: "GitHub-周报.md", ok: true, size: 1200 },
+  ], true), []);
+  // MISSING 产物归 checkProducts/FAIL 路径管，质量门只判「存在但太薄」
+  assert.deepEqual(qualityFailures([{ name: "AI.md", ok: false, size: 0 }], false), []);
 });

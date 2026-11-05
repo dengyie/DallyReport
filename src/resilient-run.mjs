@@ -265,6 +265,23 @@ export function shouldSkipForIdempotency(outDir, isWeekly) {
   return checkProducts(outDir, isWeekly).every((p) => p.ok);
 }
 
+// ── 3b. Content quality gate ─────────────────────────────────────────────
+// 2026-11-04 事故：双通道综合全灭 → 原始回答回退落出 415B 的空壳 AI.md，
+// checkProducts 只查「存在且非空」→ rc=0 静默出刊，看板全绿无人知晓。
+// 空壳的判据是字节量：健康日出 8.9–17.3KB，415B 连正文骨架都没有；
+// 降级转储日（9–18KB，带 ⚠️ 综合失败标注）是有真实内容的，必须放行。
+export const QUALITY_MIN_BYTES = {
+  daily: { "AI.md": 2500, "GitHub.md": 1000 },
+  weekly: { "AI-周报.md": 2500, "GitHub-周报.md": 1000 },
+};
+
+export function qualityFailures(products, isWeekly) {
+  const mins = isWeekly ? QUALITY_MIN_BYTES.weekly : QUALITY_MIN_BYTES.daily;
+  return products
+    .filter((p) => p.ok && p.size < (mins[p.name] ?? 0))
+    .map((p) => `${p.name}:${p.size}B`);
+}
+
 // ── 4. Log rotation ───────────────────────────────────────────────────────
 
 const LOG_KEEP = 20; // keep 20 run-tails, matching ai-daily's archive-depth convention
@@ -514,7 +531,38 @@ async function main() {
   const allOk = products.every((p) => p.ok);
   const productLines = products.map((p) => `${p.name}:${p.ok ? p.size + "B" : "MISSING"}`).join(", ");
 
+  // ── 7d-2. Content quality gate ────────────────────────────────────────
+  // 产物存在但低于健康下限 = 空壳出刊（11-04 型）：单板块自动重试一次，
+  // 重试仍低则 rc=14 + toast，绝不让空壳顶着 rc=0 出刊。
   if (allOk && result.code === 0) {
+    const quality = qualityFailures(products, config.isWeekly);
+    if (quality.length) {
+      log(`${stamp} QUALITY-FAIL ${quality.join(", ")}（空壳出刊）→ 单板块自动重试`);
+      notify("DallyReport 日报空壳", `${date} ${quality.join("，")}，自动单板块重试`);
+      for (const q of quality) {
+        const section = q.startsWith("AI") ? "ai" : "github";
+        const prod = products.find((p) => q.startsWith(p.name));
+        const retry = await spawnRunner(
+          process.execPath,
+          path.join(PROJECT_ROOT, "src", "run.mjs"),
+          ["--date", date, "--section", section],
+          TASK_OUT_LOG,
+          TASK_ERR_LOG,
+          { watchPath: prod.path, stallCeilMs: STALL_CEIL_S * 1000 },
+        );
+        log(`${stamp} QUALITY-RETRY section=${section} rc=${retry.code}`);
+      }
+      const products2 = checkProducts(outDir, config.isWeekly);
+      const quality2 = qualityFailures(products2, config.isWeekly);
+      const lines2 = products2.map((p) => `${p.name}:${p.ok ? p.size + "B" : "MISSING"}`).join(", ");
+      if (!quality2.length) {
+        log(`${stamp} DONE rc=0 quality-recovered ${elapsedS}s products={${lines2}} writer=${probe.model}`);
+        return 0;
+      }
+      logErr(`${stamp} QUALITY-FAIL-STILL ${quality2.join(", ")} products={${lines2}}`);
+      notify("DallyReport 日报空壳未恢复", `${date} 单板块重试后仍低于阈值：${quality2.join("，")}`);
+      return 14;
+    }
     log(`${stamp} DONE rc=0 ${elapsedS}s products={${productLines}} writer=${probe.model}`);
     return 0;
   }
