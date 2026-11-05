@@ -205,7 +205,10 @@ const HEADING = /^(#{1,6})\s+\S/;
 // lose the only summary that exists. English excerpts are translated like the
 // bare path. Multi-line (glued) blocks are skipped: their tail belongs to
 // splitOverMergedBullets, and rewriting here would eat the glued half.
-const THIN_BODY_MIN = 60; // the old prompt floor (2 sentences ≈ 60 chars)
+// 2026-11-06：60 → 120，与综合 prompt 的地板（3 句 / ≥120 字）对齐——10-27~11-02 的
+// 生产数据显示模型精确贴地板写（地板 60 时均值 58~103），60~119 的中间带既违契约又
+// 不被兜底覆盖，是 alt 频道均值反复卡 106~114 的直接机制。阈值=契约，两者必须同步。
+const THIN_BODY_MIN = 120; // the prompt floor (3 sentences / ≥120 chars)
 const THIN_GAIN_MIN = 40; // replace only when the excerpt adds real length
 
 export async function fillThinBullets(markdown, { sources = [], translate, minBodyChars = THIN_BODY_MIN } = {}) {

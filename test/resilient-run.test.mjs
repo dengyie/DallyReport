@@ -477,6 +477,22 @@ test("qualityFailures: the 11-04 empty-shell shape (415B AI.md) is flagged, degr
   assert.deepEqual(qualityFailures(degraded, false), []);
 });
 
+test("qualityFailures: the alt channel (AI-DeepSeek.md) is gated at 2500B when enabled", () => {
+  const mins = "AI-DeepSeek.md";
+  const empty = [
+    { name: "AI.md", ok: true, size: 10493 },
+    { name: "AI-DeepSeek.md", ok: true, size: 1800 },
+    { name: "GitHub.md", ok: true, size: 3248 },
+  ];
+  assert.deepEqual(qualityFailures(empty, false, mins), ["AI-DeepSeek.md:1800B"]);
+  const healthy = [
+    { name: "AI.md", ok: true, size: 10493 },
+    { name: "AI-DeepSeek.md", ok: true, size: 18362 },
+    { name: "GitHub.md", ok: true, size: 3248 },
+  ];
+  assert.deepEqual(qualityFailures(healthy, false, mins), []);
+});
+
 test("qualityFailures: healthy days pass, weekly naming and missing products are not its job", () => {
   assert.deepEqual(qualityFailures([
     { name: "AI.md", ok: true, size: 17340 },

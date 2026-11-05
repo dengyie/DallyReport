@@ -1328,18 +1328,18 @@ test("beijingDayRange: a post from every day of the window is inside the interva
   assert.ok(before < startLocal, "the day before the window is outside it");
 });
 
-test("deepFetchBudgetMs: daily default 5 min, weekly 10 min, explicit config wins", () => {
+test("deepFetchBudgetMs: daily 480s / weekly 900s, explicit config wins, null falls through", () => {
   // 2026-10-30: the 2026-10-30 weekly shipped 30/40 linux.do cards as
   // summary-only — the fixed 5-minute budget (sized for a daily) was the binding
   // constraint on a slow-target morning. The budget now scales with the window;
   // this pins all three branches so neither direction can silently regress.
-  assert.equal(deepFetchBudgetMs({ reportMode: "daily" }), 300000);
-  assert.equal(deepFetchBudgetMs({ reportMode: "weekly" }), 600000);
-  assert.equal(deepFetchBudgetMs({}), 300000);
+  assert.equal(deepFetchBudgetMs({ reportMode: "daily" }), 480000);
+  assert.equal(deepFetchBudgetMs({ reportMode: "weekly" }), 900000);
+  assert.equal(deepFetchBudgetMs({}), 480000);
   assert.equal(deepFetchBudgetMs({ reportMode: "weekly", linuxdoDeepFetchBudgetMs: 120000 }), 120000);
   assert.equal(deepFetchBudgetMs({ reportMode: "daily", linuxdoDeepFetchBudgetMs: 0 }), 0);
   // config maps the env to null when unset — null must fall through to the
   // window-scaled default, not be read as a number.
-  assert.equal(deepFetchBudgetMs({ reportMode: "weekly", linuxdoDeepFetchBudgetMs: null }), 600000);
-  assert.equal(deepFetchBudgetMs({ linuxdoDeepFetchBudgetMs: null }), 300000);
+  assert.equal(deepFetchBudgetMs({ reportMode: "weekly", linuxdoDeepFetchBudgetMs: null }), 900000);
+  assert.equal(deepFetchBudgetMs({ linuxdoDeepFetchBudgetMs: null }), 480000);
 });

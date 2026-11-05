@@ -25,7 +25,7 @@ import fs from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { trackChild, killAllChildren } from "./child-tracker.mjs";
-import { loadConfig, beijingDateFor, beijingTimestampFor, KNOWN_BAD_MODELS as KNOWN_BAD_MODEL_LIST } from "./config.mjs";
+import { loadConfig, beijingDateFor, beijingTimestampFor, KNOWN_BAD_MODELS as KNOWN_BAD_MODEL_LIST, resolveAltChannel } from "./config.mjs";
 
 // Process lifecycle hooks: reap any in-flight child if the scheduler, runner
 // or operator interrupts us, so orphaned Node or curl processes never survive.
@@ -245,8 +245,8 @@ export async function probeNetworkConnectivity(timeoutMs = 4000) {
 const PRODUCT_DAILY = ["AI.md", "GitHub.md"];
 const PRODUCT_WEEKLY = ["AI-周报.md", "GitHub-周报.md"];
 
-export function checkProducts(outDir, isWeekly) {
-  const files = isWeekly ? PRODUCT_WEEKLY : PRODUCT_DAILY;
+export function checkProducts(outDir, isWeekly, extra = []) {
+  const files = [...(isWeekly ? PRODUCT_WEEKLY : PRODUCT_DAILY), ...extra];
   return files.map((name) => {
     const p = path.join(outDir, name);
     let size = 0;
@@ -261,8 +261,8 @@ export function checkProducts(outDir, isWeekly) {
  * half-produced days (AI.md on disk, GitHub.md lost to a crash) — every retry,
  * scheduled or manual, exited 0 before checkProducts ever got a say.
  */
-export function shouldSkipForIdempotency(outDir, isWeekly) {
-  return checkProducts(outDir, isWeekly).every((p) => p.ok);
+export function shouldSkipForIdempotency(outDir, isWeekly, extra = []) {
+  return checkProducts(outDir, isWeekly, extra).every((p) => p.ok);
 }
 
 // ── 3b. Content quality gate ─────────────────────────────────────────────
@@ -275,8 +275,9 @@ export const QUALITY_MIN_BYTES = {
   weekly: { "AI-周报.md": 2500, "GitHub-周报.md": 1000 },
 };
 
-export function qualityFailures(products, isWeekly) {
-  const mins = isWeekly ? QUALITY_MIN_BYTES.weekly : QUALITY_MIN_BYTES.daily;
+export function qualityFailures(products, isWeekly, altMdName = null) {
+  const mins = { ...(isWeekly ? QUALITY_MIN_BYTES.weekly : QUALITY_MIN_BYTES.daily) };
+  if (altMdName) mins[altMdName] = 2500;
   return products
     .filter((p) => p.ok && p.size < (mins[p.name] ?? 0))
     .map((p) => `${p.name}:${p.size}B`);
@@ -445,9 +446,11 @@ async function main() {
 
   // ── 7a. Idempotency skip ──────────────────────────────────────────────
   const config = loadConfig({ date });
+  // 2026-11-06：alt 频道产物纳入产物/质量门（11-04 双频道同天空壳的覆盖缺口）。
+  const altProduct = resolveAltChannel(config)?.name ? `${resolveAltChannel(config).name}.md` : null;
   const outDir = path.join(config.obsidianDir, date);
   const aiMd = path.join(outDir, config.isWeekly ? "AI-周报.md" : "AI.md");
-  if (shouldSkipForIdempotency(outDir, config.isWeekly)) {
+  if (shouldSkipForIdempotency(outDir, config.isWeekly, altProduct ? [altProduct] : [])) {
     log(`${stamp} SKIP: ${outDir} 产物齐全，跳过本日 run（幂等）`);
     return 0;
   }
@@ -527,7 +530,7 @@ async function main() {
   const elapsedS = Math.round((Date.now() - startMs) / 1000);
 
   // ── 7d. Product self-check ────────────────────────────────────────────
-  const products = checkProducts(outDir, config.isWeekly);
+  const products = checkProducts(outDir, config.isWeekly, altProduct ? [altProduct] : []);
   const allOk = products.every((p) => p.ok);
   const productLines = products.map((p) => `${p.name}:${p.ok ? p.size + "B" : "MISSING"}`).join(", ");
 
@@ -535,12 +538,13 @@ async function main() {
   // 产物存在但低于健康下限 = 空壳出刊（11-04 型）：单板块自动重试一次，
   // 重试仍低则 rc=14 + toast，绝不让空壳顶着 rc=0 出刊。
   if (allOk && result.code === 0) {
-    const quality = qualityFailures(products, config.isWeekly);
+    const quality = qualityFailures(products, config.isWeekly, altProduct);
     if (quality.length) {
       log(`${stamp} QUALITY-FAIL ${quality.join(", ")}（空壳出刊）→ 单板块自动重试`);
       notify("DallyReport 日报空壳", `${date} ${quality.join("，")}，自动单板块重试`);
       for (const q of quality) {
-        const section = q.startsWith("AI") ? "ai" : "github";
+        const section = altProduct && q.startsWith(altProduct) ? "ai-alt"
+          : q.startsWith("AI") ? "ai" : "github";
         const prod = products.find((p) => q.startsWith(p.name));
         const retry = await spawnRunner(
           process.execPath,
@@ -552,8 +556,8 @@ async function main() {
         );
         log(`${stamp} QUALITY-RETRY section=${section} rc=${retry.code}`);
       }
-      const products2 = checkProducts(outDir, config.isWeekly);
-      const quality2 = qualityFailures(products2, config.isWeekly);
+      const products2 = checkProducts(outDir, config.isWeekly, altProduct ? [altProduct] : []);
+      const quality2 = qualityFailures(products2, config.isWeekly, altProduct);
       const lines2 = products2.map((p) => `${p.name}:${p.ok ? p.size + "B" : "MISSING"}`).join(", ");
       if (!quality2.length) {
         log(`${stamp} DONE rc=0 quality-recovered ${elapsedS}s products={${lines2}} writer=${probe.model}`);

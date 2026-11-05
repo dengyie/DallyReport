@@ -560,7 +560,10 @@ export function deepFetchBudgetMs(config = {}) {
     const explicit = Number(raw);
     if (Number.isFinite(explicit) && explicit >= 0) return explicit;
   }
-  return config?.reportMode === "weekly" ? 600000 : 300000;
+  // 2026-11-06 提额（11-05 生产实证）：300s 档在慢早晨只 enrich 到 4/40（预算是硬约束
+  // 而非网络），正文补全缺 36 项直接拉薄综合输入。日 480s / 周 900s；距离 resilient-run
+  // 的 1h 看门狗仍有充分余量。
+  return config?.reportMode === "weekly" ? 900000 : 480000;
 }
 
 /**

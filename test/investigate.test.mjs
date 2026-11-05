@@ -832,7 +832,7 @@ test("fillBareBullets: a glued multi-line bullet is not treated as bare", async 
 // cited source's own materially longer excerpt, and never drops.
 test("fillThinBullets: a floor-hugging body is replaced by the cited source's longer excerpt", async () => {
   const sources = [
-    { url: "https://example.com/a", title: "Qwen 发布新一代开源模型", snippet: "阿里巴巴通义千问团队发布了新一代开源模型，上下文窗口扩展至 100 万 token，并首次支持原生多模态输入，推理成本较上一代下降约四成。该模型已在 Hugging Face 上开放权重下载，社区评测显示其在代码与数学任务上进步明显。" },
+    { url: "https://example.com/a", title: "Qwen 发布新一代开源模型", snippet: "阿里巴巴通义千问团队发布了新一代开源模型，上下文窗口扩展至 100 万 token，并首次支持原生多模态输入，推理成本较上一代下降约四成。该模型已在 Hugging Face 上开放权重下载，社区评测显示其在代码与数学任务上进步明显，长上下文检索准确率也有提升，同时开放了 0.5B/1.8B 两个蒸馏小模型的权重供端侧部署测试。" },
   ];
   const markdown = "* **Qwen 发布新一代开源模型**：模型已发布并开放下载 [1]";
   const out = await fillThinBullets(markdown, { sources });
