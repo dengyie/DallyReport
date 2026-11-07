@@ -11,6 +11,15 @@
 // the bullet is "bare" (title-only). Everything else has a body, and its length
 // is the character count of that remainder.
 //
+// 2026-11-07: the tool also learned the ai-daily product format. Its entries are
+// paragraph-shaped (`**headline**` on its own line, body paragraph after,
+// `*可信度：…*` to close) and it carries a `数据概览` stats list whose
+// `- **板块**：3 claims / 3 sources` bullets matched the main-system bullet
+// regex as ten "bare titles" — a systematic false FAIL. Files declaring
+// `generator: ai-daily` (or carrying 可信度 markers) are measured by
+// measureAiDaily(): entries = non-bullet bold-headline blocks, body = the
+// paragraph between headline and 可信度; apparatus bullets never count.
+//
 // Run:
 //   node scripts/report-thinness.mjs <file.md> [more.md ...]
 //   node scripts/report-thinness.mjs --dir "<vault>/Note/AI/DallyReport/2026-10-18"
@@ -22,9 +31,57 @@ const ANY_BULLET = /^\s*[*+-]\s+\*\*(.+?)\*\*\s*([\s\S]*)$/;
 const CJK = /[\u4e00-\u9fff]/;
 const CITE = /\[\d+(?:\s*,\s*\d+)*\]/g;
 const REF_HEADING = /^#{1,6}\s*(参考来源|参考资料|参考文献|来源列表)/;
+const AI_DAILY_GENERATOR = /^generator:\s*ai-daily\s*$/m;
+const AI_DAILY_ENTRY = /^\*\*(.+?)\*\*\s*(.*)$/;
+const AI_DAILY_CONF = /^\s*\*可信度/;
+const AI_DAILY_HEADING = /^#{1,6}\s/;
 
 const BARE_BAR = 0.15;
 const BODY_BAR = 120;
+
+export function isAiDaily(markdown) {
+  return AI_DAILY_GENERATOR.test(String(markdown || "")) || /\*可信度/.test(String(markdown || ""));
+}
+
+// ai-daily 条目计分：`**headline**` 独立行开块，正文取 headline 之后到
+// `*可信度` / 标题 / 下一块之间的段行。统计行是 `- ` 开头的 bullet，天然不命中。
+export function measureAiDaily(markdown) {
+  const lines = String(markdown || "").split("\n");
+  let entries = 0;
+  let bare = 0;
+  let bodyBullets = 0;
+  let bodyChars = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(AI_DAILY_ENTRY);
+    if (!m) continue;
+    entries += 1;
+    const parts = [];
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      if (AI_DAILY_CONF.test(line) || AI_DAILY_HEADING.test(line) || AI_DAILY_ENTRY.test(line)) break;
+      if (line.trim()) parts.push(line.trim());
+    }
+    const body = parts
+      .join(" ")
+      .replace(CITE, " ")
+      .replace(/\*\[[^\]]*\]\*/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!body || !CJK.test(body)) {
+      bare += 1;
+      continue;
+    }
+    bodyBullets += 1;
+    bodyChars += body.length;
+  }
+  return {
+    bullets: entries,
+    bare,
+    ratio: entries ? bare / entries : 0,
+    bodyBullets,
+    meanBody: bodyBullets ? bodyChars / bodyBullets : 0,
+  };
+}
 
 export function measure(markdown) {
   let bullets = 0;
@@ -104,8 +161,15 @@ if (isMain) {
   let unreadable = 0;
   for (const f of files.sort()) {
     let r;
+    let kind = "";
     try {
-      r = measure(fs.readFileSync(f, "utf8"));
+      const md = fs.readFileSync(f, "utf8");
+      if (isAiDaily(md)) {
+        kind = " [ai-daily]";
+        r = measureAiDaily(md);
+      } else {
+        r = measure(md);
+      }
     } catch (err) {
       // An unreadable file must fail the run (rc 1), never pass silently: this
       // tool is the §9.5 acceptance gate, and a mistyped path "passing" with
@@ -123,7 +187,7 @@ if (isMain) {
     if (v === "FAIL") worst = "FAIL";
     console.log(
       `${path.basename(f).padEnd(29)} ${String(r.bullets).padStart(7)} ${String(r.bare).padStart(5)} ` +
-        `${pct(r.ratio).padStart(7)} ${r.meanBody.toFixed(0).padStart(9)}  ${v}`,
+        `${pct(r.ratio).padStart(7)} ${r.meanBody.toFixed(0).padStart(9)}  ${v}${kind}`,
     );
   }
   process.exit(worst === "PASS" && !unreadable ? 0 : 1);
