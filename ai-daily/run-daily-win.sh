@@ -30,7 +30,9 @@ if curl -s --max-time 1 http://127.0.0.1:7897 >/dev/null 2>&1; then
   export http_proxy="http://127.0.0.1:7897"
   export https_proxy="http://127.0.0.1:7897"
   export all_proxy="socks5://127.0.0.1:7897"
-  export no_proxy="localhost,127.0.0.1,::1"
+  # 11-07: 网关直连地址（GATEWAY_DIRECT_URL=tebi new-api）必须绕过 clash——
+  # 不依赖用户 clash 规则对私网段的处理；web/CDP 流量仍走代理不变。
+  export no_proxy="localhost,127.0.0.1,::1,10.144.144.32"
 fi
 
 mkdir -p "$LOGDIR"
@@ -104,7 +106,9 @@ probe_gateway() {
   local out
   # 10-04 上午实证：网关源站抖动时 CLI 请求可能被 hold 12 分钟+（SDK 自身超时 3000s），
   # 探针必须自带墙钟上限——挂起快速失败（rc=124 → out 空 → 判 FAIL），否则 PROBE_RETRY=3 每档烧 30+ 分钟。
-  out="$(timeout 120 claude -p "Read the file ${REPO_AI}/scripts/ai-daily/test/run-daily-shim.test.mjs. Reply with exactly the GATEWAY-TOOL-PROBE-SENTINEL token from that file. Do not run any skill or workflow." --model "$model" --dangerously-skip-permissions 2>&1 || true)"
+  # 11-07: 探针必须与 launch 同路由——CLAUDE_SETTINGS_FLAG（直连/CF）在此一并生效，
+  # 否则会出现「探针走 A 路由放行、launch 走 B 路由送死」的路由错位。
+  out="$(timeout 120 claude -p "Read the file ${REPO_AI}/scripts/ai-daily/test/run-daily-shim.test.mjs. Reply with exactly the GATEWAY-TOOL-PROBE-SENTINEL token from that file. Do not run any skill or workflow." --model "$model" --dangerously-skip-permissions ${CLAUDE_SETTINGS_FLAG[@]+"${CLAUDE_SETTINGS_FLAG[@]}"} 2>&1 || true)"
   [[ "$out" != *"API Error"* ]] || return 1
   [[ "$out" != *"unapproved channel"* ]] || return 1
   [[ "$out" != *"11128"* ]] || return 1
@@ -161,6 +165,29 @@ fi
     echo "LINUXDO-PREFETCH-FAIL exit=$PREFETCH_RC → 落盘 ok:false（realm 不裸抓 CDP，linux.do 走降级）"
   fi
 
+  # 11-07 墙钟根因：api.mangoqwq.com 前面是 Cloudflare，代理读超时 120s 硬掐长 agentic
+  # 请求（11-05/06/07 晨间各 1~3 次 504/524：阶梯能兜住出刊，但墙钟 68~209min 远超 30m
+  # 软目标，11-05 甚至降级拼合）。mesh 直连 tebi new-api(:3000) 无 CF 层——curl 200 与
+  # claude CLI 实证（OK-DIRECT-GATEWAY）均过。路由策略：直连 curl 可达 → 再做一次 CLI 级
+  # 真探针复核，两者都过才切换（--settings 进程级覆盖 ANTHROPIC_BASE_URL，不动全局
+  # settings.json，交互会话不受影响；仅 API 基址变更，web/CDP 流量不受影响）；任一步
+  # 失败回退 CF 域名原路径。残余风险（明示接受）：run 中途 EasyTier 断 → 当日失败+toast，
+  # 次日幂等重试；tebi 本体宕机时 CF 域名同样死（同源），无路由多样性损失。
+  GATEWAY_DIRECT_URL="http://10.144.144.32:3000"
+  CLAUDE_SETTINGS_FLAG=()
+  GW_CODE="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 4 --max-time 6 "$GATEWAY_DIRECT_URL/api/status" 2>/dev/null)"
+  if [ "$GW_CODE" = "200" ]; then
+    CLAUDE_SETTINGS_FLAG=(--settings "{\"env\":{\"ANTHROPIC_BASE_URL\":\"$GATEWAY_DIRECT_URL\"}}")
+    if probe_gateway "${ORCH_LADDER[0]}"; then
+      echo "GATEWAY-ROUTE direct=$GATEWAY_DIRECT_URL（curl+CLI 双探针通过，绕开 CF 120s 代理读超时）"
+    else
+      CLAUDE_SETTINGS_FLAG=()
+      echo "GATEWAY-ROUTE cf-domain（直连 curl 通但 CLI 探针失败，回退 api.mangoqwq.com）"
+    fi
+  else
+    echo "GATEWAY-ROUTE cf-domain（直连 curl code=$GW_CODE，沿用 api.mangoqwq.com）"
+  fi
+
   # 9/13 编排器阶梯：DeepSeek 先打（CPA 别名抽签，同档连打几次），不行再 grok/opus/gemini。
   # 每档先工具类探针，探针失败不空拉本档、换下一档。快死（<10min 无产物）才同档重试；
   # 跑满 10min+ 仍无产物属 workflow 深处失败，不盲目重拉也不再爬级。
@@ -187,7 +214,7 @@ fi
     for TRY in $(seq 1 "$TRIES"); do
       ATTEMPT=$((ATTEMPT + 1))
       LAUNCH_T0="$(date '+%s')"
-      LAUNCH_OUT="$(claude -p "【执行纪律，优先级最高】收到指令后第一步就必须真实调用 Workflow 工具运行 ai-daily；严禁用文字叙述、想象或假装执行来代替真实工具调用；Workflow 返回 payloads 之前不得声称「生成成功」或「已写入」；Workflow 调用若报错，原样输出错误文本并立即结束。以下是任务：运行 ai-daily skill，生成今天的 AI 日报。调用 Workflow 时 args 必须包含 window:{\"from\":\"$WFROM\",\"to\":\"$WTODAY\"}（这两个日期是宿主算好的字面量，原样传入，不要自己重新计算）。同时请带上 {\"linuxdoCdpHost\":\"127.0.0.1:9222\",\"linuxdoMaxSources\":12,\"webFetchViaCdp\":true}（复用 9222 登录态 Chrome 抓 linux.do 与 fetch 正文；论坛配额 12 与模板默认一致——mint 直铸不占 fetch 配额，供「社区热度」叙事仍有得选）。linuxdoPrefetched 已预抓到文件 $PREFETCH_JSON：请 Read 该文件，把解析后的 JSON 对象作为 args.linuxdoPrefetched 传入（成功为 ok:true + posts；失败为 ok:false + reason）。跨天去重账本 $LEDGER：若该文件存在，请 Read 并把解析后的 JSON 数组作为 args.reportedLedger 传入（不存在则不传该参数，不要视为错误）。不要把任何文件内容贴进本指令或 shell。最后简述头条与覆盖结果。" --model "$MODEL" --dangerously-skip-permissions 2>&1)"
+      LAUNCH_OUT="$(claude -p "【执行纪律，优先级最高】收到指令后第一步就必须真实调用 Workflow 工具运行 ai-daily；严禁用文字叙述、想象或假装执行来代替真实工具调用；Workflow 返回 payloads 之前不得声称「生成成功」或「已写入」；Workflow 调用若报错，原样输出错误文本并立即结束。以下是任务：运行 ai-daily skill，生成今天的 AI 日报。调用 Workflow 时 args 必须包含 window:{\"from\":\"$WFROM\",\"to\":\"$WTODAY\"}（这两个日期是宿主算好的字面量，原样传入，不要自己重新计算）。同时请带上 {\"linuxdoCdpHost\":\"127.0.0.1:9222\",\"linuxdoMaxSources\":12,\"webFetchViaCdp\":true}（复用 9222 登录态 Chrome 抓 linux.do 与 fetch 正文；论坛配额 12 与模板默认一致——mint 直铸不占 fetch 配额，供「社区热度」叙事仍有得选）。linuxdoPrefetched 已预抓到文件 $PREFETCH_JSON：请 Read 该文件，把解析后的 JSON 对象作为 args.linuxdoPrefetched 传入（成功为 ok:true + posts；失败为 ok:false + reason）。跨天去重账本 $LEDGER：若该文件存在，请 Read 并把解析后的 JSON 数组作为 args.reportedLedger 传入（不存在则不传该参数，不要视为错误）。不要把任何文件内容贴进本指令或 shell。最后简述头条与覆盖结果。" --model "$MODEL" --dangerously-skip-permissions ${CLAUDE_SETTINGS_FLAG[@]+"${CLAUDE_SETTINGS_FLAG[@]}"} 2>&1)"
       RC=$?
       printf '%s\n' "$LAUNCH_OUT"
       LAUNCH_SECS=$(( $(date '+%s') - LAUNCH_T0 ))
