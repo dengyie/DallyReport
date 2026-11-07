@@ -12,7 +12,9 @@ curl -s --max-time 1 http://127.0.0.1:7897 >nul 2>&1
 if %errorlevel%==0 (
   set "http_proxy=http://127.0.0.1:7897"
   set "https_proxy=http://127.0.0.1:7897"
-  set "NO_PROXY=localhost,127.0.0.1,::1"
+  rem 2026-11-07: GROK_API_URL 已切 mesh 直连（10.144.144.32 = tebi new-api），
+  rem 必须绕过 clash——不依赖用户 clash 规则对私网段的处理。
+  set "NO_PROXY=localhost,127.0.0.1,::1,10.144.144.32"
   set "NODE_USE_ENV_PROXY=1"
 )
 "C:\Program Files\nodejs\node.exe" src\resilient-run.mjs

@@ -165,27 +165,24 @@ fi
     echo "LINUXDO-PREFETCH-FAIL exit=$PREFETCH_RC → 落盘 ok:false（realm 不裸抓 CDP，linux.do 走降级）"
   fi
 
-  # 11-07 墙钟根因：api.mangoqwq.com 前面是 Cloudflare，代理读超时 120s 硬掐长 agentic
-  # 请求（11-05/06/07 晨间各 1~3 次 504/524：阶梯能兜住出刊，但墙钟 68~209min 远超 30m
-  # 软目标，11-05 甚至降级拼合）。mesh 直连 tebi new-api(:3000) 无 CF 层——curl 200 与
-  # claude CLI 实证（OK-DIRECT-GATEWAY）均过。路由策略：直连 curl 可达 → 再做一次 CLI 级
-  # 真探针复核，两者都过才切换（--settings 进程级覆盖 ANTHROPIC_BASE_URL，不动全局
-  # settings.json，交互会话不受影响；仅 API 基址变更，web/CDP 流量不受影响）；任一步
-  # 失败回退 CF 域名原路径。残余风险（明示接受）：run 中途 EasyTier 断 → 当日失败+toast，
-  # 次日幂等重试；tebi 本体宕机时 CF 域名同样死（同源），无路由多样性损失。
+  # 11-07 墙钟根因 + 用户路由指令：模型请求一律 EasyTier mesh 直连网关
+  # （tebi new-api :3000，无 CF 层）——api.mangoqwq.com 的 Cloudflare 代理读超时
+  # 120s 曾硬掐长 agentic 请求（11-05/06/07 晨间各 1~3 次 504/524，墙钟 68~209min）。
+  # 路由决策：curl /api/status 200 → probe_gateway CLI 级真探针复核（同 ORCH_LADDER[0]
+  # 同路由）→ 双过走直连（--settings 进程级覆盖 ANTHROPIC_BASE_URL）；任一步失败
+  # **显式覆盖回 CF 域名**（全局 settings.json 现默认直连——清空 flag 会带病继承，
+  # 必须反向覆盖才构成真回退）。探针与 launch 永远同路由。web/CDP 流量不受影响。
+  # 残余风险（明示接受）：run 中途 EasyTier 断 → 当日失败+toast，次日幂等重试。
   GATEWAY_DIRECT_URL="http://10.144.144.32:3000"
+  GATEWAY_CF_URL="https://api.mangoqwq.com"
   CLAUDE_SETTINGS_FLAG=()
   GW_CODE="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 4 --max-time 6 "$GATEWAY_DIRECT_URL/api/status" 2>/dev/null)"
-  if [ "$GW_CODE" = "200" ]; then
+  if [ "$GW_CODE" = "200" ] && probe_gateway "${ORCH_LADDER[0]}"; then
     CLAUDE_SETTINGS_FLAG=(--settings "{\"env\":{\"ANTHROPIC_BASE_URL\":\"$GATEWAY_DIRECT_URL\"}}")
-    if probe_gateway "${ORCH_LADDER[0]}"; then
-      echo "GATEWAY-ROUTE direct=$GATEWAY_DIRECT_URL（curl+CLI 双探针通过，绕开 CF 120s 代理读超时）"
-    else
-      CLAUDE_SETTINGS_FLAG=()
-      echo "GATEWAY-ROUTE cf-domain（直连 curl 通但 CLI 探针失败，回退 api.mangoqwq.com）"
-    fi
+    echo "GATEWAY-ROUTE direct=$GATEWAY_DIRECT_URL（curl+CLI 双探针通过，EasyTier 直连）"
   else
-    echo "GATEWAY-ROUTE cf-domain（直连 curl code=$GW_CODE，沿用 api.mangoqwq.com）"
+    CLAUDE_SETTINGS_FLAG=(--settings "{\"env\":{\"ANTHROPIC_BASE_URL\":\"$GATEWAY_CF_URL\"}}")
+    echo "GATEWAY-ROUTE cf-fallback=$GATEWAY_CF_URL（直连 curl code=${GW_CODE:-n/a} 或 CLI 探针失败，显式回退 CF 域名）"
   fi
 
   # 9/13 编排器阶梯：DeepSeek 先打（CPA 别名抽签，同档连打几次），不行再 grok/opus/gemini。
