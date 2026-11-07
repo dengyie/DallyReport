@@ -1,6 +1,64 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { tmpDirSync } from "./helpers/tmp.mjs";
 import { measure, measureAiDaily, isAiDaily } from "../scripts/report-thinness.mjs";
+
+const CLI = fileURLToPath(new URL("../scripts/report-thinness.mjs", import.meta.url));
+
+function withTempFiles(files, fn) {
+  // 卫生门禁（test/tmp-hygiene.test.mjs）：scratch 目录必须走 helper，进程退出统一清理。
+  const dir = tmpDirSync("thinness-cli-");
+  const paths = {};
+  for (const [name, content] of Object.entries(files)) {
+    paths[name] = path.join(dir, name);
+    fs.writeFileSync(paths[name], content);
+  }
+  return fn(paths, dir);
+}
+
+const LONG = "这是一个足够长的正文段落，包含中文与细节描述，用来越过一百二十字的验收线。补充背景：该模型在多项基准上取得领先，发布方同时公开了评测脚本与权重，社区第三方已开始复现其关键数字，预计会影响后续同类工作的对比口径。发布方还表示后续将按季度更新权重并开放更完整的评测套件。";
+
+test("CLI e2e: PASS file exits 0 and prints PASS", () => {
+  withTempFiles({ "pass.md": `* **模型A发布**：${LONG} [1]\n` }, ({ "pass.md": p }) => {
+    const r = spawnSync(process.execPath, [CLI, p], { encoding: "utf8" });
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /PASS/);
+  });
+});
+
+test("CLI e2e: FAIL file (bare title) exits 1", () => {
+  withTempFiles({ "fail.md": "* **裸标题B** [2]\n" }, ({ "fail.md": p }) => {
+    const r = spawnSync(process.execPath, [CLI, p], { encoding: "utf8" });
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /FAIL/);
+  });
+});
+
+test("CLI e2e: unreadable path exits 1 and never passes silently", () => {
+  const r = spawnSync(process.execPath, [CLI, path.join(os.tmpdir(), "thinness-no-such-file.md")], { encoding: "utf8" });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /unreadable/);
+});
+
+test("CLI e2e: ai-daily file routes to paragraph classifier and prints marker", () => {
+  const md = ["---", "generator: ai-daily", "---", "### 板块", "", `**条目一** \`已核查 2-0\``, "", `${LONG} [1]`, "", "*可信度：中*"].join("\n");
+  withTempFiles({ "daily.md": md }, ({ "daily.md": p }) => {
+    const r = spawnSync(process.execPath, [CLI, p], { encoding: "utf8" });
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /\[ai-daily\]/);
+    assert.match(r.stdout, /PASS/);
+  });
+});
+
+test("CLI e2e: usage error exits 2", () => {
+  const r = spawnSync(process.execPath, [CLI], { encoding: "utf8" });
+  assert.equal(r.status, 2);
+});
 
 test("main-system format: bodies count, bare titles counted as bare", () => {
   const md = [

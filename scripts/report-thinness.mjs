@@ -34,13 +34,15 @@ const REF_HEADING = /^#{1,6}\s*(参考来源|参考资料|参考文献|来源列
 const AI_DAILY_GENERATOR = /^generator:\s*ai-daily\s*$/m;
 const AI_DAILY_ENTRY = /^\*\*(.+?)\*\*\s*(.*)$/;
 const AI_DAILY_CONF = /^\s*\*可信度/;
+const AI_DAILY_CONF_ANY = /\*可信度/;
 const AI_DAILY_HEADING = /^#{1,6}\s/;
 
 const BARE_BAR = 0.15;
 const BODY_BAR = 120;
 
 export function isAiDaily(markdown) {
-  return AI_DAILY_GENERATOR.test(String(markdown || "")) || /\*可信度/.test(String(markdown || ""));
+  const md = String(markdown || "");
+  return AI_DAILY_GENERATOR.test(md) || AI_DAILY_CONF_ANY.test(md);
 }
 
 // ai-daily 条目计分：`**headline**` 独立行开块，正文取 headline 之后到
