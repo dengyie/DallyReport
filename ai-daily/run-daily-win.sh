@@ -177,12 +177,20 @@ fi
   GATEWAY_CF_URL="https://api.mangoqwq.com"
   CLAUDE_SETTINGS_FLAG=()
   GW_CODE="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 4 --max-time 6 "$GATEWAY_DIRECT_URL/api/status" 2>/dev/null)"
-  if [ "$GW_CODE" = "200" ] && probe_gateway "${ORCH_LADDER[0]}"; then
+  if [ "$GW_CODE" = "200" ]; then
+    # 纪律：先挂直连 flag 再探针——probe_gateway 必须与即将 launch 的路由同路由；
+    # 8fb6982 首版把 probe 放在赋值前（空 flag 探的是 settings.json 继承路由），
+    # 回滚场景（settings=CF）下会「探针放行 CF、launch 裸奔直连」，烟测复查抓出。
     CLAUDE_SETTINGS_FLAG=(--settings "{\"env\":{\"ANTHROPIC_BASE_URL\":\"$GATEWAY_DIRECT_URL\"}}")
-    echo "GATEWAY-ROUTE direct=$GATEWAY_DIRECT_URL（curl+CLI 双探针通过，EasyTier 直连）"
+    if probe_gateway "${ORCH_LADDER[0]}"; then
+      echo "GATEWAY-ROUTE direct=$GATEWAY_DIRECT_URL（curl+CLI 双探针通过，EasyTier 直连）"
+    else
+      CLAUDE_SETTINGS_FLAG=(--settings "{\"env\":{\"ANTHROPIC_BASE_URL\":\"$GATEWAY_CF_URL\"}}")
+      echo "GATEWAY-ROUTE cf-fallback=$GATEWAY_CF_URL（直连 curl 通但 CLI 探针失败，显式回退 CF 域名）"
+    fi
   else
     CLAUDE_SETTINGS_FLAG=(--settings "{\"env\":{\"ANTHROPIC_BASE_URL\":\"$GATEWAY_CF_URL\"}}")
-    echo "GATEWAY-ROUTE cf-fallback=$GATEWAY_CF_URL（直连 curl code=${GW_CODE:-n/a} 或 CLI 探针失败，显式回退 CF 域名）"
+    echo "GATEWAY-ROUTE cf-fallback=$GATEWAY_CF_URL（直连 curl code=${GW_CODE:-n/a}，显式回退 CF 域名）"
   fi
 
   # 9/13 编排器阶梯：DeepSeek 先打（CPA 别名抽签，同档连打几次），不行再 grok/opus/gemini。
