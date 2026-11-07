@@ -46,7 +46,9 @@ export function isAiDaily(markdown) {
 // ai-daily 条目计分：`**headline**` 独立行开块，正文取 headline 之后到
 // `*可信度` / 标题 / 下一块之间的段行。统计行是 `- ` 开头的 bullet，天然不命中。
 export function measureAiDaily(markdown) {
-  const lines = String(markdown || "").split("\n");
+  // 统一 CRLF → LF：AI_DAILY_ENTRY 的 (.*)$ 无 m 标志，行尾 \r 会让整条
+  // headline 不匹配、静默测出 0 条目（n/a 假 PASS）。2026-11-07 review 探针实测。
+  const lines = String(markdown || "").replace(/\r\n?/g, "\n").split("\n");
   let entries = 0;
   let bare = 0;
   let bodyBullets = 0;
